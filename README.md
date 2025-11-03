@@ -19,7 +19,8 @@
 
 ## Features
 - **Multi-vendor GPU support**: Auto-detects NVIDIA NVENC, Intel QSV, AMD VAAPI, or falls back to CPU
-- **Encoder availability validation**: Automatically falls back to CPU if hardware encoder unavailable
+- **Robust encoder validation**: Tests actual encoder initialization, not just availability listing
+- **Automatic CPU fallback**: Gracefully handles missing drivers, permission issues, or hardware access problems
 - Drag‑and‑drop UI with helpful presets and advanced options (codec, container, tune, audio bitrate)
 - **Configurable codec visibility**: Enable/disable specific codecs in Settings page
 - **Resolution control**: Set max width/height while maintaining aspect ratio
@@ -146,6 +147,7 @@ Performance tips
 The system validates encoder availability at runtime and automatically falls back to CPU if hardware isn't available. You'll see log messages like:
 - "Using encoder: h264_vaapi (requested: h264_vaapi)" - Hardware working
 - "Warning: h264_vaapi not available, falling back to CPU (libx264)" - CPU fallback
+- "Warning: hevc_nvenc failed initialization test (driver/library issue), falling back to CPU" - Hardware listed but can't initialize
 
 ## Installation
 
@@ -410,7 +412,22 @@ docker compose up -d
 - CPU encoding works but is slower - consider enabling fewer codecs or using faster presets
 
 #### NVENC "Operation not permitted" Error
-This error occurs when NVENC encoder fails to initialize. Common causes:
+This error occurs when NVENC encoder fails to initialize. **The system now automatically detects this and falls back to CPU**, but if you want GPU acceleration:
+
+**Common causes:**
+1. **Driver mismatch**: Host and container NVIDIA driver versions don't match
+2. **Missing NVIDIA Container Toolkit**: Docker can't access GPU
+3. **Insufficient permissions**: Container can't access encoder
+
+**Quick Fix (Automatic):**
+The system will detect the initialization failure and automatically use CPU encoding. You'll see:
+```
+Warning: hevc_nvenc failed initialization test (driver/library issue), falling back to CPU
+Using encoder: libx265 (requested: hevc_nvenc)
+```
+Your video will still compress, just using CPU instead of GPU.
+
+**To Enable GPU (Optional):**
 1. **Driver mismatch**: Host and container NVIDIA driver versions don't match
    - Check host: `nvidia-smi`
    - Check container: `docker exec 8mblocal nvidia-smi`

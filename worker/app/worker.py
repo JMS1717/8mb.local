@@ -51,7 +51,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Map requested codec to actual encoder and flags
     actual_encoder, v_flags, init_hw_flags = map_codec_to_hw(video_codec, hw_info)
     
-    # Validate encoder is available
+    # Validate encoder is available and can be initialized
     def is_encoder_available(encoder_name: str) -> bool:
         """Check if encoder is available in ffmpeg."""
         try:
@@ -65,10 +65,58 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         except Exception:
             return False
     
-    # Fallback to CPU if hardware encoder not available
+    def test_encoder_init(encoder_name: str, hw_flags: list) -> bool:
+        """Test if encoder can actually be initialized (not just listed)."""
+        try:
+            # Try to initialize encoder with a minimal command
+            # This will fail fast if the hardware isn't accessible
+            cmd = ["ffmpeg", "-hide_banner"]
+            cmd.extend(hw_flags)  # Hardware init flags
+            cmd.extend([
+                "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1",
+                "-c:v", encoder_name,
+                "-f", "null", "-"
+            ])
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            # Check for specific NVENC errors that indicate driver/library issues
+            stderr_lower = result.stderr.lower()
+            if "operation not permitted" in stderr_lower:
+                return False
+            if "could not open encoder" in stderr_lower:
+                return False
+            if "no device found" in stderr_lower:
+                return False
+            if "failed to set value" in stderr_lower and "init_hw_device" in stderr_lower:
+                return False
+            # Return code 0 means success, but also accept non-zero if it's just format issues
+            # The key is it didn't fail with driver/permission errors
+            return "operation not permitted" not in stderr_lower and "could not open encoder" not in stderr_lower
+        except Exception:
+            return False
+    
+    # Fallback to CPU if hardware encoder not available or can't initialize
     if actual_encoder not in ("libx264", "libx265", "libaom-av1"):
         if not is_encoder_available(actual_encoder):
             _publish(self.request.id, {"type": "log", "message": f"Warning: {actual_encoder} not available, falling back to CPU"})
+            
+            # Determine CPU fallback based on codec type
+            if "h264" in actual_encoder:
+                actual_encoder = "libx264"
+                v_flags = ["-pix_fmt", "yuv420p", "-profile:v", "high"]
+            elif "hevc" in actual_encoder or "h265" in actual_encoder:
+                actual_encoder = "libx265"
+                v_flags = ["-pix_fmt", "yuv420p"]
+            else:  # AV1
+                actual_encoder = "libaom-av1"
+                v_flags = ["-pix_fmt", "yuv420p"]
+            init_hw_flags = []
+        elif not test_encoder_init(actual_encoder, init_hw_flags):
+            _publish(self.request.id, {"type": "log", "message": f"Warning: {actual_encoder} failed initialization test (driver/library issue), falling back to CPU"})
             
             # Determine CPU fallback based on codec type
             if "h264" in actual_encoder:
