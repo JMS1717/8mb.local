@@ -17,7 +17,7 @@ from redis.asyncio import Redis
 from .auth import basic_auth
 from .config import settings
 from .celery_app import celery_app
-from .models import UploadResponse, CompressRequest, StatusResponse, AuthSettings, AuthSettingsUpdate, PasswordChange
+from .models import UploadResponse, CompressRequest, StatusResponse, AuthSettings, AuthSettingsUpdate, PasswordChange, DefaultPresets
 from .cleanup import start_scheduler
 from . import settings_manager
 
@@ -235,6 +235,37 @@ async def change_password(
             auth_pass=password_change.new_password
         )
         return {"status": "success", "message": "Password changed successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/settings/presets")
+async def get_default_presets():
+    """Get default preset values (no auth required for loading defaults)"""
+    try:
+        presets = settings_manager.get_default_presets()
+        return presets
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/settings/presets")
+async def update_default_presets(
+    presets: DefaultPresets,
+    _auth=Depends(basic_auth)  # Require auth to change defaults
+):
+    """Update default preset values"""
+    try:
+        settings_manager.update_default_presets(
+            target_mb=presets.target_mb,
+            video_codec=presets.video_codec,
+            audio_codec=presets.audio_codec,
+            preset=presets.preset,
+            audio_kbps=presets.audio_kbps,
+            container=presets.container,
+            tune=presets.tune
+        )
+        return {"status": "success", "message": "Default presets updated successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -96,3 +96,50 @@ def initialize_env_if_missing():
             'BACKEND_PORT': '8000'
         }
         write_env_file(default_env)
+
+
+def get_default_presets() -> dict:
+    """Get default preset values"""
+    env_vars = read_env_file()
+    
+    return {
+        'target_mb': int(os.getenv('DEFAULT_TARGET_MB', env_vars.get('DEFAULT_TARGET_MB', '25'))),
+        'video_codec': os.getenv('DEFAULT_VIDEO_CODEC', env_vars.get('DEFAULT_VIDEO_CODEC', 'av1_nvenc')),
+        'audio_codec': os.getenv('DEFAULT_AUDIO_CODEC', env_vars.get('DEFAULT_AUDIO_CODEC', 'libopus')),
+        'preset': os.getenv('DEFAULT_PRESET', env_vars.get('DEFAULT_PRESET', 'p6')),
+        'audio_kbps': int(os.getenv('DEFAULT_AUDIO_KBPS', env_vars.get('DEFAULT_AUDIO_KBPS', '128'))),
+        'container': os.getenv('DEFAULT_CONTAINER', env_vars.get('DEFAULT_CONTAINER', 'mp4')),
+        'tune': os.getenv('DEFAULT_TUNE', env_vars.get('DEFAULT_TUNE', 'hq'))
+    }
+
+
+def update_default_presets(
+    target_mb: int,
+    video_codec: str,
+    audio_codec: str,
+    preset: str,
+    audio_kbps: int,
+    container: str,
+    tune: str
+):
+    """Update default preset values in .env file"""
+    env_vars = read_env_file()
+    
+    env_vars['DEFAULT_TARGET_MB'] = str(target_mb)
+    env_vars['DEFAULT_VIDEO_CODEC'] = video_codec
+    env_vars['DEFAULT_AUDIO_CODEC'] = audio_codec
+    env_vars['DEFAULT_PRESET'] = preset
+    env_vars['DEFAULT_AUDIO_KBPS'] = str(audio_kbps)
+    env_vars['DEFAULT_CONTAINER'] = container
+    env_vars['DEFAULT_TUNE'] = tune
+    
+    write_env_file(env_vars)
+    
+    # Update environment variables for current process
+    os.environ['DEFAULT_TARGET_MB'] = str(target_mb)
+    os.environ['DEFAULT_VIDEO_CODEC'] = video_codec
+    os.environ['DEFAULT_AUDIO_CODEC'] = audio_codec
+    os.environ['DEFAULT_PRESET'] = preset
+    os.environ['DEFAULT_AUDIO_KBPS'] = str(audio_kbps)
+    os.environ['DEFAULT_CONTAINER'] = container
+    os.environ['DEFAULT_TUNE'] = tune

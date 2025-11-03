@@ -1,5 +1,6 @@
 <script lang="ts">
   import '../app.css';
+  import { onMount } from 'svelte';
   import { upload, startCompress, openProgressStream, downloadUrl } from '$lib/api';
 
   let file: File | null = null;
@@ -37,6 +38,25 @@
   function toggleSupport(){ showSupport = !showSupport; }
   function closeSupport(){ showSupport = false; }
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeSupport(); };
+
+  // Load default presets on mount
+  onMount(async () => {
+    try {
+      const res = await fetch('/api/settings/presets');
+      if (res.ok) {
+        const presets = await res.json();
+        targetMB = presets.target_mb;
+        videoCodec = presets.video_codec;
+        audioCodec = presets.audio_codec;
+        preset = presets.preset;
+        audioKbps = presets.audio_kbps;
+        container = presets.container;
+        tune = presets.tune;
+      }
+    } catch (err) {
+      console.warn('Failed to load default presets, using hardcoded defaults');
+    }
+  });
 
   function formatSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;

@@ -51,3 +51,12 @@ class AuthSettingsUpdate(BaseModel):
 class PasswordChange(BaseModel):
     current_password: str
     new_password: str
+
+class DefaultPresets(BaseModel):
+    target_mb: int = 25
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc'] = 'av1_nvenc'
+    audio_codec: Literal['libopus','aac'] = 'libopus'
+    preset: Literal['p1','p2','p3','p4','p5','p6','p7'] = 'p6'
+    audio_kbps: Literal[64,96,128,160,192,256] = 128
+    container: Literal['mp4','mkv'] = 'mp4'
+    tune: Literal['hq','ll','ull','lossless'] = 'hq'
