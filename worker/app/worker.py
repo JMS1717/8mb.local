@@ -81,25 +81,54 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=10  # Increased timeout for slower systems
             )
-            # Check for specific NVENC errors that indicate driver/library issues
+            # Check for specific errors that indicate driver/library issues
             stderr_lower = result.stderr.lower()
+            
+            # Log the test result for debugging
+            if result.returncode != 0:
+                _publish(self.request.id, {"type": "log", "message": f"Encoder test for {encoder_name}: exit code {result.returncode}"})
+            
+            # These are definite failures - hardware not accessible
             if "operation not permitted" in stderr_lower:
+                _publish(self.request.id, {"type": "log", "message": f"Encoder test failed: Operation not permitted"})
                 return False
             if "could not open encoder" in stderr_lower:
+                _publish(self.request.id, {"type": "log", "message": f"Encoder test failed: Could not open encoder"})
                 return False
             if "no device found" in stderr_lower:
+                _publish(self.request.id, {"type": "log", "message": f"Encoder test failed: No device found"})
                 return False
             if "failed to set value" in stderr_lower and "init_hw_device" in stderr_lower:
+                _publish(self.request.id, {"type": "log", "message": f"Encoder test failed: Hardware device initialization failed"})
                 return False
-            # Return code 0 means success, but also accept non-zero if it's just format issues
-            # The key is it didn't fail with driver/permission errors
-            return "operation not permitted" not in stderr_lower and "could not open encoder" not in stderr_lower
-        except Exception:
+            if "cannot load" in stderr_lower and ".so" in stderr_lower:
+                _publish(self.request.id, {"type": "log", "message": f"Encoder test failed: Missing library ({result.stderr.split('Cannot load')[1].split()[0] if 'Cannot load' in result.stderr else 'unknown'})"})
+                return False
+            
+            # Success: either return code 0, or non-zero but without hardware access errors
+            # (some formats might cause non-zero but encoder itself initialized fine)
+            return True
+        except subprocess.TimeoutExpired:
+            _publish(self.request.id, {"type": "log", "message": f"Encoder test timeout (> 10s) - assuming encoder works"})
+            return True  # Timeout suggests it's working but slow, let it try
+        except Exception as e:
+            _publish(self.request.id, {"type": "log", "message": f"Encoder test exception: {str(e)}"})
             return False
     
     # Fallback to CPU if hardware encoder not available or can't initialize
+    # Skip initialization test for NVENC if NVIDIA toolkit is installed (check for nvidia-smi)
+    skip_test = False
+    if actual_encoder.endswith("_nvenc"):
+        try:
+            nvidia_check = subprocess.run(["nvidia-smi"], capture_output=True, timeout=2)
+            if nvidia_check.returncode == 0:
+                skip_test = True
+                _publish(self.request.id, {"type": "log", "message": "NVIDIA GPU detected via nvidia-smi, skipping encoder test"})
+        except Exception:
+            pass
+    
     if actual_encoder not in ("libx264", "libx265", "libaom-av1"):
         if not is_encoder_available(actual_encoder):
             _publish(self.request.id, {"type": "log", "message": f"Warning: {actual_encoder} not available, falling back to CPU"})
@@ -115,7 +144,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 actual_encoder = "libaom-av1"
                 v_flags = ["-pix_fmt", "yuv420p"]
             init_hw_flags = []
-        elif not test_encoder_init(actual_encoder, init_hw_flags):
+        elif not skip_test and not test_encoder_init(actual_encoder, init_hw_flags):
             _publish(self.request.id, {"type": "log", "message": f"Warning: {actual_encoder} failed initialization test (driver/library issue), falling back to CPU"})
             
             # Determine CPU fallback based on codec type
