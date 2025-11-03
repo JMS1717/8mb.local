@@ -17,8 +17,9 @@ from redis.asyncio import Redis
 from .auth import basic_auth
 from .config import settings
 from .celery_app import celery_app
-from .models import UploadResponse, CompressRequest, StatusResponse
+from .models import UploadResponse, CompressRequest, StatusResponse, AuthSettings, AuthSettingsUpdate, PasswordChange
 from .cleanup import start_scheduler
+from . import settings_manager
 
 UPLOADS_DIR = Path("/app/uploads")
 OUTPUTS_DIR = Path("/app/outputs")
@@ -192,8 +193,74 @@ async def get_hardware_info():
         }
 
 
+# Settings management endpoints
+@app.get("/api/settings/auth")
+async def get_auth_settings() -> AuthSettings:
+    """Get current authentication settings (no auth required to check status)"""
+    settings_data = settings_manager.get_auth_settings()
+    return AuthSettings(**settings_data)
+
+
+@app.put("/api/settings/auth")
+async def update_auth_settings(
+    settings_update: AuthSettingsUpdate,
+    _auth=Depends(basic_auth)  # Require auth to change settings
+):
+    """Update authentication settings"""
+    try:
+        settings_manager.update_auth_settings(
+            auth_enabled=settings_update.auth_enabled,
+            auth_user=settings_update.auth_user,
+            auth_pass=settings_update.auth_pass
+        )
+        return {"status": "success", "message": "Settings updated. Changes will take effect immediately."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/settings/password")
+async def change_password(
+    password_change: PasswordChange,
+    _auth=Depends(basic_auth)  # Require current auth
+):
+    """Change the admin password"""
+    # Verify current password
+    if not settings_manager.verify_password(password_change.current_password):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    
+    try:
+        # Update only the password
+        settings_manager.update_auth_settings(
+            auth_enabled=True,  # Keep enabled
+            auth_pass=password_change.new_password
+        )
+        return {"status": "success", "message": "Password changed successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Initialize .env file on startup if it doesn't exist
+@app.on_event("startup")
+async def startup_event():
+    settings_manager.initialize_env_if_missing()
+    # Start cleanup scheduler
+    start_scheduler()
+
+
 # Serve pre-built frontend (for unified container deployment)
 frontend_build = Path("/app/frontend-build")
 if frontend_build.exists():
-    # Mount static assets at root
-    app.mount("/", StaticFiles(directory=frontend_build, html=True), name="static-files")
+    # Serve static assets
+    app.mount("/_app", StaticFiles(directory=frontend_build / "_app"), name="static-assets")
+    
+    # SPA fallback: serve index.html for all other routes
+    from fastapi.responses import FileResponse
+    
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """Serve SPA - return index.html for all non-API routes"""
+        # If requesting a file with extension in _app, let static files handle it
+        if full_path.startswith("_app/"):
+            return FileResponse(frontend_build / full_path)
+        # For everything else, serve index.html (SPA routing)
+        return FileResponse(frontend_build / "index.html")

@@ -1,0 +1,1 @@
+import{b as c,h as _,a as o,E as d,r as b,H as E,s as T,c as p,d as f}from"./YSCrJKMk.js";import{B as y}from"./DwgJGhGo.js";function v(t,i,h=!1){_&&o();var e=new y(t),u=h?d:0;function n(a,r){if(_){const l=b(t)===E;if(a===l){var s=T();p(s),e.anchor=s,f(!1),e.ensure(a,r),f(!0);return}}e.ensure(a,r)}c(()=>{var a=!1;i((r,s=!0)=>{a=!0,n(s,r)}),a||n(!1,null)},u)}export{v as i};

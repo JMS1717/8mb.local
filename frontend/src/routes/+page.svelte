@@ -124,7 +124,12 @@
 </script>
 
 <div class="max-w-3xl mx-auto mt-8 space-y-6">
-  <h1 class="text-2xl font-bold">8mb.local</h1>
+  <div class="flex items-center justify-between mb-4">
+    <h1 class="text-2xl font-bold">8mb.local</h1>
+    <a href="/settings" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors text-sm">
+      ⚙️ Settings
+    </a>
+  </div>
 
   <div class="card">
     <div class="border-2 border-dashed border-gray-700 rounded p-8 text-center"

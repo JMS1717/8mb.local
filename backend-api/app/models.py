@@ -38,3 +38,16 @@ class ProgressEvent(BaseModel):
     message: Optional[str] = None
     stats: Optional[dict] = None
     download_url: Optional[str] = None
+
+class AuthSettings(BaseModel):
+    auth_enabled: bool
+    auth_user: Optional[str] = None
+
+class AuthSettingsUpdate(BaseModel):
+    auth_enabled: bool
+    auth_user: Optional[str] = None
+    auth_pass: Optional[str] = None  # Only include when changing password
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str

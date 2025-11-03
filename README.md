@@ -49,33 +49,33 @@ Data & files
 - `outputs/` – compressed results
 - The backend periodically deletes old files after `FILE_RETENTION_HOURS`.
 
-## Configuration (env)
-- `AUTH_ENABLED` (true|false)
-- `AUTH_USER`, `AUTH_PASS`
-- `FILE_RETENTION_HOURS` (default 1)
-- `REDIS_URL` (single container: `redis://127.0.0.1:6379/0`, multi-container: `redis://redis-broker:6379/0`)
-- `PUBLIC_BACKEND_URL` for the frontend (defaults to `http://localhost:8000`)
+## Configuration
 
-Example `.env` for single container (default):
+### Environment Variables
+- `AUTH_ENABLED` (true|false) - Enable/disable authentication (can be changed in Settings UI)
+- `AUTH_USER` - Username for authentication (default: admin)
+- `AUTH_PASS` - Password for authentication
+- `FILE_RETENTION_HOURS` - Hours to keep uploaded/output files (default: 1)
+- `REDIS_URL` - Redis connection URL (default: `redis://127.0.0.1:6379/0`)
+- `BACKEND_HOST` - Backend bind address (default: 0.0.0.0)
+- `BACKEND_PORT` - Backend port (default: 8000)
+- `PUBLIC_BACKEND_URL` - Frontend API endpoint (defaults to `http://localhost:8000`)
 
-```
+### Settings UI
+You can manage authentication settings through the web interface at `/settings`:
+- Enable/disable authentication
+- Add/change users
+- Change passwords
+- No container restart required - changes take effect immediately
+
+Example `.env` file:
+
+```env
 AUTH_ENABLED=false
 AUTH_USER=admin
 AUTH_PASS=changeme
 FILE_RETENTION_HOURS=1
 REDIS_URL=redis://127.0.0.1:6379/0
-BACKEND_HOST=0.0.0.0
-BACKEND_PORT=8000
-```
-
-Example `.env` for multi-container:
-
-```
-AUTH_ENABLED=false
-AUTH_USER=admin
-AUTH_PASS=changeme
-FILE_RETENTION_HOURS=1
-REDIS_URL=redis://redis-broker:6379/0
 BACKEND_HOST=0.0.0.0
 BACKEND_PORT=8000
 ```
@@ -127,9 +127,9 @@ Performance tips
 The system will automatically select the best available encoder at runtime. You'll see a log message like "Hardware: NVIDIA acceleration detected" when compression starts.
 
 ## Installation
-Run with prebuilt images (recommended) or build locally.
 
-### Option 1: Single Container (Simplest - Recommended) ⭐
+### Quick Start with Docker (Recommended)
+
 Run everything in ONE container with embedded Redis:
 
 ```bash
@@ -144,52 +144,36 @@ docker run -d \
 
 Or with docker-compose:
 ```bash
-docker compose -f docker-compose.single.yml up -d
+docker compose up -d
 ```
 
-Access at: http://localhost:8000
+Access the web UI at: **http://localhost:8000**
 
-**What's included**: Redis + Backend + Worker + Frontend in a single container managed by supervisord.
+**What's included**: Redis + Backend + Worker + Frontend all in a single container managed by supervisord.
 
-### Option 2: Multi-Container (Original)
-Run with separate containers for each service:
+### Building Locally
 
+1. Clone the repository:
 ```bash
-docker compose -f docker-compose.multi.yml up -d
+git clone https://github.com/JMS1717/8mb.local.git
+cd 8mb.local
 ```
 
-Frontend: http://localhost:5173  •  Backend: http://localhost:8000
+2. Build and run:
+```bash
+docker compose up -d --build
+```
+
+Access the web UI at: **http://localhost:8000**
 
 **Note**: GPU acceleration is optional. The system auto-detects available hardware (NVIDIA/Intel/AMD/CPU) and adapts accordingly.
 
-### Build locally
-#### Single container:
-```bash
-docker compose -f docker-compose.single-build.yml build
-docker compose -f docker-compose.single-build.yml up -d
-```
+### Update to Latest Version
 
-#### Multi-container:
-1. Copy `.env.example` to `.env` and adjust values.
-2. Ensure folders: `uploads/`, `outputs/` (mounted into containers).
-3. Start services (first run: worker compiles FFmpeg, takes longer):
-
-```bash
-docker compose -f docker-compose.multi-build.yml up --build -d
-```
-
-### Update to latest images
-
-**Single container:**
+Pull the latest image and restart:
 ```bash
 docker pull jms1717/8mblocal:latest
-docker compose -f docker-compose.single.yml up -d
-```
-
-**Multi-container:**
-```bash
-docker compose -f docker-compose.multi.yml pull
-docker compose -f docker-compose.multi.yml up -d
+docker compose up -d
 ```
 
 ### Troubleshooting
