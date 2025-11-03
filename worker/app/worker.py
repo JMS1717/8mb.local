@@ -25,13 +25,13 @@ def _publish(task_id: str, event: Dict):
     _redis().publish(f"progress:{task_id}", json.dumps(event))
 
 
-@celery_app.task(name="app.worker.get_hardware_info")
+@celery_app.task(name="worker.worker.get_hardware_info")
 def get_hardware_info_task():
     """Return hardware acceleration info for the frontend."""
     return get_hw_info()
 
 
-@celery_app.task(name="app.worker.compress_video", bind=True)
+@celery_app.task(name="worker.worker.compress_video", bind=True)
 def compress_video(self, job_id: str, input_path: str, output_path: str, target_size_mb: float,
                    video_codec: str, audio_codec: str, audio_bitrate_kbps: int, preset: str, tune: str = "hq",
                    max_width: int = None, max_height: int = None, start_time: str = None, end_time: str = None):
