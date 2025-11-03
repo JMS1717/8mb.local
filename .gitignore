@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+uploads/
+outputs/
+frontend/node_modules/
+frontend/.next/
+frontend/.turbo/
+.DS_Store
+.idea/
+.vscode/

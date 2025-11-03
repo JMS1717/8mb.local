@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=http://backend-api:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend-api
+    restart: unless-stopped
+
+  backend-api:
+    build:
+      context: ./backend
+    environment:
+      - EIGHTMBLOCAL_REDIS_URL=redis://redis-broker:6379/0
+      - EIGHTMBLOCAL_UPLOADS_DIR=/app/uploads
+      - EIGHTMBLOCAL_OUTPUTS_DIR=/app/outputs
+      - EIGHTMBLOCAL_BASIC_AUTH_USERNAME=${EIGHTMBLOCAL_BASIC_AUTH_USERNAME:-}
+      - EIGHTMBLOCAL_BASIC_AUTH_PASSWORD=${EIGHTMBLOCAL_BASIC_AUTH_PASSWORD:-}
+      - EIGHTMBLOCAL_CLEANUP_INTERVAL_SECONDS=600
+      - EIGHTMBLOCAL_FILE_TTL_SECONDS=3600
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis-broker
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./worker
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - EIGHTMBLOCAL_REDIS_URL=redis://redis-broker:6379/0
+      - EIGHTMBLOCAL_UPLOADS_DIR=/app/uploads
+      - EIGHTMBLOCAL_OUTPUTS_DIR=/app/outputs
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    depends_on:
+      - redis-broker
+    restart: unless-stopped
+
+  redis-broker:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
