@@ -1,15 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" font-family="Arial, sans-serif" font-weight="bold">
-  <title>Logo Option 4: Compact "8mb" Target</title>
-  <defs>
-    <linearGradient id="grad4" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#0071c5;" />
-      <stop offset="100%" style="stop-color:#00c4ff;" />
-    </linearGradient>
-  </defs>
-  <text x="45" y="80" font-size="90" fill="url(#grad4)" text-anchor="middle">8</text>
-  <text x="62" y="42" font-size="24" fill="#333">mb</text>
-  <g stroke="#333" stroke-width="6" stroke-linecap="round">
-    <line x1="64" y1="62" x2="64" y2="82" />
-    <polyline points="56 74, 64 82, 72 74" />
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <title>8mb.local</title>
+  <!-- High contrast background circle for visibility -->
+  <circle cx="50" cy="50" r="48" fill="#0071c5"/>
+  <!-- Bold "8" that's visible at small sizes -->
+  <text x="50" y="72" font-family="Arial, sans-serif" font-size="70" font-weight="900" fill="white" text-anchor="middle">8</text>
+  <!-- Small "mb" in corner -->
+  <text x="72" y="28" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="white" text-anchor="middle">mb</text>
 </svg>
