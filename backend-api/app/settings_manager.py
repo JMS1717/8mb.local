@@ -143,3 +143,33 @@ def update_default_presets(
     os.environ['DEFAULT_AUDIO_KBPS'] = str(audio_kbps)
     os.environ['DEFAULT_CONTAINER'] = container
     os.environ['DEFAULT_TUNE'] = tune
+
+
+def get_codec_visibility_settings() -> dict:
+    """Get codec visibility settings"""
+    env_vars = read_env_file()
+    
+    return {
+        'show_nvidia': os.getenv('SHOW_NVIDIA_CODECS', env_vars.get('SHOW_NVIDIA_CODECS', 'true')).lower() == 'true',
+        'show_intel': os.getenv('SHOW_INTEL_CODECS', env_vars.get('SHOW_INTEL_CODECS', 'true')).lower() == 'true',
+        'show_amd': os.getenv('SHOW_AMD_CODECS', env_vars.get('SHOW_AMD_CODECS', 'true')).lower() == 'true',
+        'show_cpu': os.getenv('SHOW_CPU_CODECS', env_vars.get('SHOW_CPU_CODECS', 'true')).lower() == 'true',
+    }
+
+
+def update_codec_visibility_settings(show_nvidia: bool, show_intel: bool, show_amd: bool, show_cpu: bool):
+    """Update codec visibility settings in .env file"""
+    env_vars = read_env_file()
+    
+    env_vars['SHOW_NVIDIA_CODECS'] = 'true' if show_nvidia else 'false'
+    env_vars['SHOW_INTEL_CODECS'] = 'true' if show_intel else 'false'
+    env_vars['SHOW_AMD_CODECS'] = 'true' if show_amd else 'false'
+    env_vars['SHOW_CPU_CODECS'] = 'true' if show_cpu else 'false'
+    
+    write_env_file(env_vars)
+    
+    # Update environment variables for current process
+    os.environ['SHOW_NVIDIA_CODECS'] = 'true' if show_nvidia else 'false'
+    os.environ['SHOW_INTEL_CODECS'] = 'true' if show_intel else 'false'
+    os.environ['SHOW_AMD_CODECS'] = 'true' if show_amd else 'false'
+    os.environ['SHOW_CPU_CODECS'] = 'true' if show_cpu else 'false'

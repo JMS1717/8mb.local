@@ -62,7 +62,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     a_bitrate_str = f"{int(audio_bitrate_kbps)}k"
 
     # Map requested codec to available hardware encoder
-    actual_encoder, v_flags = map_codec_to_hw(video_codec, hw_info)
+    actual_encoder, v_flags, init_hw_flags = map_codec_to_hw(video_codec, hw_info)
     if actual_encoder != video_codec:
         _publish(self.request.id, {"type": "log", "message": f"Using encoder: {actual_encoder} (requested: {video_codec})"})
     
@@ -157,6 +157,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Construct command
     cmd = [
         "ffmpeg", "-hide_banner", "-y",
+        *init_hw_flags,  # Hardware initialization (QSV/VAAPI device setup)
         *input_opts,  # -ss before input for fast seeking
         "-i", input_path,
         *duration_opts,  # -t or -to for duration/end
@@ -165,8 +166,23 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     ]
     
     # Add video filter if needed
-    if vf_filters:
+    # Special handling for VAAPI: filter already in v_flags
+    if vf_filters and not actual_encoder.endswith("_vaapi"):
         cmd += ["-vf", ",".join(vf_filters)]
+    elif vf_filters and actual_encoder.endswith("_vaapi"):
+        # For VAAPI, we need to inject scale before format=nv12|vaapi,hwupload
+        # Parse existing -vf from v_flags
+        scale_filter = ",".join(vf_filters)
+        # Replace the -vf in v_flags if present
+        for i, flag in enumerate(v_flags):
+            if flag == "-vf":
+                v_flags[i+1] = f"{scale_filter},{v_flags[i+1]}"
+                break
+        cmd += v_flags[:]
+        v_flags = []  # Already added
+    
+    if v_flags:  # Add remaining v_flags if not already added
+        cmd += v_flags
     
     cmd += [
         "-b:v", f"{int(video_kbps)}k",

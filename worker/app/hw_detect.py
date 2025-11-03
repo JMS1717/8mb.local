@@ -14,6 +14,7 @@ def detect_hw_accel() -> Dict[str, any]:
         "available_encoders": {},
         "decode_method": None,
         "upload_method": None,
+        "vaapi_device": None,
     }
     
     # Check for NVIDIA
@@ -28,7 +29,12 @@ def detect_hw_accel() -> Dict[str, any]:
         return result
     
     # Check for Intel QSV
-    if _check_intel_qsv():
+    qsv_available = _check_intel_qsv()
+    
+    # Check for VAAPI (Intel/AMD on Linux)
+    vaapi_info = _check_vaapi()
+    
+    if qsv_available:
         result["type"] = "intel"
         result["decode_method"] = "qsv"
         result["available_encoders"] = {
@@ -38,23 +44,29 @@ def detect_hw_accel() -> Dict[str, any]:
         }
         return result
     
-    # Check for AMD AMF (Windows) or VAAPI (Linux)
-    if _check_amd():
+    if vaapi_info["available"]:
+        # VAAPI detected - could be Intel or AMD
+        result["type"] = vaapi_info["vendor"]
+        result["decode_method"] = "vaapi"
+        result["vaapi_device"] = vaapi_info["device"]
+        result["available_encoders"] = {
+            "h264": "h264_vaapi",
+            "hevc": "hevc_vaapi",
+        }
+        # AV1 VAAPI support is newer, check if available
+        if vaapi_info["av1_supported"]:
+            result["available_encoders"]["av1"] = "av1_vaapi"
+        return result
+    
+    # Check for AMD AMF (Windows only)
+    if _check_amd_amf():
         result["type"] = "amd"
-        if os.name == 'nt':
-            result["decode_method"] = "d3d11va"
-            result["available_encoders"] = {
-                "h264": "h264_amf",
-                "hevc": "hevc_amf",
-                "av1": "av1_amf",
-            }
-        else:
-            result["decode_method"] = "vaapi"
-            result["available_encoders"] = {
-                "h264": "h264_vaapi",
-                "hevc": "hevc_vaapi",
-                "av1": "av1_vaapi",
-            }
+        result["decode_method"] = "d3d11va"
+        result["available_encoders"] = {
+            "h264": "h264_amf",
+            "hevc": "hevc_amf",
+            "av1": "av1_amf",
+        }
         return result
     
     # CPU fallback
@@ -122,10 +134,93 @@ def _check_intel_qsv() -> bool:
     return False
 
 
-def _check_amd() -> bool:
-    """Check if AMD GPU acceleration is available."""
+def _check_vaapi() -> Dict[str, any]:
+    """Check if VAAPI is available (Intel/AMD on Linux)."""
+    result = {
+        "available": False,
+        "vendor": "unknown",
+        "device": "/dev/dri/renderD128",
+        "av1_supported": False,
+    }
+    
     try:
-        # Check for AMF (Windows) or VAAPI (Linux)
+        # Check for VAAPI hwaccel
+        hwaccels = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-hwaccels"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if "vaapi" not in hwaccels.stdout.lower():
+            return result
+        
+        # Check for VAAPI encoders
+        encoders = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if "h264_vaapi" not in encoders.stdout:
+            return result
+        
+        result["available"] = True
+        
+        # Check for AV1 VAAPI support
+        if "av1_vaapi" in encoders.stdout:
+            result["av1_supported"] = True
+        
+        # Try to detect vendor (Intel vs AMD) via device info
+        # Check for multiple render nodes
+        import glob
+        render_nodes = glob.glob("/dev/dri/renderD*")
+        if render_nodes:
+            result["device"] = render_nodes[0]
+        
+        # Attempt to identify vendor via vainfo or lspci
+        try:
+            vainfo = subprocess.run(
+                ["vainfo", "--display", "drm", "--device", result["device"]],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            output = vainfo.stdout.lower() + vainfo.stderr.lower()
+            if "intel" in output:
+                result["vendor"] = "intel"
+            elif "amd" in output or "radeon" in output:
+                result["vendor"] = "amd"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # Fallback: check lspci
+            try:
+                lspci = subprocess.run(
+                    ["lspci"], 
+                    capture_output=True, 
+                    text=True,
+                    timeout=2
+                )
+                output = lspci.stdout.lower()
+                if "intel" in output and "vga" in output:
+                    result["vendor"] = "intel"
+                elif ("amd" in output or "radeon" in output) and "vga" in output:
+                    result["vendor"] = "amd"
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+        
+        return result
+        
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    
+    return result
+
+
+def _check_amd_amf() -> bool:
+    """Check if AMD AMF is available (Windows only)."""
+    if os.name != 'nt':
+        return False
+    
+    try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-hwaccels"],
             capture_output=True,
@@ -133,7 +228,7 @@ def _check_amd() -> bool:
             timeout=2
         )
         
-        if os.name == 'nt' and "d3d11va" in result.stdout.lower():
+        if "d3d11va" in result.stdout.lower():
             # Check for AMF encoder
             encoders = subprocess.run(
                 ["ffmpeg", "-hide_banner", "-encoders"],
@@ -143,38 +238,30 @@ def _check_amd() -> bool:
             )
             if "h264_amf" in encoders.stdout:
                 return True
-        elif "vaapi" in result.stdout.lower():
-            # Check for VAAPI encoder
-            encoders = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-encoders"],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            if "h264_vaapi" in encoders.stdout:
-                return True
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
     
     return False
 
 
-def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list]:
+def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, list]:
     """
     Map user-requested codec to appropriate hardware encoder.
-    Returns: (encoder_name, extra_flags)
+    Returns: (encoder_name, extra_flags, init_hw_flags)
+    init_hw_flags are used before -i for hardware decode/upload setup
     """
     # If user explicitly requested a CPU encoder, honor it even if HW is available
     if requested_codec in ("libx264", "libx265", "libsvtav1", "libaom-av1"):
         # Map libsvtav1 to libaom-av1 unless explicitly supported
         encoder = requested_codec if requested_codec != "libsvtav1" else "libaom-av1"
         flags: list[str] = []
+        init_flags: list[str] = []
         if encoder == "libx264":
             flags = ["-pix_fmt", "yuv420p", "-profile:v", "high"]
         elif encoder == "libx265":
             flags = ["-pix_fmt", "yuv420p"]
         # libaom-av1 generally picks sane defaults; keep flags minimal
-        return encoder, flags
+        return encoder, flags, init_flags
 
     # Extract base codec name
     if "h264" in requested_codec:
@@ -188,6 +275,7 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list]:
     
     encoder = hw_info["available_encoders"].get(base, "libx264")
     flags = []
+    init_flags = []
     
     # Add hardware-specific flags
     if encoder.endswith("_nvenc"):
@@ -197,19 +285,24 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list]:
         elif base == "hevc":
             flags += ["-profile:v", "main"]
     elif encoder.endswith("_qsv"):
+        # QSV requires init_hw_upload to qsv context
+        init_flags = ["-init_hw_device", "qsv=hw", "-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]
         flags = ["-pix_fmt", "nv12"]
         if base == "h264":
             flags += ["-profile:v", "high"]
     elif encoder.endswith("_amf"):
         flags = ["-pix_fmt", "yuv420p"]
     elif encoder.endswith("_vaapi"):
-        flags = ["-pix_fmt", "nv12"]
+        # VAAPI requires device initialization
+        vaapi_device = hw_info.get("vaapi_device", "/dev/dri/renderD128")
+        init_flags = ["-init_hw_device", f"vaapi=va:{vaapi_device}", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-hwaccel_device", "va"]
+        flags = ["-vf", "format=nv12|vaapi,hwupload"]
     elif encoder == "libx264":
         flags = ["-pix_fmt", "yuv420p", "-profile:v", "high"]
     elif encoder == "libx265":
         flags = ["-pix_fmt", "yuv420p"]
     
-    return encoder, flags
+    return encoder, flags, init_flags
 
 
 # Cache hardware detection on module load

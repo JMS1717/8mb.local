@@ -17,7 +17,7 @@ from redis.asyncio import Redis
 from .auth import basic_auth
 from .config import settings
 from .celery_app import celery_app
-from .models import UploadResponse, CompressRequest, StatusResponse, AuthSettings, AuthSettingsUpdate, PasswordChange, DefaultPresets
+from .models import UploadResponse, CompressRequest, StatusResponse, AuthSettings, AuthSettingsUpdate, PasswordChange, DefaultPresets, AvailableCodecsResponse, CodecVisibilitySettings
 from .cleanup import start_scheduler
 from . import settings_manager
 
@@ -193,6 +193,43 @@ async def get_hardware_info():
         }
 
 
+@app.get("/api/codecs/available")
+async def get_available_codecs() -> AvailableCodecsResponse:
+    """Get available codecs based on hardware detection and user settings."""
+    try:
+        # Get hardware info from worker
+        from .celery_app import celery_app
+        result = celery_app.send_task("worker.worker.get_hardware_info")
+        hw_info = result.get(timeout=5)
+        
+        # Get user codec visibility settings
+        codec_settings = settings_manager.get_codec_visibility_settings()
+        
+        # Determine which codec groups are enabled
+        enabled_groups = []
+        if codec_settings.get("show_nvidia", True):
+            enabled_groups.append("nvidia")
+        if codec_settings.get("show_intel", True):
+            enabled_groups.append("intel")
+        if codec_settings.get("show_amd", True):
+            enabled_groups.append("amd")
+        if codec_settings.get("show_cpu", True):
+            enabled_groups.append("cpu")
+        
+        return AvailableCodecsResponse(
+            hardware_type=hw_info.get("type", "cpu"),
+            available_encoders=hw_info.get("available_encoders", {}),
+            enabled_groups=enabled_groups
+        )
+    except Exception as e:
+        # Fallback
+        return AvailableCodecsResponse(
+            hardware_type="cpu",
+            available_encoders={"h264": "libx264", "hevc": "libx265", "av1": "libaom-av1"},
+            enabled_groups=["cpu"]
+        )
+
+
 # Settings management endpoints
 @app.get("/api/settings/auth")
 async def get_auth_settings() -> AuthSettings:
@@ -266,6 +303,34 @@ async def update_default_presets(
             tune=presets.tune
         )
         return {"status": "success", "message": "Default presets updated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/settings/codecs")
+async def get_codec_visibility_settings() -> CodecVisibilitySettings:
+    """Get codec visibility settings (no auth required)"""
+    try:
+        settings_data = settings_manager.get_codec_visibility_settings()
+        return CodecVisibilitySettings(**settings_data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/settings/codecs")
+async def update_codec_visibility_settings(
+    codec_settings: CodecVisibilitySettings,
+    _auth=Depends(basic_auth)  # Require auth to change settings
+):
+    """Update codec visibility settings"""
+    try:
+        settings_manager.update_codec_visibility_settings(
+            show_nvidia=codec_settings.show_nvidia,
+            show_intel=codec_settings.show_intel,
+            show_amd=codec_settings.show_amd,
+            show_cpu=codec_settings.show_cpu
+        )
+        return {"status": "success", "message": "Codec visibility settings updated successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

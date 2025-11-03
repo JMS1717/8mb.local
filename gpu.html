@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU Encoding Support List</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* A little extra polish for table cells */
+        th, td {
+            vertical-align: top;
+            padding: 1rem;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans p-4 md:p-8">
+
+    <div class="max-w-7xl mx-auto">
+        <h1 class="text-3xl md:text-4xl font-bold text-center mb-4 text-white"> GPU Encoding Support List</h1>
+        <!-- Key -->
+        <div class="flex flex-wrap justify-center gap-4 mb-12">
+            <span class="bg-green-700 text-green-100 text-sm font-semibold px-3 py-1 rounded-full">AV1 Encode (Best)</span>
+            <span class="bg-blue-700 text-blue-100 text-sm font-semibold px-3 py-1 rounded-full">HEVC (H.265)</span>
+            <span class="bg-gray-600 text-gray-100 text-sm font-semibold px-3 py-1 rounded-full">H.264 (AVC)</span>
+        </div>
+
+        <!-- NVIDIA Section -->
+        <section class="mb-16">
+            <h2 class="text-3xl font-semibold mb-6 pb-2 border-b-2 border-green-500 text-green-400">NVIDIA (NVENC)</h2>
+            <div class="overflow-x-auto rounded-lg shadow-md bg-gray-800">
+                <table class="w-full min-w-full">
+                    <thead class="bg-gray-700">
+                        <tr>
+                            <th class="p-4 text-left text-sm font-semibold uppercase text-gray-300">GPU Series</th>
+                            <th class="p-4 text-left text-sm font-semibold uppercase text-gray-300">Example GPUs</th>
+                            <th class="p-4 text-left text-sm font-semibold uppercase text-gray-300">Encoder Hardware</th>
+                            <th class="p-4 text-left text-sm font-semibold uppercase text-gray-300">Codec Support (Encode)</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-gray-800 divide-y divide-gray-700">
+                        <tr>
+                            <td class="font-semibold text-white">RTX 50 Series (Blackwell)</td>
+                            <td>RTX 5090, RTX 5080, RTX 5070</td>
+                            <td>9th Gen NVENC (x2)</td>
+                            <td>
+                                <span class="font-bold text-green-400">AV1</span>, 
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold text-white">RTX 40 Series (Ada)</td>
+                            <td>RTX 4090, 4080, 4070 Ti, 4060, 4050 (Laptop)</td>
+                            <td>8th Gen NVENC</td>
+                            <td>
+                                <span class="font-bold text-green-400">AV1</span>, 
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold text-white">RTX 30 Series (Ampere)</td>
+                            <td>RTX 3090 Ti, 3080, 3070, 3060, 3050</td>
+                            <td>7th Gen NVENC</td>
+                            <td>
+                                <span class="text-yellow-400">(No AV1 Encode)</span><br>
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold text-white">RTX 20 Series (Turing)</td>
+                            <td>RTX 2080 Ti, 2070 Super, 2060</td>
+                            <td>6th Gen NVENC</td>
+                            <td>
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold text-white">GTX 16 Series (Turing)</td>
+                            <td>GTX 1660 Super, 1660 Ti, 1650 Super</td>
+                            <td>6th Gen NVENC</td>
+                            <td>
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold text-white">GTX 10 Series (Pascal)</td>
+                            <td>GTX 1080 Ti, 1070, 1060, 1050</td>
+                            <td>5th Gen NVENC</td>
+                            <td>
+                                <span class="font-bold text-blue-400">HEVC (8-bit)</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- AMD Section -->
+        <section class="mb-16">
+            <h2 class="text-3xl font-semibold mb-6 pb-2 border-b-2 border-red-500 text-red-400">AMD (VCN)</h2>
+            <div class="overflow-x-auto rounded-lg shadow-md bg-gray-800">
+                <table class="w-full min-w-full">
+                    <thead class="bg-gray-700">
+                        <tr>
+                            <th class="p-4 text-left text-sm font-semibold uppercase text-gray-300">GPU Series</th>
+                            <th class="p-4 text-left text-sm font-semibold uppercase text-gray-300">Example GPUs</th>
+                            <th class="p-4 text-left text-sm font-semibold uppercase text-gray-300">Encoder Hardware</th>
+                            <th class="p-4 text-left text-sm font-semibold uppercase text-gray-300">Codec Support (Encode)</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-gray-800 divide-y divide-gray-700">
+                        <tr>
+                            <td class="font-semibold text-white">Radeon RX 7000 (RDNA 3)</td>
+                            <td>RX 7900 XTX, 7900 XT, 7800 XT, 7700 XT, 7600</td>
+                            <td>VCN 4.0</td>
+                            <td>
+                                <span class="font-bold text-green-400">AV1</span>, 
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold text-white">Ryzen 7040/8000G (APU)</td>
+                            <td>Ryzen 9 7940HS, Ryzen 7 8700G, Steam Deck OLED</td>
+                            <td>VCN 4.0 (RDNA 3 iGPU)</td>
+                            <td>
+                                <span class="font-bold text-green-400">AV1</span>, 
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold text-white">Radeon RX 6000 (RDNA 2)</td>
+                            <td>RX 6950 XT, 6800, 6700 XT, 6600, 6500 XT</td>
+                            <td>VCN 3.0</td>
+                            <td>
+                                <span class="text-yellow-400">(No AV1 Encode)</span><br>
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold text-white">Ryzen 5000/6000 (APU)</td>
+                            <td>Ryzen 9 6900HX, Ryzen 7 5700G, Steam Deck LCD</td>
+                            <td>VCN 3.0 (RDNA 2 iGPU)</td>
+                            <td>
+                                <span class="text-yellow-400">(No AV1 Encode)</span><br>
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold text-white">Radeon RX 5000 (RDNA 1)</td>
+                            <td>RX 5700 XT, 5600 XT, 5500 XT</td>
+                            <td>VCN 2.0</td>
+                            <td>
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold text-white">Radeon RX Vega / VII</td>
+                            <td>Vega 64, Vega 56, Radeon VII</td>
+                            <td>VCN 1.0</td>
+                            <td>
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Intel Section -->
+        <section class="mb-16">
+            <h2 class="text-3xl font-semibold mb-6 pb-2 border-b-2 border-blue-500 text-blue-400">Intel (Quick Sync Video)</h2>
+            <div class="overflow-x-auto rounded-lg shadow-md bg-gray-800">
+                <table class="w-full min-w-full">
+                    <thead class="bg-gray-700">
+                        <tr>
+                            <th class="p-4 text-left text-sm font-semibold uppercase text-gray-300">GPU Series</th>
+                            <th class="p-4 text-left text-sm font-semibold uppercase text-gray-300">Example GPUs</th>
+                            <th class="p-4 text-left text-sm font-semibold uppercase text-gray-300">Encoder Hardware</th>
+                            <th class="p-4 text-left text-sm font-semibold uppercase text-gray-300">Codec Support (Encode)</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-gray-800 divide-y divide-gray-700">
+                        <tr>
+                            <td class="font-semibold text-white">Arc (Alchemist / Battlemage)</td>
+                            <td>Arc A770, A750, A580, A380, Core Ultra iGPUs</td>
+                            <td>Intel Media Engine</td>
+                            <td>
+                                <span class="font-bold text-green-400">AV1</span>, 
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold text-white">11th-14th Gen Core (iGPU)</td>
+                            <td>Core i9-14900K, i7-13700K, i5-12600K, i7-11700K</td>
+                            <td>Quick Sync (Gen 12)</td>
+                            <td>
+                                <span class="text-yellow-400">(No AV1 Encode)</span><br>
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold text-white">7th-10th Gen Core (iGPU)</td>
+                            <td>Core i9-10900K, i7-9700K, i7-8700K, i7-7700K</td>
+                            <td>Quick Sync (Gen 9-11)</td>
+                            <td>
+                                <span class="font-bold text-blue-400">HEVC</span>, 
+                                <span class="text-gray-300">H.264</span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+    </div>
+
+</body>
+</html>
