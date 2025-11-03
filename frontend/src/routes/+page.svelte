@@ -249,14 +249,45 @@
   <!-- Support badge moved to corner (smaller, unobtrusive) -->
 </div>
 
-<!-- Floating support badge -->
-<a
-  href="https://paypal.me/jasonselsley"
-  target="_blank"
-  rel="noopener noreferrer"
-  title="If this helped, tips are appreciated (never expected)."
-  class="fixed bottom-4 right-4 bg-gray-800/80 hover:bg-gray-700 text-xs px-3 py-1.5 rounded-full shadow-lg border border-gray-700 backdrop-blur-sm"
+<!-- Floating support widget -->
+<script lang="ts">
+  let showSupport = false;
+  function toggleSupport(){ showSupport = !showSupport; }
+  function closeSupport(){ showSupport = false; }
+  // Optional: Close on Escape
+  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeSupport(); };
+</script>
+
+<button
+  class="fixed bottom-4 right-4 bg-gray-800/90 hover:bg-gray-700 text-xs px-3 py-1.5 rounded-full shadow-lg border border-gray-700 backdrop-blur-sm flex items-center gap-1 z-50"
+  on:click={toggleSupport}
+  aria-expanded={showSupport}
+  aria-controls="support-popover"
+  title="Support the project"
 >
-  Support
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4 text-rose-400">
+    <path d="M11.645 20.91l-.007-.003-.022-.01a15.247 15.247 0 01-.383-.184 25.18 25.18 0 01-4.244-2.62C4.688 16.197 2.25 13.614 2.25 10.5 2.25 8.014 4.237 6 6.75 6c1.56 0 2.927.802 3.75 2.016C11.323 6.802 12.69 6 14.25 6 16.763 6 18.75 8.014 18.75 10.5c0 3.114-2.438 5.697-4.739 7.593a25.175 25.175 0 01-4.244 2.62 15.247 15.247 0 01-.383.184l-.022.01-.007.003-.003.001a.75.75 0 01-.614 0l-.003-.001z" />
+  </svg>
+  <span>Support</span>
   <span class="sr-only">the project</span>
-</a>
+</button>
+
+{#if showSupport}
+  <div
+    id="support-popover"
+    class="fixed bottom-16 right-4 w-64 bg-gray-900/95 text-gray-100 border border-gray-700 rounded-lg shadow-xl p-3 z-50"
+    role="dialog"
+    aria-label="Support the project"
+    on:keydown={onKey}
+  >
+    <div class="flex items-start justify-between gap-2">
+      <p class="text-xs leading-relaxed">
+        Thanks for using <span class="font-semibold">8mb.local</span>! If this saved you time and you'd like to chip in, tips are appreciated (never expected).
+      </p>
+      <button class="text-gray-400 hover:text-gray-200 text-sm" on:click={closeSupport} title="Close" aria-label="Close">×</button>
+    </div>
+    <div class="mt-2">
+      <a class="underline text-xs hover:text-rose-300" href="https://paypal.me/jasonselsley" target="_blank" rel="noopener noreferrer">paypal.me/jasonselsley</a>
+    </div>
+  </div>
+{/if}
