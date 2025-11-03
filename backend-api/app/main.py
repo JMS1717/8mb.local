@@ -193,7 +193,7 @@ async def get_hardware_info():
 
 
 # Serve pre-built frontend (for unified container deployment)
-frontend_build = Path("/app/frontend-build")
+frontend_build = Path("/app/frontend-build/client")
 if frontend_build.exists():
     # Mount static assets
     app.mount("/_app", StaticFiles(directory=frontend_build / "_app", html=False), name="static-app")
