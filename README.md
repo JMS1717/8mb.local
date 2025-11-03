@@ -1,6 +1,8 @@
 # 8mb.local – Self‑Hosted GPU Video Compressor
 
-8mb.local is a self‑hosted, fire‑and‑forget video compressor. Drop a file, choose a target size (e.g., 8MB, 25MB, 50MB, 100MB), and let GPU-accelerated encoding produce compact outputs with AV1/HEVC/H.264. Supports **NVIDIA NVENC**, **Intel QSV**, **AMD AMF/VAAPI**, and **CPU fallback**. The stack includes a SvelteKit UI, FastAPI backend, Celery worker, Redis broker, and real‑time progress via Server‑Sent Events (SSE).
+8mb.local is a self‑hosted, fire‑and‑forget video compressor. Drop a file, choose a target size (e.g., 8MB, 25MB, 50MB, 100MB), and let GPU-accelerated encoding produce compact outputs with AV1/HEVC/H.264. Supports **NVIDIA NVENC**, **Intel QSV**, **AMD VAAPI**, and **CPU fallback**. The stack includes a SvelteKit UI, FastAPI backend, Celery worker, Redis broker, and real‑time progress via Server‑Sent Events (SSE).
+
+> **Note**: Windows-only encoders (AMD AMF) have been removed as they don't work in Docker's Linux environment. AMD GPUs use VAAPI on Linux.
 
 ## Screenshots
 
@@ -16,14 +18,16 @@
 </details>
 
 ## Features
-- **Multi-vendor GPU support**: Auto-detects NVIDIA NVENC, Intel QSV, AMD AMF/VAAPI, or falls back to CPU
+- **Multi-vendor GPU support**: Auto-detects NVIDIA NVENC, Intel QSV, AMD VAAPI, or falls back to CPU
+- **Encoder availability validation**: Automatically falls back to CPU if hardware encoder unavailable
 - Drag‑and‑drop UI with helpful presets and advanced options (codec, container, tune, audio bitrate)
+- **Configurable codec visibility**: Enable/disable specific codecs in Settings page
 - **Resolution control**: Set max width/height while maintaining aspect ratio
 - **Video trimming**: Specify start/end times (seconds or HH:MM:SS format)
 - ffprobe analysis on upload for instant estimates and warnings
 - Real‑time progress and FFmpeg logs via SSE
 - Hardware encoders: AV1, HEVC (H.265), H.264 (GPU-accelerated when available)
-- Software fallback: libx264, libx265, libsvtav1 for CPU-only systems
+- Software fallback: libx264, libx265, libaom-av1 for CPU-only systems
 - Output container choice: MP4 or MKV, with compatibility safeguards
 
 ## Architecture (technical deep dive)
@@ -61,11 +65,21 @@ Data & files
 - `BACKEND_PORT` - Backend port (default: 8000)
 - `PUBLIC_BACKEND_URL` - Frontend API endpoint (defaults to `http://localhost:8000`)
 
+### Codec Visibility Settings
+Control which codecs appear in the UI via environment variables or the Settings page:
+- `CODEC_H264_NVENC`, `CODEC_HEVC_NVENC`, `CODEC_AV1_NVENC` - NVIDIA encoders
+- `CODEC_H264_QSV`, `CODEC_HEVC_QSV`, `CODEC_AV1_QSV` - Intel Quick Sync
+- `CODEC_H264_VAAPI`, `CODEC_HEVC_VAAPI`, `CODEC_AV1_VAAPI` - AMD/Intel VAAPI (Linux)
+- `CODEC_LIBX264`, `CODEC_LIBX265`, `CODEC_LIBAOM_AV1` - CPU encoders
+
+All default to `true`. The system validates encoder availability at runtime and automatically falls back to CPU if hardware isn't available.
+
 ### Settings UI
-You can manage authentication settings through the web interface at `/settings`:
-- Enable/disable authentication
-- Add/change users
-- Change passwords
+You can manage settings through the web interface at `/settings`:
+- **Authentication**: Enable/disable auth, add/change users, change passwords
+- **Default Presets**: Set default target size, codec, quality, container, etc.
+- **Codec Visibility**: Enable/disable specific codecs (NVIDIA/Intel/AMD/CPU)
+- **GPU Support Reference**: View GPU hardware encoding compatibility at `/gpu-support`
 - No container restart required - changes take effect immediately
 
 Example `.env` file:
@@ -106,52 +120,159 @@ Performance tips
 8mb.local automatically detects and uses available hardware acceleration:
 
 - **NVIDIA GPU (NVENC)**: Best support for AV1, HEVC, H.264
+  - Requires RTX 40/50 series for AV1, GTX 10+ for HEVC/H.264
   - Windows: Docker Desktop + WSL2 with GPU enabled; install NVIDIA drivers and Container Toolkit in WSL2
   - Linux: Install NVIDIA drivers and NVIDIA Container Toolkit
-  - Check: `docker exec 8mblocal-worker bash -lc "ffmpeg -hide_banner -encoders | grep -i nvenc"`
+  - Use `--gpus all` flag in docker run command
+  - Check: `docker exec 8mblocal bash -c "ffmpeg -hide_banner -encoders | grep -i nvenc"`
 
 - **Intel GPU (Quick Sync Video - QSV)**: Good support for H.264, HEVC, AV1 (Arc GPUs)
   - Requires Intel GPU with QSV support (most 6th gen+ Core CPUs and Arc GPUs)
   - Linux: Ensure `/dev/dri` is accessible in container
-  - Check: `docker exec 8mblocal-worker bash -lc "ffmpeg -hide_banner -encoders | grep -i qsv"`
+  - Use `--device=/dev/dri:/dev/dri` flag in docker run command
+  - Check: `docker exec 8mblocal bash -c "ffmpeg -hide_banner -encoders | grep -i qsv"`
 
-- **AMD GPU (AMF/VAAPI)**: Support for H.264, HEVC, AV1
-  - Windows: AMD AMF (hardware-accelerated encoding)
+- **AMD GPU (VAAPI - Linux only)**: Support for H.264, HEVC, AV1
   - Linux: VAAPI (requires Mesa drivers and `/dev/dri` access)
-  - Check: `docker exec 8mblocal-worker bash -lc "ffmpeg -hide_banner -encoders | grep -E 'amf|vaapi'"`
+  - Use `--device=/dev/dri:/dev/dri` flag in docker run command
+  - AMD RDNA 2+ recommended for best compatibility
+  - Check: `docker exec 8mblocal bash -c "ffmpeg -hide_banner -encoders | grep vaapi"`
 
 - **CPU Fallback**: Works on any system without GPU
-  - Uses libx264 (H.264), libx265 (HEVC), libsvtav1 (AV1)
+  - Uses libx264 (H.264), libx265 (HEVC), libaom-av1 (AV1)
   - Slower but universal compatibility
+  - Automatically used if hardware encoder unavailable
 
-The system will automatically select the best available encoder at runtime. You'll see a log message like "Hardware: NVIDIA acceleration detected" when compression starts.
+The system validates encoder availability at runtime and automatically falls back to CPU if hardware isn't available. You'll see log messages like:
+- "Using encoder: h264_vaapi (requested: h264_vaapi)" - Hardware working
+- "Warning: h264_vaapi not available, falling back to CPU (libx264)" - CPU fallback
 
 ## Installation
 
-### Quick Start with Docker (Recommended)
+### Quick Start with Docker
 
-Run everything in ONE container with embedded Redis:
+The easiest way to run 8mb.local is with the pre-built Docker image. Choose the command for your system:
 
+#### CPU Only (No GPU)
 ```bash
-docker run -d \
-  -p 8000:8000 \
-  -v ./uploads:/app/uploads \
-  -v ./outputs:/app/outputs \
-  --gpus all \
-  --name 8mblocal \
-  jms1717/8mblocal:latest
+docker run -d --name 8mblocal -p 8000:8000 -v ./uploads:/app/uploads -v ./outputs:/app/outputs jms1717/8mblocal:latest
 ```
 
-Or with docker-compose:
+#### NVIDIA GPU (NVENC)
 ```bash
-docker compose up -d
+docker run -d --name 8mblocal --gpus all -p 8000:8000 -v ./uploads:/app/uploads -v ./outputs:/app/outputs jms1717/8mblocal:latest
+```
+
+#### Intel/AMD GPU (VAAPI - Linux)
+```bash
+docker run -d --name 8mblocal --device=/dev/dri:/dev/dri -p 8000:8000 -v ./uploads:/app/uploads -v ./outputs:/app/outputs jms1717/8mblocal:latest
+```
+
+#### NVIDIA + VAAPI (Dual GPU - Linux)
+```bash
+docker run -d --name 8mblocal --gpus all --device=/dev/dri:/dev/dri -p 8000:8000 -v ./uploads:/app/uploads -v ./outputs:/app/outputs jms1717/8mblocal:latest
 ```
 
 Access the web UI at: **http://localhost:8000**
 
-**What's included**: Redis + Backend + Worker + Frontend all in a single container managed by supervisord.
+### Docker Compose
 
-### Building Locally
+For easier management, use Docker Compose. Create a `docker-compose.yml` file:
+
+#### CPU Only
+```yaml
+version: '3.8'
+
+services:
+  8mblocal:
+    image: jms1717/8mblocal:latest
+    container_name: 8mblocal
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./.env:/app/.env  # Optional: for custom settings
+    restart: unless-stopped
+```
+
+#### NVIDIA GPU
+```yaml
+version: '3.8'
+
+services:
+  8mblocal:
+    image: jms1717/8mblocal:latest
+    container_name: 8mblocal
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./.env:/app/.env  # Optional: for custom settings
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+
+#### Intel/AMD VAAPI (Linux)
+```yaml
+version: '3.8'
+
+services:
+  8mblocal:
+    image: jms1717/8mblocal:latest
+    container_name: 8mblocal
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./.env:/app/.env  # Optional: for custom settings
+    devices:
+      - /dev/dri:/dev/dri
+    restart: unless-stopped
+```
+
+#### NVIDIA + VAAPI (Dual GPU)
+```yaml
+version: '3.8'
+
+services:
+  8mblocal:
+    image: jms1717/8mblocal:latest
+    container_name: 8mblocal
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./.env:/app/.env  # Optional: for custom settings
+    devices:
+      - /dev/dri:/dev/dri
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+
+Then run:
+```bash
+docker compose up -d
+```
+
+### Building from Source
+
+If you want to build the image yourself:
 
 1. Clone the repository:
 ```bash
@@ -161,35 +282,173 @@ cd 8mb.local
 
 2. Build and run:
 ```bash
+docker build -t 8mblocal:local .
+docker run -d --name 8mblocal -p 8000:8000 -v ./uploads:/app/uploads -v ./outputs:/app/outputs 8mblocal:local
+```
+
+Or with Docker Compose:
+```bash
 docker compose up -d --build
 ```
 
-Access the web UI at: **http://localhost:8000**
+### Configuration
 
-**Note**: GPU acceleration is optional. The system auto-detects available hardware (NVIDIA/Intel/AMD/CPU) and adapts accordingly.
+Create a `.env` file in the same directory as your docker-compose.yml (optional):
+
+```env
+# Authentication (can also be configured via Settings UI)
+AUTH_ENABLED=false
+AUTH_USER=admin
+AUTH_PASS=changeme
+
+# File retention
+FILE_RETENTION_HOURS=1
+
+# Codec visibility (all default to true)
+CODEC_H264_NVENC=true
+CODEC_HEVC_NVENC=true
+CODEC_AV1_NVENC=true
+CODEC_H264_QSV=true
+CODEC_HEVC_QSV=true
+CODEC_AV1_QSV=true
+CODEC_H264_VAAPI=true
+CODEC_HEVC_VAAPI=true
+CODEC_AV1_VAAPI=true
+CODEC_LIBX264=true
+CODEC_LIBX265=true
+CODEC_LIBAOM_AV1=true
+
+# Redis (internal, usually no need to change)
+REDIS_URL=redis://127.0.0.1:6379/0
+BACKEND_HOST=0.0.0.0
+BACKEND_PORT=8000
+```
+
+Mount it with `-v ./.env:/app/.env` in docker run, or add it to volumes in docker-compose.yml.
+
+### Platform-Specific Setup
+
+#### Windows
+1. Install Docker Desktop
+2. For NVIDIA GPU: Install NVIDIA drivers, enable WSL2 GPU support in Docker Desktop settings
+3. Use the NVIDIA GPU docker command above
+4. Note: AMD GPUs don't work in Docker on Windows (VAAPI is Linux-only)
+
+#### Linux
+1. Install Docker: `curl -fsSL https://get.docker.com | sh`
+2. For NVIDIA: Install NVIDIA drivers and [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+3. For Intel/AMD: Ensure `/dev/dri` exists and user has access (`ls -l /dev/dri`)
+4. Add your user to docker group: `sudo usermod -aG docker $USER` (logout/login required)
+5. Use the appropriate docker command for your GPU
+
+#### macOS
+1. Install Docker Desktop
+2. Note: No GPU acceleration available on macOS (Docker runs in Linux VM without GPU passthrough)
+3. Use CPU-only docker command
+4. Performance will be slower but functional
+
+### Verify Installation
+
+1. Check container is running:
+```bash
+docker ps | grep 8mblocal
+```
+
+2. Check available encoders:
+```bash
+docker exec 8mblocal bash -c "ffmpeg -hide_banner -encoders | grep -E 'nvenc|qsv|vaapi|264|265|av1'"
+```
+
+3. View logs:
+```bash
+docker logs 8mblocal
+```
+
+Access the UI at **http://localhost:8000** and go to **Settings → Available Codecs** to see detected hardware.
 
 ### Update to Latest Version
 
 Pull the latest image and restart:
 ```bash
 docker pull jms1717/8mblocal:latest
+docker stop 8mblocal
+docker rm 8mblocal
+# Then run your docker run command again, or:
+docker compose pull
 docker compose up -d
 ```
 
 ### Troubleshooting
-- No hardware acceleration: System will fall back to CPU encoding. Check Docker logs for "Hardware: CPU acceleration detected"
-- NVENC not available: Confirm NVIDIA drivers and Container Toolkit are installed; try restarting Docker
-- Intel QSV not working: Ensure `/dev/dri` device is accessible and Intel GPU drivers are installed
-- AMD encoding issues: Check for Mesa drivers (Linux) or recent AMD drivers (Windows)
-- Permission denied writing uploads/outputs: ensure your OS user owns the repo folders or adjust volume permissions
-- Ports in use: change `5173`/`8000` mappings in compose
-- No progress events: ensure the frontend can reach `http://localhost:8000` directly (SSE shouldn't be buffered by a proxy)
 
-## Maintainers
-- Images are built and published from CI on pushes to `main`. See `docs/DOCKER_HUB.md` for maintainer‑focused publishing steps.
+#### Hardware Acceleration Issues
+- **NVENC not available**: 
+  - Confirm NVIDIA drivers installed: `nvidia-smi`
+  - On Linux: Install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+  - Verify `--gpus all` flag is used in docker run command
+  - Check logs: `docker logs 8mblocal | grep -i nvidia`
+  
+- **Intel QSV not working**: 
+  - Ensure `/dev/dri` exists: `ls -l /dev/dri`
+  - Check device permissions: `groups` should show `video` or `render`
+  - Verify `--device=/dev/dri:/dev/dri` flag is used
+  - Install Intel GPU drivers if needed
+  
+- **AMD VAAPI issues**: 
+  - Ensure Mesa drivers installed: `glxinfo | grep -i mesa` (install `mesa-utils`)
+  - Check `/dev/dri` exists and is accessible
+  - Verify `--device=/dev/dri:/dev/dri` flag is used
+  - AMD RDNA 2+ recommended for best AV1 support
+  - **VAAPI device errors** ("No VA display found"): System will automatically fall back to CPU
+
+#### System automatically falls back to CPU
+- This is expected behavior if hardware encoder isn't available
+- Check Settings → Available Codecs to see what's enabled
+- Look for log messages: "Warning: X not available, falling back to CPU (Y)"
+- CPU encoding works but is slower - consider enabling fewer codecs or using faster presets
+
+#### General Issues
+- **Permission denied writing uploads/outputs**: 
+  - Ensure directories exist and have correct permissions
+  - Try: `chmod 777 uploads outputs` or `chown -R $USER:$USER uploads outputs`
+  
+- **Ports in use**: 
+  - Change port mapping: `-p 8080:8000` instead of `-p 8000:8000`
+  - Update `PUBLIC_BACKEND_URL` if using different port
+  
+- **No progress events**: 
+  - Ensure frontend can reach backend directly (check browser console)
+  - SSE may be buffered by reverse proxy - add proper headers
+  
+- **Container won't start**:
+  - Check logs: `docker logs 8mblocal`
+  - Verify .env file syntax if using custom configuration
+  - Try removing container and running again: `docker rm -f 8mblocal`
+  
+- **FFmpeg errors**:
+  - Full command and last 20 lines of stderr are logged for debugging
+  - Check Settings → Available Codecs to ensure correct encoders enabled
+  - Try CPU fallback: enable only libx264/libx265/libaom-av1
+
+#### Getting Help
+- Check the logs: `docker logs 8mblocal`
+- View ffmpeg command in UI logs during compression
+- Visit Settings → GPU Support for hardware compatibility reference
+- Open an issue on GitHub with logs and system details
 
 ## Notes
-- Hardware acceleration is automatically detected and used when available (NVIDIA/Intel/AMD)
-- AV1 support varies by hardware: NVIDIA (RTX 40-series+), Intel (Arc GPUs), AMD (RDNA 3+), or CPU fallback
-- MP4 + Opus is not supported; the worker auto‑encodes AAC in MP4
+- Hardware acceleration is automatically detected and validated at runtime
+- System automatically falls back to CPU encoding if hardware encoder unavailable
+- AV1 support varies by hardware: NVIDIA (RTX 40/50-series), Intel (Arc GPUs), AMD (RDNA 3+), or CPU fallback
+- MP4 + Opus is not supported; the worker auto‑encodes AAC in MP4 containers
+- Configure codec visibility in Settings → Available Codecs or via environment variables
+- All components (Redis, Backend, Worker, Frontend) run in a single container via supervisord
 - Consider HTTPS termination and stronger auth for public deployments
+
+## License
+MIT - See LICENSE file for details
+
+## Contributing
+Pull requests welcome! Please ensure Docker builds succeed and test with your GPU hardware.
+
+## Support
+For issues, questions, or feature requests, please open an issue on GitHub.
