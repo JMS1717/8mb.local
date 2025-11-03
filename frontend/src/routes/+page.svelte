@@ -125,7 +125,6 @@
   <div class="card grid grid-cols-2 gap-4">
     <div class="space-x-2">
       <button class="btn" on:click={()=>setPresetMB(4)}>4MB</button>
-      <button class="btn" on:click={()=>setPresetMB(4)}>4MB</button>
       <button class="btn" on:click={()=>setPresetMB(5)}>5MB</button>
       <button class="btn" on:click={()=>setPresetMB(8)}>8MB</button>
       <button class="btn" on:click={setPresetMBSafe10}>10MB (Discord)</button>
@@ -185,13 +184,16 @@
           </select>
         </div>
         <div>
-          <label class="block mb-1 text-sm">Tune</label>
-          <select class="input w-full" bind:value={tune}>
-            <option value="hq">High quality</option>
-            <option value="ll">Low latency</option>
-            <option value="ull">Ultra low latency</option>
-            <option value="lossless">Lossless</option>
+          <label class="block mb-1 text-sm flex items-center gap-1">
+            Tune <span class="text-[11px] opacity-70">(what to prioritize)</span>
+          </label>
+          <select class="input w-full" bind:value={tune} title="Tune tells the encoder what to optimize for.">
+            <option value="hq">Best Quality (HQ)</option>
+            <option value="ll">Low Latency (faster)</option>
+            <option value="ull">Ultra‑Low Latency (fastest)</option>
+            <option value="lossless">Lossless (no quality loss)</option>
           </select>
+          <p class="mt-1 text-xs opacity-70">Quality = best visuals. Low/Ultra‑low latency = faster encodes (good for screen/streams). Lossless = huge files.</p>
         </div>
       </div>
       {#if containerNote}
@@ -244,12 +246,17 @@
     </div>
   {/if}
 
-  <div class="card opacity-60 hover:opacity-100 transition-opacity text-xs">
-    <details>
-      <summary>Support the project</summary>
-      <p class="mt-2">If this saved you time and you want to chip in, tips are appreciated but never expected: 
-        <a class="underline" href="https://paypal.me/jasonselsley" target="_blank" rel="noopener noreferrer">paypal.me/jasonselsley</a>
-      </p>
-    </details>
-  </div>
+  <!-- Support badge moved to corner (smaller, unobtrusive) -->
 </div>
+
+<!-- Floating support badge -->
+<a
+  href="https://paypal.me/jasonselsley"
+  target="_blank"
+  rel="noopener noreferrer"
+  title="If this helped, tips are appreciated (never expected)."
+  class="fixed bottom-4 right-4 bg-gray-800/80 hover:bg-gray-700 text-xs px-3 py-1.5 rounded-full shadow-lg border border-gray-700 backdrop-blur-sm"
+>
+  Support
+  <span class="sr-only">the project</span>
+</a>
