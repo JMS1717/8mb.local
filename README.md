@@ -18,7 +18,10 @@
 - NVIDIA GPU with NVIDIA drivers
 - NVIDIA Container Toolkit installed and configured
 
-## Quick Start
+## Installation
+You can run 8mb.local using prebuilt Docker images (recommended) or build locally.
+
+### Quick Start (Docker Hub images)
 ### Pull-and-run (Docker Hub images)
 If you just want to run the stack without building images locally:
 

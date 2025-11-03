@@ -47,16 +47,26 @@ jobs:
             echo "ref_tag=${TAG_NAME}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Prepare tag list
+        id: taglist
+        run: |
+          IMAGE="${{ matrix.image }}"
+          TAGS="$IMAGE:${{ steps.vars.outputs.sha_tag }}"
+          if [[ -n "${{ steps.vars.outputs.latest_tag }}" ]]; then TAGS="$TAGS\n$IMAGE:${{ steps.vars.outputs.latest_tag }}"; fi
+          if [[ -n "${{ steps.vars.outputs.ref_tag }}" ]]; then TAGS="$TAGS\n$IMAGE:${{ steps.vars.outputs.ref_tag }}"; fi
+          {
+            echo "tags<<EOF"
+            echo -e "$TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push ${{ matrix.id }}
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           push: true
           platforms: linux/amd64
-          tags: |
-            ${{ matrix.image }}:${{ steps.vars.outputs.sha_tag }}
-            ${{ matrix.image }}:${{ steps.vars.outputs.latest_tag }}
-            ${{ matrix.image }}:${{ steps.vars.outputs.ref_tag }}
+          tags: ${{ steps.taglist.outputs.tags }}
           build-args: |
             PUBLIC_BACKEND_URL=http://localhost:8000
         # Note: latest/ref tags are added only when non-empty; Docker will ignore blank tags.
