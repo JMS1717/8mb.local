@@ -181,16 +181,22 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         output_path,
     ]
 
+    # Log the full ffmpeg command for debugging
+    cmd_str = ' '.join(cmd)
+    _publish(self.request.id, {"type": "log", "message": f"FFmpeg command: {cmd_str}"})
+
     # Start process
     proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, bufsize=1)
 
     last_progress = 0.0
+    stderr_lines = []  # Capture all stderr for error reporting
     try:
         assert proc.stderr is not None
         for line in proc.stderr:
             line = line.strip()
             if not line:
                 continue
+            stderr_lines.append(line)  # Store for error diagnostics
             # Forward raw log lines for UI when not progress format
             if "=" in line:
                 key, _, val = line.partition("=")
@@ -214,7 +220,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         proc.wait()
         rc = proc.returncode
         if rc != 0:
-            msg = f"ffmpeg failed with code {rc}"
+            # Include last 20 lines of stderr in error message for diagnostics
+            recent_stderr = '\n'.join(stderr_lines[-20:]) if stderr_lines else 'No stderr output'
+            msg = f"ffmpeg failed with code {rc}\nLast stderr output:\n{recent_stderr}"
             # Publish error for UI and raise; let Celery handle failure state and exception payload formatting
             _publish(self.request.id, {"type": "error", "message": msg})
             raise RuntimeError(msg)

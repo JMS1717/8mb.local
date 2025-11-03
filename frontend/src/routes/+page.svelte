@@ -4,6 +4,7 @@
   import { uploadWithProgress, startCompress, openProgressStream, downloadUrl } from '$lib/api';
 
   let file: File | null = null;
+  let uploadedFileName: string | null = null; // Track what file was uploaded
   let targetMB = 25;
   let videoCodec: 'av1_nvenc' | 'hevc_nvenc' | 'h264_nvenc' | 'libx264' | 'libx265' | 'libaom-av1' | 'libsvtav1' = 'av1_nvenc';
   let audioCodec: 'libopus' | 'aac' = 'libopus';
@@ -80,7 +81,10 @@
     if (f) {
       file = f;
       fileSizeLabel = formatSize(f.size);
-      if (!isUploading) await doUpload();
+      // Only upload if it's a different file
+      if (uploadedFileName !== f.name && !isUploading) {
+        await doUpload();
+      }
     }
   }
   function allowDrop(e: DragEvent){ e.preventDefault(); }
@@ -95,6 +99,7 @@
       console.log('Uploading to backend...', file.name);
       jobInfo = await uploadWithProgress(file, targetMB, audioKbps, { onProgress: (p:number)=>{ uploadProgress = p; } });
       console.log('Upload response:', jobInfo);
+      uploadedFileName = file.name; // Mark this file as uploaded
       warnText = jobInfo.warn_low_quality ? `Warning: Very low video bitrate (${Math.round(jobInfo.estimate_video_kbps)} kbps)` : null;
     } catch (err: any) {
       console.error('Upload failed:', err);
@@ -142,7 +147,7 @@
     }
   }
 
-  function reset(){ file=null; jobInfo=null; taskId=null; progress=0; logLines=[]; doneStats=null; warnText=null; errorText=null; isUploading=false; }
+  function reset(){ file=null; uploadedFileName=null; jobInfo=null; taskId=null; progress=0; logLines=[]; doneStats=null; warnText=null; errorText=null; isUploading=false; }
 </script>
 
 <div class="max-w-3xl mx-auto mt-8 space-y-6">
@@ -157,7 +162,7 @@
     <div class="border-2 border-dashed border-gray-700 rounded p-8 text-center"
          on:drop={onDrop} on:dragover={allowDrop}>
       <p class="mb-2">Drag & drop a video here</p>
-      <input type="file" accept="video/*" on:change={async (e:any)=>{ const f=e.target.files?.[0]||null; file=f; fileSizeLabel = f? formatSize(f.size): null; if (f) { await doUpload(); } }} />
+      <input type="file" accept="video/*" on:change={async (e:any)=>{ const f=e.target.files?.[0]||null; file=f; fileSizeLabel = f? formatSize(f.size): null; if (f && uploadedFileName !== f.name) { await doUpload(); } }} />
       {#if file}
         <p class="mt-2 text-sm text-gray-400">{file.name} {#if fileSizeLabel}<span class="opacity-70">• {fileSizeLabel}</span>{/if}</p>
       {/if}
