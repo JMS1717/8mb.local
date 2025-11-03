@@ -37,6 +37,9 @@
 	// Support section
 	let showSupport = $state(false);
 
+	// Run instructions section
+	let showRunHelp = $state(false);
+
 	// Default presets
 	let targetMB = $state(25);
 	let videoCodec = $state('av1_nvenc');
@@ -522,6 +525,91 @@
 						{saving ? 'Saving...' : 'Save Default Presets'}
 					</button>
 				</div>
+			</div>
+
+			<!-- How to Run (if it doesn't just work) -->
+			<div class="bg-slate-800 rounded-xl p-4 mb-6 text-center">
+				<button
+					onclick={() => (showRunHelp = !showRunHelp)}
+					class="w-full flex items-center justify-center gap-2 text-center"
+				>
+					<h2 class="text-lg font-semibold text-white">How to run (if it doesn't just work)</h2>
+					<svg
+						class="w-5 h-5 text-slate-400 transition-transform {showRunHelp ? 'rotate-180' : ''}"
+						fill="none"
+						stroke="currentColor"
+						viewBox="0 0 24 24"
+					>
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+					</svg>
+				</button>
+
+				{#if showRunHelp}
+					<div class="mt-4 pt-4 border-t border-slate-700 text-left space-y-5">
+						<p class="text-slate-300 text-sm">
+							The app is a single Docker container exposing <span class="font-mono">http://localhost:8000</span>.
+							If hardware acceleration isn't available, it will automatically fall back to CPU.
+						</p>
+
+						<!-- Windows -->
+						<div>
+							<h3 class="text-white font-medium mb-2">Windows (PowerShell)</h3>
+							<p class="text-slate-400 text-sm mb-2">CPU‑only (works on all systems):</p>
+							<pre class="bg-slate-900/70 border border-slate-700 rounded-lg p-3 overflow-auto text-xs text-slate-200">
+docker run -d -p 8000:8000 ^
+  -v ${PWD}\uploads:/app/uploads ^
+  -v ${PWD}\outputs:/app/outputs ^
+  --name 8mblocal jms1717/8mblocal:latest
+							</pre>
+							<p class="text-slate-400 text-sm mt-3 mb-2">NVIDIA GPU (Docker Desktop + WSL2 with GPU enabled):</p>
+							<pre class="bg-slate-900/70 border border-slate-700 rounded-lg p-3 overflow-auto text-xs text-slate-200">
+docker run -d -p 8000:8000 ^
+  -v ${PWD}\uploads:/app/uploads ^
+  -v ${PWD}\outputs:/app/outputs ^
+  --gpus all ^
+  --name 8mblocal jms1717/8mblocal:latest
+							</pre>
+							<p class="text-slate-500 text-xs mt-2">Note: Intel iGPU acceleration via WSL2 isn’t reliable; use CPU‑only on Windows when NVIDIA is unavailable.</p>
+						</div>
+
+						<!-- Linux -->
+						<div>
+							<h3 class="text-white font-medium mb-2">Linux</h3>
+							<p class="text-slate-400 text-sm mb-2">NVIDIA (requires NVIDIA drivers + Container Toolkit):</p>
+							<pre class="bg-slate-900/70 border border-slate-700 rounded-lg p-3 overflow-auto text-xs text-slate-200">
+docker run -d -p 8000:8000 \
+  -v $(pwd)/uploads:/app/uploads \
+  -v $(pwd)/outputs:/app/outputs \
+  --gpus all \
+  --name 8mblocal jms1717/8mblocal:latest
+							</pre>
+							<p class="text-slate-400 text-sm mt-3 mb-2">Intel/AMD (VAAPI via /dev/dri):</p>
+							<pre class="bg-slate-900/70 border border-slate-700 rounded-lg p-3 overflow-auto text-xs text-slate-200">
+docker run -d -p 8000:8000 \
+  -v $(pwd)/uploads:/app/uploads \
+  -v $(pwd)/outputs:/app/outputs \
+  --device /dev/dri:/dev/dri \
+  --name 8mblocal jms1717/8mblocal:latest
+							</pre>
+						</div>
+
+						<!-- macOS -->
+						<div>
+							<h3 class="text-white font-medium mb-2">macOS (CPU‑only)</h3>
+							<pre class="bg-slate-900/70 border border-slate-700 rounded-lg p-3 overflow-auto text-xs text-slate-200">
+docker run -d -p 8000:8000 \
+  -v $(pwd)/uploads:/app/uploads \
+  -v $(pwd)/outputs:/app/outputs \
+  --name 8mblocal jms1717/8mblocal:latest
+							</pre>
+							<p class="text-slate-500 text-xs mt-2">macOS doesn’t support GPU passthrough to Docker; CPU encoders will be used automatically.</p>
+						</div>
+
+						<p class="text-slate-400 text-xs">
+							Tip: The frontend is baked into the image. If you change the UI, rebuild the image to see updates.
+						</p>
+					</div>
+				{/if}
 			</div>
 
 			<!-- Support Section -->
