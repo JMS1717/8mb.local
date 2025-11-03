@@ -1,0 +1,1 @@
+"""SmartDrop backend application package."""

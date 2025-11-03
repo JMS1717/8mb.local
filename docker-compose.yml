@@ -1,0 +1,62 @@
+version: "3.9"
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=http://backend-api:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend-api
+    restart: unless-stopped
+
+  backend-api:
+    build:
+      context: ./backend
+    environment:
+      - SMARTDROP_REDIS_URL=redis://redis-broker:6379/0
+      - SMARTDROP_UPLOADS_DIR=/app/uploads
+      - SMARTDROP_OUTPUTS_DIR=/app/outputs
+      - SMARTDROP_BASIC_AUTH_USERNAME=${SMARTDROP_BASIC_AUTH_USERNAME:-}
+      - SMARTDROP_BASIC_AUTH_PASSWORD=${SMARTDROP_BASIC_AUTH_PASSWORD:-}
+      - SMARTDROP_CLEANUP_INTERVAL_SECONDS=600
+      - SMARTDROP_FILE_TTL_SECONDS=3600
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis-broker
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - SMARTDROP_REDIS_URL=redis://redis-broker:6379/0
+      - SMARTDROP_UPLOADS_DIR=/app/uploads
+      - SMARTDROP_OUTPUTS_DIR=/app/outputs
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    depends_on:
+      - redis-broker
+    restart: unless-stopped
+
+  redis-broker:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
