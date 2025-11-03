@@ -58,17 +58,6 @@ def detect_hw_accel() -> Dict[str, any]:
             result["available_encoders"]["av1"] = "av1_vaapi"
         return result
     
-    # Check for AMD AMF (Windows only)
-    if _check_amd_amf():
-        result["type"] = "amd"
-        result["decode_method"] = "d3d11va"
-        result["available_encoders"] = {
-            "h264": "h264_amf",
-            "hevc": "hevc_amf",
-            "av1": "av1_amf",
-        }
-        return result
-    
     # CPU fallback
     result["available_encoders"] = {
         "h264": "libx264",
@@ -215,35 +204,6 @@ def _check_vaapi() -> Dict[str, any]:
     return result
 
 
-def _check_amd_amf() -> bool:
-    """Check if AMD AMF is available (Windows only)."""
-    if os.name != 'nt':
-        return False
-    
-    try:
-        result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-hwaccels"],
-            capture_output=True,
-            text=True,
-            timeout=2
-        )
-        
-        if "d3d11va" in result.stdout.lower():
-            # Check for AMF encoder
-            encoders = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-encoders"],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            if "h264_amf" in encoders.stdout:
-                return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    
-    return False
-
-
 def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, list]:
     """
     Map user-requested codec to appropriate hardware encoder.
@@ -265,8 +225,7 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
     # (e.g., h264_nvenc, hevc_amf, av1_vaapi, etc.)
     if requested_codec in ("h264_nvenc", "hevc_nvenc", "av1_nvenc",
                            "h264_qsv", "hevc_qsv", "av1_qsv",
-                           "h264_vaapi", "hevc_vaapi", "av1_vaapi",
-                           "h264_amf", "hevc_amf", "av1_amf"):
+                           "h264_vaapi", "hevc_vaapi", "av1_vaapi"):
         encoder = requested_codec
         flags = []
         init_flags = []
@@ -283,10 +242,8 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
             flags = ["-pix_fmt", "nv12"]
             if "h264" in encoder:
                 flags += ["-profile:v", "high"]
-        elif encoder.endswith("_amf"):
-            flags = ["-pix_fmt", "yuv420p"]
         elif encoder.endswith("_vaapi"):
-            vaapi_device = hw_info.get("vaapi_device", "/dev/dri/renderD128")
+            vaapi_device = hw_info.get("vaapi_device") or "/dev/dri/renderD128"
             init_flags = ["-init_hw_device", f"vaapi=va:{vaapi_device}", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-hwaccel_device", "va"]
             flags = ["-vf", "format=nv12|vaapi,hwupload"]
         
@@ -318,10 +275,8 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
         flags = ["-pix_fmt", "nv12"]
         if base == "h264":
             flags += ["-profile:v", "high"]
-    elif encoder.endswith("_amf"):
-        flags = ["-pix_fmt", "yuv420p"]
     elif encoder.endswith("_vaapi"):
-        vaapi_device = hw_info.get("vaapi_device", "/dev/dri/renderD128")
+        vaapi_device = hw_info.get("vaapi_device") or "/dev/dri/renderD128"
         init_flags = ["-init_hw_device", f"vaapi=va:{vaapi_device}", "-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-hwaccel_device", "va"]
         flags = ["-vf", "format=nv12|vaapi,hwupload"]
     elif encoder == "libx264":

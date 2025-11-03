@@ -92,14 +92,10 @@
       { value: 'av1_qsv', label: 'AV1 (Intel Arc/QSV)', group: 'intel' },
       { value: 'hevc_qsv', label: 'HEVC (H.265, Intel QSV)', group: 'intel' },
       { value: 'h264_qsv', label: 'H.264 (Intel QSV)', group: 'intel' },
-      // Intel/AMD VAAPI
+      // Intel/AMD VAAPI (Linux)
       { value: 'av1_vaapi', label: 'AV1 (VAAPI)', group: 'vaapi' },
       { value: 'hevc_vaapi', label: 'HEVC (H.265, VAAPI)', group: 'vaapi' },
       { value: 'h264_vaapi', label: 'H.264 (VAAPI)', group: 'vaapi' },
-      // AMD AMF
-      { value: 'av1_amf', label: 'AV1 (AMD - RX 7000 series)', group: 'amd' },
-      { value: 'hevc_amf', label: 'HEVC (H.265, AMD)', group: 'amd' },
-      { value: 'h264_amf', label: 'H.264 (AMD)', group: 'amd' },
       // CPU
       { value: 'libaom-av1', label: 'AV1 (CPU - Highest Quality)', group: 'cpu' },
       { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },

@@ -21,9 +21,6 @@
 	h264_vaapi: boolean;
 	hevc_vaapi: boolean;
 	av1_vaapi: boolean;
-	h264_amf: boolean;
-	hevc_amf: boolean;
-	av1_amf: boolean;
 	libx264: boolean;
 	libx265: boolean;
 	libaom_av1: boolean;
@@ -59,9 +56,6 @@
 	h264_vaapi: true,
 	hevc_vaapi: true,
 	av1_vaapi: true,
-	h264_amf: true,
-	hevc_amf: true,
-	av1_amf: true,
 	libx264: true,
 	libx265: true,
 	libaom_av1: true,
@@ -301,35 +295,21 @@
 	  </div>
 	</div>
 
-	<!-- AMD Section -->
+	<!-- AMD/Intel Section (VAAPI - Linux only) -->
 	<div style="margin-bottom:20px">
-	  <h3 style="color:#ef4444; font-weight:600; font-size:15px; margin-bottom:8px">AMD (VCN / AMF / VAAPI)</h3>
-	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; margin-bottom:12px">
-		<div class="switch">
-		  <input id="av1_amf" type="checkbox" bind:checked={codecSettings.av1_amf} />
-		  <label class="label" for="av1_amf" style="margin:0">AV1 (AMF, RX 7000)</label>
-		</div>
-		<div class="switch">
-		  <input id="hevc_amf" type="checkbox" bind:checked={codecSettings.hevc_amf} />
-		  <label class="label" for="hevc_amf" style="margin:0">HEVC AMF (Windows)</label>
-		</div>
-		<div class="switch">
-		  <input id="h264_amf" type="checkbox" bind:checked={codecSettings.h264_amf} />
-		  <label class="label" for="h264_amf" style="margin:0">H.264 AMF (Windows)</label>
-		</div>
-	  </div>
+	  <h3 style="color:#ef4444; font-weight:600; font-size:15px; margin-bottom:8px">AMD/Intel (VAAPI - Linux only)</h3>
 	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
 		<div class="switch">
 		  <input id="av1_vaapi" type="checkbox" bind:checked={codecSettings.av1_vaapi} />
-		  <label class="label" for="av1_vaapi" style="margin:0">AV1 VAAPI (Linux)</label>
+		  <label class="label" for="av1_vaapi" style="margin:0">AV1 VAAPI</label>
 		</div>
 		<div class="switch">
 		  <input id="hevc_vaapi" type="checkbox" bind:checked={codecSettings.hevc_vaapi} />
-		  <label class="label" for="hevc_vaapi" style="margin:0">HEVC VAAPI (Linux)</label>
+		  <label class="label" for="hevc_vaapi" style="margin:0">HEVC VAAPI</label>
 		</div>
 		<div class="switch">
 		  <input id="h264_vaapi" type="checkbox" bind:checked={codecSettings.h264_vaapi} />
-		  <label class="label" for="h264_vaapi" style="margin:0">H.264 VAAPI (Linux)</label>
+		  <label class="label" for="h264_vaapi" style="margin:0">H.264 VAAPI</label>
 		</div>
 	  </div>
 	</div>
