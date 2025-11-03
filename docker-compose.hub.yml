@@ -1,0 +1,59 @@
+services:
+  redis-broker:
+    image: redis:7-alpine
+    container_name: 8mblocal-redis
+    ports:
+      - "6379:6379"
+
+  backend-api:
+    image: jms1717/8mblocal-backend:latest
+    container_name: 8mblocal-backend
+    env_file:
+      - ./.env
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://redis-broker:6379/0}
+      - AUTH_ENABLED=${AUTH_ENABLED:-true}
+      - AUTH_USER=${AUTH_USER:-admin}
+      - AUTH_PASS=${AUTH_PASS:-changeme}
+      - FILE_RETENTION_HOURS=${FILE_RETENTION_HOURS:-1}
+      - BACKEND_HOST=${BACKEND_HOST:-0.0.0.0}
+      - BACKEND_PORT=${BACKEND_PORT:-8000}
+    depends_on:
+      - redis-broker
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+
+  worker:
+    image: jms1717/8mblocal-worker:latest
+    container_name: 8mblocal-worker
+    depends_on:
+      - redis-broker
+    env_file:
+      - ./.env
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://redis-broker:6379/0}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-all}
+    gpus: all
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+
+  frontend:
+    image: jms1717/8mblocal-frontend:latest
+    container_name: 8mblocal-frontend
+    env_file:
+      - ./.env
+    environment:
+      - PUBLIC_BACKEND_URL=http://localhost:8000
+    depends_on:
+      - backend-api
+    ports:
+      - "5173:5173"
+
+networks:
+  default:
+    name: 8mblocal-net
