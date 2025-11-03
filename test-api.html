@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SmartDrop API Test</title>
+    <style>
+        body { font-family: Arial; padding: 20px; background: #1a1a1a; color: #fff; }
+        .test { margin: 20px 0; padding: 15px; background: #2a2a2a; border-radius: 5px; }
+        .success { border-left: 4px solid #0f0; }
+        .error { border-left: 4px solid #f00; }
+        button { padding: 10px 20px; background: #4CAF50; color: white; border: none; cursor: pointer; }
+        button:hover { background: #45a049; }
+        pre { background: #000; padding: 10px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>SmartDrop API Connectivity Test</h1>
+    
+    <button onclick="testHealth()">Test Backend Health</button>
+    <button onclick="testUpload()">Test File Upload (requires video)</button>
+    
+    <div id="results"></div>
+
+    <script>
+        const BACKEND = 'http://localhost:8000';
+        
+        async function testHealth() {
+            const results = document.getElementById('results');
+            try {
+                const res = await fetch(`${BACKEND}/healthz`);
+                const data = await res.json();
+                results.innerHTML = `
+                    <div class="test success">
+                        <h3>✓ Health Check Success</h3>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    </div>
+                `;
+            } catch (err) {
+                results.innerHTML = `
+                    <div class="test error">
+                        <h3>✗ Health Check Failed</h3>
+                        <pre>${err.message}</pre>
+                    </div>
+                `;
+            }
+        }
+        
+        async function testUpload() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = 'video/*';
+            input.onchange = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                const results = document.getElementById('results');
+                results.innerHTML = '<div class="test">Uploading and analyzing...</div>';
+                
+                try {
+                    const fd = new FormData();
+                    fd.append('file', file);
+                    fd.append('target_size_mb', '25');
+                    fd.append('audio_bitrate_kbps', '128');
+                    
+                    const res = await fetch(`${BACKEND}/api/upload`, {
+                        method: 'POST',
+                        body: fd
+                    });
+                    
+                    if (!res.ok) {
+                        throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+                    }
+                    
+                    const data = await res.json();
+                    results.innerHTML = `
+                        <div class="test success">
+                            <h3>✓ Upload & Analysis Success</h3>
+                            <pre>${JSON.stringify(data, null, 2)}</pre>
+                        </div>
+                    `;
+                } catch (err) {
+                    results.innerHTML = `
+                        <div class="test error">
+                            <h3>✗ Upload Failed</h3>
+                            <pre>${err.message}</pre>
+                        </div>
+                    `;
+                }
+            };
+            input.click();
+        }
+    </script>
+</body>
+</html>

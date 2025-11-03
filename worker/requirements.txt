@@ -1,0 +1,4 @@
+celery[redis]==5.4.0
+redis==5.0.7
+orjson==3.10.7
+python-dotenv==1.0.1

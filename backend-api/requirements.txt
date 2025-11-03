@@ -1,0 +1,11 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+aiofiles==24.1.0
+orjson==3.10.7
+pydantic==2.8.2
+pydantic-settings==2.4.0
+redis==5.0.7
+celery[redis]==5.4.0
+APScheduler==3.10.4
+python-dotenv==1.0.1

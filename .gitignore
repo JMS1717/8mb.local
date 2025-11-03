@@ -1,0 +1,26 @@
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+.pnpm-store/
+frontend/.svelte-kit/
+frontend/build/
+
+# Env files
+.env
+
+# Local artifacts
+uploads/*
+!uploads/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# Docker
+*.env.local
