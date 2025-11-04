@@ -112,15 +112,9 @@
     // Load system capabilities (CPU, memory, GPUs)
     try {
       sysCaps = await getSystemCapabilities();
-      // Prefer the system capabilities' hardware view (backend includes worker.hw under sysCaps.hardware)
+      // Use the worker-reported hardware type without forcing overrides
       const hw = sysCaps?.hardware?.type;
-      // If NVIDIA driver present and GPUs listed, force NVIDIA for UI clarity
-      const hasNvidia = !!sysCaps?.nvidia_driver && Array.isArray(sysCaps?.gpus) && sysCaps.gpus.length > 0;
-      if (hasNvidia) {
-        hardwareType = 'nvidia';
-      } else if (hw) {
-        hardwareType = hw;
-      }
+      if (hw) hardwareType = hw;
     } catch (e:any) {
       sysCapsError = e?.message || 'Failed to fetch system capabilities';
     }

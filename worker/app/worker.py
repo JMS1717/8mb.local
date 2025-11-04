@@ -159,6 +159,14 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             init_hw_flags = []  # Clear hardware init flags
     
     _publish(self.request.id, {"type": "log", "message": f"Using encoder: {actual_encoder} (requested: {video_codec})"})
+    # Log decode path info
+    try:
+        if any(x == "-hwaccel" for x in init_hw_flags):
+            idx = init_hw_flags.index("-hwaccel")
+            dec = init_hw_flags[idx+1] if idx+1 < len(init_hw_flags) else "unknown"
+            _publish(self.request.id, {"type": "log", "message": f"Decoder: using {dec}"})
+    except Exception:
+        pass
 
     # Map preset and tune
     preset_val = preset.lower()

@@ -71,13 +71,20 @@ def detect_hw_accel() -> Dict[str, any]:
 def _check_nvidia() -> bool:
     """Check if NVIDIA GPU is available."""
     try:
-        # Check nvidia-smi
-        result = subprocess.run(
-            ["nvidia-smi"], 
-            capture_output=True, 
-            timeout=2
+        # Prefer querying GPU list to avoid false positives
+        q = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=2,
         )
-        if result.returncode == 0:
+        if q.returncode == 0:
+            names = [l.strip() for l in (q.stdout or '').splitlines() if l.strip()]
+            if len(names) > 0:
+                return True
+        # Fallback: list mode
+        l = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=2)
+        if l.returncode == 0 and (l.stdout or '').strip():
             return True
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
@@ -232,6 +239,8 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
         
         # Add hardware-specific flags based on encoder type
         if encoder.endswith("_nvenc"):
+            # Enable CUDA hardware decode when available; keep frames in system memory to avoid filter issues
+            init_flags = ["-hwaccel", "cuda"]
             flags = ["-pix_fmt", "yuv420p"]
             if "h264" in encoder:
                 flags += ["-profile:v", "high"]
@@ -265,6 +274,7 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
     
     # Add hardware-specific flags
     if encoder.endswith("_nvenc"):
+        init_flags = ["-hwaccel", "cuda"]
         flags = ["-pix_fmt", "yuv420p"]
         if base == "h264":
             flags += ["-profile:v", "high"]
