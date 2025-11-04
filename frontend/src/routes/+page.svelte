@@ -19,7 +19,7 @@
   let startTime: string = '';
   let endTime: string = '';
   // New UI options
-  let playSoundWhenDone = false;
+  let playSoundWhenDone = true; // default ON
   let autoDownload = false;
   
   $: containerNote = (container === 'mp4' && audioCodec === 'libopus') ? 'MP4 does not support Opus; audio will be encoded as AAC automatically.' : null;
@@ -35,6 +35,8 @@
   let progress = 0;
   let logLines: string[] = [];
   let doneStats: any = null;
+  let isCompressing = false;
+  let esRef: EventSource | null = null;
   let warnText: string | null = null;
   let errorText: string | null = null;
   let isUploading = false;
@@ -51,6 +53,13 @@
 
   // Load default presets and available codecs on mount
   onMount(async () => {
+    // Restore UI preferences
+    try {
+      const ps = localStorage.getItem('playSoundWhenDone');
+      if (ps !== null) playSoundWhenDone = (ps === 'true');
+      const ad = localStorage.getItem('autoDownload');
+      if (ad !== null) autoDownload = (ad === 'true');
+    } catch {}
     try {
       const res = await fetch('/api/settings/presets');
       if (res.ok) {
@@ -167,8 +176,10 @@
 
   async function doCompress(){
     if (!jobInfo) return;
+    if (isCompressing) return; // prevent double submission
     errorText = null;
     try {
+      isCompressing = true;
       const payload = {
         job_id: jobInfo.job_id,
         filename: jobInfo.filename,
@@ -188,7 +199,9 @@
       console.log('Starting compression...', payload);
       const { task_id } = await startCompress(payload);
       taskId = task_id;
+      try { esRef?.close(); } catch {}
       const es = openProgressStream(taskId);
+      esRef = es;
       es.onmessage = (ev) => {
         try { const data = JSON.parse(ev.data);
           if (data.type === 'progress') { progress = data.progress; }
@@ -196,6 +209,8 @@
           if (data.type === 'done') { 
             doneStats = data.stats; 
             progress = 100;
+            isCompressing = false;
+            try { esRef?.close(); } catch {}
             
             // Play sound when done if enabled
             if (playSoundWhenDone) {
@@ -210,7 +225,7 @@
               }, 500);
             }
           }
-          if (data.type === 'error') { logLines = [data.message, ...logLines]; }
+          if (data.type === 'error') { logLines = [data.message, ...logLines]; isCompressing = false; try { esRef?.close(); } catch {} }
         } catch {}
       }
     } catch (err: any) {
@@ -219,7 +234,11 @@
     }
   }
 
-  function reset(){ file=null; uploadedFileName=null; jobInfo=null; taskId=null; progress=0; logLines=[]; doneStats=null; warnText=null; errorText=null; isUploading=false; }
+  function reset(){ file=null; uploadedFileName=null; jobInfo=null; taskId=null; progress=0; logLines=[]; doneStats=null; warnText=null; errorText=null; isUploading=false; isCompressing=false; try { esRef?.close(); } catch {} }
+
+  // Persist UI preferences
+  $: (() => { try { localStorage.setItem('playSoundWhenDone', String(playSoundWhenDone)); } catch {} })();
+  $: (() => { try { localStorage.setItem('autoDownload', String(autoDownload)); } catch {} })();
 </script>
 
 <div class="max-w-3xl mx-auto mt-8 space-y-6">
@@ -412,7 +431,7 @@
       <div class="h-3 bg-gray-800 rounded">
         <div class="h-3 bg-indigo-600 rounded" style={`width:${progress}%`}></div>
       </div>
-      <details class="mt-3">
+      <details class="mt-3" open>
         <summary>FFmpeg log</summary>
         <pre class="mt-2 text-xs whitespace-pre-wrap">{logLines.join('\n')}</pre>
       </details>

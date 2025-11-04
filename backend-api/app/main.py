@@ -162,7 +162,7 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
         await pubsub.close()
 
 
-@app.get("/api/stream/{task_id}", dependencies=[Depends(basic_auth)])
+@app.get("/api/stream/{task_id}")
 async def stream(task_id: str):
     return StreamingResponse(_sse_event_generator(task_id), media_type="text/event-stream")
 
