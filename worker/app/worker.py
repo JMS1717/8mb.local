@@ -44,7 +44,7 @@ def get_hardware_info_task():
 def compress_video(self, job_id: str, input_path: str, output_path: str, target_size_mb: float,
                    video_codec: str, audio_codec: str, audio_bitrate_kbps: int, preset: str, tune: str = "hq",
                    max_width: int = None, max_height: int = None, start_time: str = None, end_time: str = None,
-                   force_hw_decode: bool = False):
+                   force_hw_decode: bool = False, fast_mp4_finalize: bool = False):
     start_ts = time.time()
     # Detect hardware acceleration
     hw_info = get_hw_info()
@@ -234,8 +234,16 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         if actual_encoder == "libx264":
             tune_flags = ["-tune", "film"]  # Better than 'hq' for CPU
 
-    # MP4 web-friendly
-    mp4_flags = ["-movflags", "+faststart"] if output_path.lower().endswith(".mp4") else []
+    # MP4 finalize behavior
+    if output_path.lower().endswith(".mp4"):
+        if fast_mp4_finalize:
+            # Fragmented MP4 avoids long finalization step
+            mp4_flags = ["-movflags", "+frag_keyframe+empty_moov+default_base_moof"]
+            _publish(self.request.id, {"type": "log", "message": "MP4: using fragmented MP4 (fast finalize)"})
+        else:
+            mp4_flags = ["-movflags", "+faststart"]
+    else:
+        mp4_flags = []
 
     # Build video filter chain
     vf_filters = []
@@ -424,6 +432,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         proc_i = subprocess.Popen(command, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, bufsize=1)
         local_stderr = []
         nonlocal last_progress
+        emitted_initial_progress = False
         cancelled = False
         try:
             assert proc_i.stderr is not None
@@ -448,6 +457,12 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 if not line:
                     continue
                 local_stderr.append(line)
+                # Emit a small initial progress bump on first stderr line to avoid long "Starting…"
+                if not emitted_initial_progress and duration > 0:
+                    emitted_initial_progress = True
+                    if last_progress < 0.01:
+                        last_progress = 0.01
+                        _publish(self.request.id, {"type": "progress", "progress": 1.0})
                 if "=" in line:
                     key, _, val = line.partition("=")
                     if key == "out_time_ms":

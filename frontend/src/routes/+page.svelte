@@ -15,6 +15,8 @@
   let tune: 'hq'|'ll'|'ull'|'lossless' = 'hq';
   // Decoder preference
   let preferHwDecode: boolean = true; // Prefer hardware decoding when available
+  // MP4 finalize preference
+  let fastMp4Finalize: boolean = false;
   // New resolution and trim controls
   let maxWidth: number | null = null;
   let maxHeight: number | null = null;
@@ -308,6 +310,7 @@
         container,
         tune,
         force_hw_decode: preferHwDecode,
+  fast_mp4_finalize: fastMp4Finalize,
         // Optional resolution and trim parameters
         max_width: maxWidth || undefined,
         max_height: maxHeight || undefined,
@@ -670,6 +673,12 @@
             <input type="checkbox" bind:checked={autoDownload} class="w-4 h-4" />
             <span class="text-sm">⬇️ Auto-download when done</span>
           </label>
+          {#if container === 'mp4'}
+          <label class="flex items-center gap-2 cursor-pointer" title="Writes fragmented MP4 to avoid long 'finalizing' step. Compatible with modern players/Discord.">
+            <input type="checkbox" bind:checked={fastMp4Finalize} class="w-4 h-4" />
+            <span class="text-sm">🚀 Fast finalize (MP4)</span>
+          </label>
+          {/if}
           <label class="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" bind:checked={preferHwDecode} class="w-4 h-4" />
             <span class="text-sm">⚡ Prefer hardware decoding</span>

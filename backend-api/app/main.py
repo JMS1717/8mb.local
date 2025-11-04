@@ -199,6 +199,7 @@ async def compress(req: CompressRequest):
             start_time=req.start_time,
             end_time=req.end_time,
             force_hw_decode=bool(req.force_hw_decode or False),
+            fast_mp4_finalize=bool(req.fast_mp4_finalize or False),
         ),
     )
     return {"task_id": task.id}

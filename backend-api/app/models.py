@@ -27,6 +27,8 @@ class CompressRequest(BaseModel):
     end_time: Optional[str] = None    # Format: seconds (float) or "HH:MM:SS"
     # Prefer attempting GPU decoding (when available). Worker will still fall back if unsupported.
     force_hw_decode: Optional[bool] = False
+    # For MP4 outputs, use fragmented MP4 to avoid long faststart finalization.
+    fast_mp4_finalize: Optional[bool] = False
 
 class StatusResponse(BaseModel):
     state: str
