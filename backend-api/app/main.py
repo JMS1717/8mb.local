@@ -346,6 +346,7 @@ async def job_status(task_id: str):
 @app.get("/api/jobs/{task_id}/download", dependencies=[Depends(basic_auth)])
 async def download(task_id: str):
     res = celery_app.AsyncResult(task_id)
+    state = res.state or "UNKNOWN"
     meta = res.info if isinstance(res.info, dict) else {}
     path = meta.get("output_path")
     # Fallback: if Celery meta isn't populated yet, check Redis 'ready' key
@@ -356,11 +357,37 @@ async def download(task_id: str):
                 path = cached
         except Exception:
             pass
-    if not path or not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="File not ready")
-    filename = os.path.basename(path)
-    media_type = "video/mp4" if filename.lower().endswith(".mp4") else "video/x-matroska"
-    return FileResponse(path, filename=filename, media_type=media_type)
+    # If the file exists, serve it immediately
+    if path and os.path.isfile(path):
+        filename = os.path.basename(path)
+        media_type = "video/mp4" if filename.lower().endswith(".mp4") else "video/x-matroska"
+        return FileResponse(path, filename=filename, media_type=media_type)
+
+    # Otherwise, return a more descriptive error payload
+    detail = {
+        "error": "file_not_ready",
+        "state": state,
+    }
+    if isinstance(meta, dict):
+        if "progress" in meta:
+            detail["progress"] = meta.get("progress")
+        if "detail" in meta:
+            detail["detail"] = meta.get("detail")
+        if meta.get("output_path"):
+            detail["expected_path"] = meta.get("output_path")
+    try:
+        cached = await redis.get(f"ready:{task_id}")
+        if cached and not os.path.isfile(cached):
+            detail["ready_cache"] = "present_but_missing_file"
+        elif cached:
+            detail["ready_cache"] = "present"
+        else:
+            detail["ready_cache"] = "absent"
+    except Exception:
+        pass
+
+    # Keep status code as 404 for backward compatibility with current UI
+    raise HTTPException(status_code=404, detail=detail)
 
 
 @app.post("/api/jobs/{task_id}/cancel")
