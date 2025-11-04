@@ -697,6 +697,19 @@ async def update_codec_visibility_settings(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/settings/codecs/sync-from-hardware")
+async def sync_codecs_from_hardware(_auth=Depends(basic_auth)):
+    """Manually trigger a codec visibility sync based on detected hardware.
+
+    Useful if startup order caused the initial sync to miss GPU availability.
+    """
+    try:
+        await _sync_codec_settings_from_tests(timeout_s=15)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # History endpoints
 @app.get("/api/settings/history")
 async def get_history_settings():
