@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import time
 import json
 import logging
 import os
@@ -263,18 +265,57 @@ async def cancel_job(task_id: str):
 
 
 async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
+    """SSE stream combining Redis pubsub messages with periodic heartbeats.
+
+    Heartbeats help keep connections alive across proxies that drop idle SSE.
+    """
     channel = f"progress:{task_id}"
     pubsub = redis.pubsub()
     await pubsub.subscribe(channel)
+
+    queue: asyncio.Queue[str] = asyncio.Queue()
+
+    async def reader():
+        try:
+            async for msg in pubsub.listen():
+                if msg.get("type") != "message":
+                    continue
+                data = msg.get("data")
+                # push raw json string from publisher
+                await queue.put(str(data))
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            # Emit an error log and exit; outer loop will close
+            try:
+                await queue.put(orjson.dumps({"type": "error", "message": f"[SSE] pubsub error: {e}"}).decode())
+            except Exception:
+                pass
+
+    async def heartbeater():
+        try:
+            while True:
+                await asyncio.sleep(20)
+                try:
+                    await queue.put(orjson.dumps({"type": "ping", "ts": time.time()}).decode())
+                except Exception:
+                    # Best-effort heartbeat
+                    pass
+        except asyncio.CancelledError:
+            pass
+
+    reader_task = asyncio.create_task(reader())
+    hb_task = asyncio.create_task(heartbeater())
     try:
-        async for msg in pubsub.listen():
-            if msg.get("type") != "message":
-                continue
-            data = msg.get("data")
+        while True:
+            data = await queue.get()
             yield f"data: {data}\n\n".encode()
     finally:
-        await pubsub.unsubscribe(channel)
-        await pubsub.close()
+        reader_task.cancel()
+        hb_task.cancel()
+        with contextlib.suppress(Exception):
+            await pubsub.unsubscribe(channel)
+            await pubsub.close()
 
 
 @app.get("/api/stream/{task_id}")
