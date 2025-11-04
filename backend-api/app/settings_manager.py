@@ -104,8 +104,8 @@ def get_default_presets() -> dict:
     env_vars = read_env_file()
     
     return {
-        'target_mb': int(os.getenv('DEFAULT_TARGET_MB', env_vars.get('DEFAULT_TARGET_MB', '25'))),
-        'video_codec': os.getenv('DEFAULT_VIDEO_CODEC', env_vars.get('DEFAULT_VIDEO_CODEC', 'av1_nvenc')),
+        'target_mb': float(os.getenv('DEFAULT_TARGET_MB', env_vars.get('DEFAULT_TARGET_MB', '9.7'))),
+        'video_codec': os.getenv('DEFAULT_VIDEO_CODEC', env_vars.get('DEFAULT_VIDEO_CODEC', 'hevc_nvenc')),
         'audio_codec': os.getenv('DEFAULT_AUDIO_CODEC', env_vars.get('DEFAULT_AUDIO_CODEC', 'libopus')),
         'preset': os.getenv('DEFAULT_PRESET', env_vars.get('DEFAULT_PRESET', 'p6')),
         'audio_kbps': int(os.getenv('DEFAULT_AUDIO_KBPS', env_vars.get('DEFAULT_AUDIO_KBPS', '128'))),

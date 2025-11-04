@@ -169,6 +169,7 @@
 		max-width: 1200px;
 		margin: 0 auto;
 		padding: 2rem;
+		color: #e5e7eb;
 	}
 
 	.header {
@@ -184,6 +185,7 @@
 		margin: 0;
 		font-size: 2rem;
 		font-weight: bold;
+		color: white;
 	}
 
 	.actions {
@@ -204,12 +206,12 @@
 	}
 
 	.btn-secondary {
-		background-color: #6b7280;
+		background-color: #4b5563;
 		color: white;
 	}
 
 	.btn-secondary:hover {
-		background-color: #4b5563;
+		background-color: #374151;
 	}
 
 	.btn-danger {
@@ -222,14 +224,14 @@
 	}
 
 	.btn-delete {
-		background-color: #fee2e2;
-		color: #991b1b;
+		background-color: #450a0a;
+		color: #fca5a5;
 		font-size: 0.75rem;
 		padding: 0.375rem 0.75rem;
 	}
 
 	.btn-delete:hover {
-		background-color: #fecaca;
+		background-color: #7f1d1d;
 	}
 
 	.loading,
@@ -237,6 +239,7 @@
 		text-align: center;
 		padding: 2rem;
 		font-size: 1.125rem;
+		color: #9ca3af;
 	}
 
 	.error {
@@ -244,11 +247,12 @@
 	}
 
 	.info-box {
-		background-color: #dbeafe;
+		background-color: #1e3a5f;
 		border: 1px solid #3b82f6;
 		border-radius: 0.5rem;
 		padding: 1.5rem;
 		text-align: center;
+		color: #bfdbfe;
 	}
 
 	.info-box p {
@@ -256,7 +260,7 @@
 	}
 
 	.link {
-		color: #2563eb;
+		color: #60a5fa;
 		text-decoration: underline;
 	}
 
@@ -269,7 +273,7 @@
 
 	.entry-count {
 		font-size: 0.875rem;
-		color: #6b7280;
+		color: #9ca3af;
 		margin: 0;
 	}
 
@@ -280,15 +284,15 @@
 	}
 
 	.history-entry {
-		background: white;
-		border: 1px solid #e5e7eb;
+		background: #1f2937;
+		border: 1px solid #374151;
 		border-radius: 0.5rem;
 		padding: 1.5rem;
 		display: flex;
 		justify-content: space-between;
 		align-items: flex-start;
 		gap: 1rem;
-		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 	}
 
 	.entry-main {
@@ -308,12 +312,13 @@
 		font-size: 1.125rem;
 		font-weight: 600;
 		word-break: break-word;
+		color: white;
 	}
 
 	.timestamp {
 		margin: 0;
 		font-size: 0.875rem;
-		color: #6b7280;
+		color: #9ca3af;
 	}
 
 	.size-info,
@@ -333,26 +338,27 @@
 	}
 
 	.label {
-		color: #6b7280;
+		color: #9ca3af;
 		font-weight: 500;
 	}
 
 	.value {
 		text-align: right;
+		color: #d1d5db;
 	}
 
 	.highlight {
-		color: #059669;
+		color: #10b981;
 		font-weight: 600;
 	}
 
 	.badge {
-		background-color: #e5e7eb;
+		background-color: #374151;
 		padding: 0.125rem 0.5rem;
 		border-radius: 0.25rem;
 		font-size: 0.75rem;
 		font-weight: 600;
-		color: #374151;
+		color: #d1d5db;
 	}
 
 	@media (max-width: 768px) {

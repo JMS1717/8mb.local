@@ -71,11 +71,14 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         try:
             # Try to initialize encoder with a minimal command
             # This will fail fast if the hardware isn't accessible
+            # Note: Use 256x256 minimum size - NVENC requires at least 128x128, some encoders need more
             cmd = ["ffmpeg", "-hide_banner"]
             cmd.extend(hw_flags)  # Hardware init flags
             cmd.extend([
-                "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1",
+                "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
                 "-c:v", encoder_name,
+                "-t", "0.1",
+                "-frames:v", "1",
                 "-f", "null", "-"
             ])
             result = subprocess.run(
@@ -86,10 +89,6 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             )
             # Check for specific errors that indicate driver/library issues
             stderr_lower = result.stderr.lower()
-            
-            # Log the test result for debugging
-            if result.returncode != 0:
-                _publish(self.request.id, {"type": "log", "message": f"Encoder test for {encoder_name}: exit code {result.returncode}"})
             
             # These are definite failures - hardware not accessible
             if "operation not permitted" in stderr_lower:
@@ -305,9 +304,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 break
         cmd += v_flags[:]
         v_flags = []  # Already added
-    
-    if v_flags:  # Add remaining v_flags if not already added
-        cmd += v_flags
+    # Note: v_flags were already added earlier; avoid duplicating them for non-VAAPI paths
     
     cmd += [
         "-b:v", f"{int(video_kbps)}k",

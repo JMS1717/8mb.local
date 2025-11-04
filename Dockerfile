@@ -14,12 +14,13 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /build
 
 # NVIDIA NVENC headers
+# Pin to NVENC API 12.1 (driver 535.x compatibility). Use sdk/12.1.
 RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
-    cd nv-codec-headers && make install && cd ..
+    cd nv-codec-headers && git checkout sdk/12.1 && make install && cd ..
 
 # Build FFmpeg with all hardware acceleration support
-RUN wget https://ffmpeg.org/releases/ffmpeg-7.0.tar.xz && \
-    tar xf ffmpeg-7.0.tar.xz && cd ffmpeg-7.0 && \
+RUN wget https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
+        tar xf ffmpeg-6.1.1.tar.xz && cd ffmpeg-6.1.1 && \
         ./configure \
       --enable-nonfree --enable-gpl \
       --enable-cuda-nvcc --enable-libnpp --enable-nvenc \
@@ -31,7 +32,7 @@ RUN wget https://ffmpeg.org/releases/ffmpeg-7.0.tar.xz && \
     # Strip binaries to reduce size
     strip /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
     # Clean up build artifacts
-    cd .. && rm -rf ffmpeg-7.0 ffmpeg-7.0.tar.xz nv-codec-headers
+        cd .. && rm -rf ffmpeg-6.1.1 ffmpeg-6.1.1.tar.xz nv-codec-headers
 
 # Stage 2: Build Frontend
 FROM node:20-alpine AS frontend-build

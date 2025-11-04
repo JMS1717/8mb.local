@@ -19,7 +19,7 @@
   let startTime: string = '';
   let endTime: string = '';
   // New UI options
-  let playSoundWhenDone = false;
+  let playSoundWhenDone = true; // default ON
   let autoDownload = false;
   
   $: containerNote = (container === 'mp4' && audioCodec === 'libopus') ? 'MP4 does not support Opus; audio will be encoded as AAC automatically.' : null;
@@ -35,6 +35,8 @@
   let progress = 0;
   let logLines: string[] = [];
   let doneStats: any = null;
+  let isCompressing = false;
+  let esRef: EventSource | null = null;
   let warnText: string | null = null;
   let errorText: string | null = null;
   let isUploading = false;
@@ -51,6 +53,13 @@
 
   // Load default presets and available codecs on mount
   onMount(async () => {
+    // Restore UI preferences
+    try {
+      const ps = localStorage.getItem('playSoundWhenDone');
+      if (ps !== null) playSoundWhenDone = (ps === 'true');
+      const ad = localStorage.getItem('autoDownload');
+      if (ad !== null) autoDownload = (ad === 'true');
+    } catch {}
     try {
       const res = await fetch('/api/settings/presets');
       if (res.ok) {
@@ -100,6 +109,10 @@
       { value: 'av1_vaapi', label: 'AV1 (VAAPI)', group: 'vaapi' },
       { value: 'hevc_vaapi', label: 'HEVC (H.265, VAAPI)', group: 'vaapi' },
       { value: 'h264_vaapi', label: 'H.264 (VAAPI)', group: 'vaapi' },
+      // AMD AMF
+      { value: 'av1_amf', label: 'AV1 (AMD)', group: 'amd' },
+      { value: 'hevc_amf', label: 'HEVC (H.265, AMD)', group: 'amd' },
+      { value: 'h264_amf', label: 'H.264 (AMD)', group: 'amd' },
       // CPU
       { value: 'libaom-av1', label: 'AV1 (CPU - Highest Quality)', group: 'cpu' },
       { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
@@ -114,6 +127,28 @@
     }
     
     return list;
+  }
+
+  function getCodecColor(group: string): string {
+    switch(group) {
+      case 'nvidia': return '#22c55e'; // green
+      case 'intel': return '#3b82f6';  // blue
+      case 'amd': return '#f97316';    // orange
+      case 'vaapi': return '#8b5cf6';  // purple (for generic VAAPI)
+      case 'cpu': return '#6b7280';    // gray
+      default: return '#6b7280';
+    }
+  }
+
+  function getCodecIcon(group: string): string {
+    switch(group) {
+      case 'nvidia': return '🟢';
+      case 'intel': return '🔵';
+      case 'amd': return '🟠';
+      case 'vaapi': return '🟣';
+      case 'cpu': return '⚪';
+      default: return '⚪';
+    }
   }
 
   function formatSize(bytes: number): string {
@@ -167,8 +202,10 @@
 
   async function doCompress(){
     if (!jobInfo) return;
+    if (isCompressing) return; // prevent double submission
     errorText = null;
     try {
+      isCompressing = true;
       const payload = {
         job_id: jobInfo.job_id,
         filename: jobInfo.filename,
@@ -188,7 +225,9 @@
       console.log('Starting compression...', payload);
       const { task_id } = await startCompress(payload);
       taskId = task_id;
+      try { esRef?.close(); } catch {}
       const es = openProgressStream(taskId);
+      esRef = es;
       es.onmessage = (ev) => {
         try { const data = JSON.parse(ev.data);
           if (data.type === 'progress') { progress = data.progress; }
@@ -196,6 +235,8 @@
           if (data.type === 'done') { 
             doneStats = data.stats; 
             progress = 100;
+            isCompressing = false;
+            try { esRef?.close(); } catch {}
             
             // Play sound when done if enabled
             if (playSoundWhenDone) {
@@ -210,7 +251,7 @@
               }, 500);
             }
           }
-          if (data.type === 'error') { logLines = [data.message, ...logLines]; }
+          if (data.type === 'error') { logLines = [data.message, ...logLines]; isCompressing = false; try { esRef?.close(); } catch {} }
         } catch {}
       }
     } catch (err: any) {
@@ -219,7 +260,11 @@
     }
   }
 
-  function reset(){ file=null; uploadedFileName=null; jobInfo=null; taskId=null; progress=0; logLines=[]; doneStats=null; warnText=null; errorText=null; isUploading=false; }
+  function reset(){ file=null; uploadedFileName=null; jobInfo=null; taskId=null; progress=0; logLines=[]; doneStats=null; warnText=null; errorText=null; isUploading=false; isCompressing=false; try { esRef?.close(); } catch {} }
+
+  // Persist UI preferences
+  $: (() => { try { localStorage.setItem('playSoundWhenDone', String(playSoundWhenDone)); } catch {} })();
+  $: (() => { try { localStorage.setItem('autoDownload', String(autoDownload)); } catch {} })();
 </script>
 
 <div class="max-w-3xl mx-auto mt-8 space-y-6">
@@ -270,14 +315,30 @@
       <div class="mt-4 grid sm:grid-cols-4 gap-4">
         <div>
           <label class="block mb-1 text-sm">Video Codec</label>
-          <select class="input w-full" bind:value={videoCodec}>
+          <select class="input w-full codec-select" bind:value={videoCodec}>
             {#each availableCodecs as codec}
-              <option value={codec.value}>{codec.label}</option>
+              <option value={codec.value} data-group={codec.group}>
+                {getCodecIcon(codec.group)} {codec.label}
+              </option>
             {/each}
           </select>
           {#if hardwareType !== 'cpu'}
-            <p class="text-xs text-gray-400 mt-1">Detected: {hardwareType.toUpperCase()} acceleration</p>
+            <p class="text-xs text-gray-400 mt-1">
+              <span class="inline-block w-2 h-2 rounded-full mr-1" style="background-color: {getCodecColor(hardwareType)}"></span>
+              Detected: {hardwareType.toUpperCase()} acceleration
+            </p>
+          {:else}
+            <p class="text-xs text-gray-400 mt-1">
+              <span class="inline-block w-2 h-2 rounded-full bg-gray-500 mr-1"></span>
+              CPU encoding (no GPU detected)
+            </p>
           {/if}
+          <div class="mt-2 text-[10px] space-y-0.5 opacity-75">
+            <div><span class="inline-block w-2 h-2 rounded-full bg-green-500 mr-1"></span> Green = NVIDIA GPU</div>
+            <div><span class="inline-block w-2 h-2 rounded-full bg-blue-500 mr-1"></span> Blue = Intel GPU</div>
+            <div><span class="inline-block w-2 h-2 rounded-full bg-orange-500 mr-1"></span> Orange = AMD GPU</div>
+            <div><span class="inline-block w-2 h-2 rounded-full bg-gray-500 mr-1"></span> Gray = CPU (slower)</div>
+          </div>
         </div>
         <div>
           <label class="block mb-1 text-sm">Audio Codec</label>
@@ -412,7 +473,7 @@
       <div class="h-3 bg-gray-800 rounded">
         <div class="h-3 bg-indigo-600 rounded" style={`width:${progress}%`}></div>
       </div>
-      <details class="mt-3">
+      <details class="mt-3" open>
         <summary>FFmpeg log</summary>
         <pre class="mt-2 text-xs whitespace-pre-wrap">{logLines.join('\n')}</pre>
       </details>
@@ -463,3 +524,26 @@
     </div>
   </div>
 {/if}
+
+<style>
+  /* Color-code codec options based on hardware type */
+  .codec-select option[data-group="nvidia"] {
+    color: #22c55e;
+    font-weight: 500;
+  }
+  .codec-select option[data-group="intel"] {
+    color: #3b82f6;
+    font-weight: 500;
+  }
+  .codec-select option[data-group="amd"] {
+    color: #f97316;
+    font-weight: 500;
+  }
+  .codec-select option[data-group="vaapi"] {
+    color: #8b5cf6;
+    font-weight: 500;
+  }
+  .codec-select option[data-group="cpu"] {
+    color: #9ca3af;
+  }
+</style>

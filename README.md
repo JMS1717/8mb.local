@@ -394,7 +394,7 @@ docker compose up -d
     docker run -d --name 8mblocal \
       --gpus all \
       -e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
-      -p 8000:8000 \
+      -p 8001:8000 \
       -v ./uploads:/app/uploads \
       -v ./outputs:/app/outputs \
       jms1717/8mblocal:latest
