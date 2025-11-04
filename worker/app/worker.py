@@ -13,6 +13,8 @@ from .utils import ffprobe_info, calc_bitrates
 from .hw_detect import get_hw_info, map_codec_to_hw
 
 REDIS = None
+# Cache encoder test results to avoid slow init tests on every job
+ENCODER_TEST_CACHE: Dict[str, bool] = {}
 
 def _redis() -> Redis:
     global REDIS
@@ -45,12 +47,13 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                    video_codec: str, audio_codec: str, audio_bitrate_kbps: int, preset: str, tune: str = "hq",
                    max_width: int = None, max_height: int = None, start_time: str = None, end_time: str = None,
                    force_hw_decode: bool = False, fast_mp4_finalize: bool = False):
-    start_ts = time.time()
     # Detect hardware acceleration
+    _publish(self.request.id, {"type": "log", "message": "Initializing: detecting hardware…"})
     hw_info = get_hw_info()
     _publish(self.request.id, {"type": "log", "message": f"Hardware: {hw_info['type'].upper()} acceleration detected"})
     
     # Probe
+    _publish(self.request.id, {"type": "log", "message": "Initializing: probing input file…"})
     info = ffprobe_info(input_path)
     duration = info.get("duration", 0.0)
     total_kbps, video_kbps = calc_bitrates(target_size_mb, duration, audio_bitrate_kbps)
@@ -129,6 +132,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     
     # Fallback to CPU if hardware encoder not available or can't initialize
     if actual_encoder not in ("libx264", "libx265", "libaom-av1"):
+        # Check availability (fast)
         if not is_encoder_available(actual_encoder):
             _publish(self.request.id, {"type": "log", "message": f"Warning: {actual_encoder} not available, falling back to CPU"})
             
@@ -143,23 +147,36 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 actual_encoder = "libaom-av1"
                 v_flags = ["-pix_fmt", "yuv420p"]
             init_hw_flags = []
-        elif not test_encoder_init(actual_encoder, init_hw_flags):
-            _publish(self.request.id, {"type": "log", "message": f"Warning: {actual_encoder} failed initialization test (driver/library issue), falling back to CPU"})
+        else:
+            # Check cache or run init test (slow, only once per encoder)
+            global ENCODER_TEST_CACHE
+            cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
+            if cache_key not in ENCODER_TEST_CACHE:
+                _publish(self.request.id, {"type": "log", "message": f"Testing {actual_encoder} initialization (cached after first run)…"})
+                ENCODER_TEST_CACHE[cache_key] = test_encoder_init(actual_encoder, init_hw_flags)
             
-            # Determine CPU fallback based on codec type
-            if "h264" in actual_encoder:
-                actual_encoder = "libx264"
-                v_flags = ["-pix_fmt", "yuv420p", "-profile:v", "high"]
-            elif "hevc" in actual_encoder or "h265" in actual_encoder:
-                actual_encoder = "libx265"
-                v_flags = ["-pix_fmt", "yuv420p"]
-            else:  # AV1
-                actual_encoder = "libaom-av1"
-                v_flags = []
-            
-            init_hw_flags = []  # Clear hardware init flags
+            if not ENCODER_TEST_CACHE[cache_key]:
+                _publish(self.request.id, {"type": "log", "message": f"Warning: {actual_encoder} failed initialization test (driver/library issue), falling back to CPU"})
+                
+                # Determine CPU fallback based on codec type
+                if "h264" in actual_encoder:
+                    actual_encoder = "libx264"
+                    v_flags = ["-pix_fmt", "yuv420p", "-profile:v", "high"]
+                elif "hevc" in actual_encoder or "h265" in actual_encoder:
+                    actual_encoder = "libx265"
+                    v_flags = ["-pix_fmt", "yuv420p"]
+                else:  # AV1
+                    actual_encoder = "libaom-av1"
+                    v_flags = []
+                
+                init_hw_flags = []  # Clear hardware init flags
     
     _publish(self.request.id, {"type": "log", "message": f"Using encoder: {actual_encoder} (requested: {video_codec})"})
+    _publish(self.request.id, {"type": "log", "message": "Starting compression…"})
+    
+    # Start timing from here (actual encoding, not initialization)
+    start_ts = time.time()
+    
     # Log decode path info
     try:
         if any(x == "-hwaccel" for x in init_hw_flags):
