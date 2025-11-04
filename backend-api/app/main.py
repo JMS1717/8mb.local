@@ -13,11 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from redis.asyncio import Redis
+import psutil
 
 from .auth import basic_auth
 from .config import settings
 from .celery_app import celery_app
-from .models import UploadResponse, CompressRequest, StatusResponse, AuthSettings, AuthSettingsUpdate, PasswordChange, DefaultPresets, AvailableCodecsResponse, CodecVisibilitySettings
+from .models import UploadResponse, CompressRequest, StatusResponse, AuthSettings, AuthSettingsUpdate, PasswordChange, DefaultPresets, AvailableCodecsResponse, CodecVisibilitySettings, PresetProfile, PresetProfilesResponse, SetDefaultPresetRequest, SizeButtons, RetentionHours
 from .cleanup import start_scheduler
 from . import settings_manager
 from . import history_manager
@@ -36,6 +37,23 @@ app.add_middleware(
 )
 
 redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+
+# Cache for one-time hardware detection and system capabilities
+HW_INFO_CACHE: dict | None = None
+SYSTEM_CAPS_CACHE: dict | None = None
+
+
+def _get_hw_info_cached() -> dict:
+    """Get hardware info from cache or compute once via worker."""
+    global HW_INFO_CACHE
+    if HW_INFO_CACHE is not None:
+        return HW_INFO_CACHE
+    try:
+        result = celery_app.send_task("worker.worker.get_hardware_info")
+        HW_INFO_CACHE = result.get(timeout=5) or {"type": "cpu", "available_encoders": {}}
+    except Exception:
+        HW_INFO_CACHE = {"type": "cpu", "available_encoders": {}}
+    return HW_INFO_CACHE
 
 
 def _ffprobe(input_path: Path) -> dict:
@@ -67,6 +85,63 @@ def _calc_bitrates(target_mb: float, duration_s: float, audio_kbps: int) -> tupl
     video_kbps = max(total_kbps - float(audio_kbps), 0.0)
     warn = video_kbps < 100
     return total_kbps, video_kbps, warn
+
+
+def _get_system_capabilities() -> dict:
+    """Gather system capabilities: CPU, memory, GPUs, driver versions."""
+    info: dict = {
+        "cpu": {
+            "cores_logical": psutil.cpu_count(logical=True) or 0,
+            "cores_physical": psutil.cpu_count(logical=False) or 0,
+        },
+        "memory": {
+            "total_gb": round(psutil.virtual_memory().total / (1024**3), 2),
+            "available_gb": round(psutil.virtual_memory().available / (1024**3), 2),
+        },
+        "gpus": [],
+        "nvidia_driver": None,
+    }
+
+    # CPU model (best-effort)
+    try:
+        if hasattr(os, 'uname'):
+            # Linux: read /proc/cpuinfo
+            try:
+                with open('/proc/cpuinfo','r') as f:
+                    for line in f:
+                        if 'model name' in line:
+                            info["cpu"]["model"] = line.split(':',1)[1].strip()
+                            break
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # NVIDIA GPUs via nvidia-smi (if available) - run once by caller that caches
+    try:
+        q = "index,name,memory.total,memory.used,driver_version,uuid"
+        res = subprocess.run(
+            ["nvidia-smi", f"--query-gpu={q}", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=2
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            lines = [l.strip() for l in res.stdout.strip().splitlines() if l.strip()]
+            for ln in lines:
+                parts = [p.strip() for p in ln.split(',')]
+                if len(parts) >= 6:
+                    idx, name, mem_total, mem_used, drv, uuid = parts[:6]
+                    info["gpus"].append({
+                        "index": int(idx),
+                        "name": name,
+                        "memory_total_gb": round(float(mem_total)/1024.0, 2),
+                        "memory_used_gb": round(float(mem_used)/1024.0, 2),
+                        "uuid": uuid,
+                    })
+                    info["nvidia_driver"] = drv
+    except Exception:
+        pass
+
+    return info
 
 
 @app.on_event("startup")
@@ -147,6 +222,24 @@ async def download(task_id: str):
     return FileResponse(path, filename=filename, media_type=media_type)
 
 
+@app.post("/api/jobs/{task_id}/cancel")
+async def cancel_job(task_id: str):
+    """Signal a running job to cancel and attempt to stop ffmpeg."""
+    try:
+        # Set a short-lived cancel flag the worker checks
+        await redis.set(f"cancel:{task_id}", "1", ex=3600)
+        # Notify listeners via SSE channel immediately
+        await redis.publish(f"progress:{task_id}", orjson.dumps({"type":"log","message":"Cancellation requested"}).decode())
+        # Best-effort: also ask Celery to revoke/terminate (in case worker is stuck)
+        try:
+            celery_app.control.revoke(task_id, terminate=True)
+        except Exception:
+            pass
+        return {"status": "cancellation_requested"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
     channel = f"progress:{task_id}"
     pubsub = redis.pubsub()
@@ -175,34 +268,17 @@ async def health():
 @app.get("/api/hardware")
 async def get_hardware_info():
     """Get available hardware acceleration info from worker."""
-    try:
-        # Query worker for hardware capabilities
-        # This is a lightweight check via a Celery task
-        from .celery_app import celery_app
-        result = celery_app.send_task("worker.worker.get_hardware_info")
-        hw_info = result.get(timeout=5)
-        return hw_info
-    except Exception as e:
-        # Fallback to CPU-only if worker unavailable
-        return {
-            "type": "cpu",
-            "available_encoders": {
-                "h264": "libx264",
-                "hevc": "libx265",
-                "av1": "libaom-av1"
-            }
-        }
+    # Serve cached hardware info (computed once)
+    return _get_hw_info_cached()
 
 
 @app.get("/api/codecs/available")
 async def get_available_codecs() -> AvailableCodecsResponse:
     """Get available codecs based on hardware detection and user settings."""
     try:
-        # Get hardware info from worker
-        from .celery_app import celery_app
-        result = celery_app.send_task("worker.worker.get_hardware_info")
-        hw_info = result.get(timeout=5)
-        
+        # Use cached hardware info
+        hw_info = _get_hw_info_cached()
+
         # Get user codec visibility settings
         codec_settings = settings_manager.get_codec_visibility_settings()
         
@@ -239,6 +315,17 @@ async def get_available_codecs() -> AvailableCodecsResponse:
             available_encoders={"h264": "libx264", "hevc": "libx265", "av1": "libaom-av1"},
             enabled_codecs=["libx264", "libx265", "libaom-av1"]
         )
+
+
+@app.get("/api/system/capabilities")
+async def system_capabilities():
+    """Return detailed system capabilities including CPU, memory, GPUs and worker HW type."""
+    global SYSTEM_CAPS_CACHE
+    if SYSTEM_CAPS_CACHE is None:
+        caps = _get_system_capabilities()
+        caps["hardware"] = _get_hw_info_cached()
+        SYSTEM_CAPS_CACHE = caps
+    return SYSTEM_CAPS_CACHE
 
 
 # Settings management endpoints
@@ -318,6 +405,52 @@ async def update_default_presets(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Preset profiles CRUD
+@app.get("/api/settings/preset-profiles")
+async def get_preset_profiles() -> PresetProfilesResponse:
+    try:
+        data = settings_manager.get_preset_profiles()
+        return PresetProfilesResponse(**data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/settings/preset-profiles")
+async def add_preset_profile(profile: PresetProfile, _auth=Depends(basic_auth)):
+    try:
+        settings_manager.add_preset_profile(profile.dict())
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/api/settings/preset-profiles/default")
+async def set_default_preset(req: SetDefaultPresetRequest, _auth=Depends(basic_auth)):
+    try:
+        settings_manager.set_default_preset(req.name)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/api/settings/preset-profiles/{name}")
+async def update_preset_profile(name: str, updates: PresetProfile, _auth=Depends(basic_auth)):
+    try:
+        settings_manager.update_preset_profile(name, updates.dict())
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/settings/preset-profiles/{name}")
+async def delete_preset_profile(name: str, _auth=Depends(basic_auth)):
+    try:
+        settings_manager.delete_preset_profile(name)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @app.get("/api/settings/codecs")
 async def get_codec_visibility_settings() -> CodecVisibilitySettings:
     """Get codec visibility settings (no auth required)"""
@@ -395,6 +528,50 @@ async def startup_event():
     settings_manager.initialize_env_if_missing()
     # Start cleanup scheduler
     start_scheduler()
+    # Initialize hardware and system capabilities cache once
+    try:
+        _ = _get_hw_info_cached()
+        # Warm system capabilities cache
+        _ = system_capabilities  # function ref to avoid linter warning
+    except Exception:
+        pass
+
+
+# Size buttons settings
+@app.get("/api/settings/size-buttons")
+async def get_size_buttons() -> SizeButtons:
+    try:
+        buttons = settings_manager.get_size_buttons()
+        return SizeButtons(buttons=buttons)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/settings/size-buttons")
+async def update_size_buttons(size_buttons: SizeButtons, _auth=Depends(basic_auth)):
+    try:
+        settings_manager.update_size_buttons(size_buttons.buttons)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# Retention settings
+@app.get("/api/settings/retention-hours")
+async def get_retention_hours() -> RetentionHours:
+    try:
+        return RetentionHours(hours=settings_manager.get_retention_hours())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/settings/retention-hours")
+async def update_retention_hours(req: RetentionHours, _auth=Depends(basic_auth)):
+    try:
+        settings_manager.update_retention_hours(req.hours)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # Serve pre-built frontend (for unified container deployment)

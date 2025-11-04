@@ -63,7 +63,15 @@
 	libaom_av1: true,
   };
 
-  onMount(async () => {
+	// New settings state
+	let sizeButtons: number[] = [];
+	let newSizeValue: number | null = null;
+	let presetProfiles: any[] = [];
+	let defaultPresetName: string | null = null;
+	let newPresetName: string = '';
+	let retentionHours: number = 1;
+
+	onMount(async () => {
 	try {
 	  const [authRes, presetsRes, codecsRes, historyRes] = await Promise.all([
 		fetch('/api/settings/auth'),
@@ -94,6 +102,19 @@
 		const h = await historyRes.json();
 		historyEnabled = h.enabled || false;
 	  }
+	  // Load JSON-backed size buttons and presets list and retention hours
+	  try {
+		const sb = await fetch('/api/settings/size-buttons');
+		if (sb.ok) { const js = await sb.json(); sizeButtons = js.buttons || []; }
+	  } catch {}
+	  try {
+		const pp = await fetch('/api/settings/preset-profiles');
+		if (pp.ok) { const js = await pp.json(); presetProfiles = js.profiles || []; defaultPresetName = js.default || null; }
+	  } catch {}
+	  try {
+		const rh = await fetch('/api/settings/retention-hours');
+		if (rh.ok) { const js = await rh.json(); retentionHours = js.hours ?? 1; }
+	  } catch {}
 	} catch (e) {
 	  error = 'Failed to load settings';
 	}
@@ -218,6 +239,53 @@
 	  saving = false;
 	}
   }
+
+	// Save size buttons
+	async function saveSizeButtons(){
+		error = ''; message = ''; saving = true;
+		try {
+			const res = await fetch('/api/settings/size-buttons', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ buttons: sizeButtons }) });
+			if (res.ok) { message = 'Saved size buttons'; } else { const d = await res.json(); error = d.detail || 'Failed to save size buttons'; }
+		} catch { error = 'Failed to save size buttons'; } finally { saving = false; }
+	}
+	function removeSizeButton(idx:number){ sizeButtons = sizeButtons.filter((_,i)=>i!==idx); }
+	function addSizeButton(){ if (newSizeValue && newSizeValue>0){ sizeButtons = Array.from(new Set([...sizeButtons, Number(newSizeValue)])).sort((a,b)=>a-b); newSizeValue=null; } }
+
+	// Preset profiles
+	async function addPresetFromCurrent(){
+		if (!newPresetName.trim()) { error='Preset name required'; return; }
+		saving = true; error=''; message='';
+		try {
+			const res = await fetch('/api/settings/preset-profiles', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+				name: newPresetName.trim(), target_mb: targetMB, video_codec: videoCodec, audio_codec: audioCodec, preset, audio_kbps: audioKbps, container, tune
+			})});
+			if (res.ok){ message='Added preset'; presetProfiles = [...presetProfiles, { name:newPresetName.trim(), target_mb: targetMB, video_codec: videoCodec, audio_codec: audioCodec, preset, audio_kbps: audioKbps, container, tune }]; newPresetName=''; }
+			else { const d = await res.json(); error = d.detail || 'Failed to add preset'; }
+		} catch { error = 'Failed to add preset'; } finally { saving=false; }
+	}
+	async function deletePreset(name:string){
+		saving=true; error=''; message='';
+		try { const res = await fetch(`/api/settings/preset-profiles/${encodeURIComponent(name)}`, { method:'DELETE' });
+			if (res.ok){ message='Deleted preset'; presetProfiles = presetProfiles.filter(p=>p.name!==name); if (defaultPresetName===name) defaultPresetName=null; }
+			else { const d = await res.json(); error = d.detail || 'Failed to delete preset'; }
+		} catch { error='Failed to delete preset'; } finally { saving=false; }
+	}
+	async function saveDefaultPreset(){
+		if (!defaultPresetName) { error='Select a default preset'; return; }
+		saving=true; error=''; message='';
+		try { const res = await fetch('/api/settings/preset-profiles/default', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name: defaultPresetName }) });
+			if (res.ok){ message='Default preset updated'; }
+			else { const d = await res.json(); error = d.detail || 'Failed to set default'; }
+		} catch { error='Failed to set default'; } finally { saving=false; }
+	}
+
+	// Retention hours
+	async function saveRetention(){
+		saving=true; error=''; message='';
+		try { const res = await fetch('/api/settings/retention-hours', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ hours: retentionHours }) });
+			if (res.ok){ message='Saved retention hours'; } else { const d = await res.json(); error = d.detail || 'Failed to save retention'; }
+		} catch { error='Failed to save retention'; } finally { saving=false; }
+	}
 </script>
 
 <style>
@@ -392,6 +460,88 @@
 	  {/if}
 	</div>
   </div>
+
+	<!-- File size buttons -->
+	<div class="card">
+		<div class="title">File size buttons</div>
+		<p class="label" style="color:#9ca3af">Customize the quick-select file size buttons shown on the main screen.</p>
+		<div style="display:flex; flex-wrap:wrap; gap:8px; margin:10px 0">
+			{#each sizeButtons as b, i}
+				<span style="display:inline-flex; align-items:center; gap:6px; background:#1f2937; border:1px solid #374151; border-radius:8px; padding:6px 8px">
+					{b} MB
+					<button class="btn" style="background:#374151; padding:4px 8px" on:click={()=>removeSizeButton(i)}>Remove</button>
+				</span>
+			{/each}
+		</div>
+		<div class="row">
+			<div>
+				<label class="label">Add size (MB)</label>
+				<input class="input" type="number" min="1" bind:value={newSizeValue} />
+			</div>
+			<div style="display:flex; align-items:flex-end">
+				<button class="btn" on:click={addSizeButton} disabled={saving}>Add</button>
+			</div>
+		</div>
+		<div style="margin-top:12px">
+			<button class="btn alt" on:click={saveSizeButtons} disabled={saving}>{saving ? 'Saving…' : 'Save size buttons'}</button>
+		</div>
+	</div>
+
+	<!-- Preset profiles -->
+	<div class="card">
+		<div class="title">Preset profiles</div>
+		<p class="label" style="color:#9ca3af">Create multiple presets you can select on the main screen (at least 5 supported).</p>
+		<div style="margin-bottom:8px">
+			<label class="label">Default preset</label>
+			<div class="row">
+				<select class="select" bind:value={defaultPresetName}>
+					{#each presetProfiles as p}
+						<option value={p.name}>{p.name}</option>
+					{/each}
+				</select>
+				<button class="btn" on:click={saveDefaultPreset} disabled={saving}>{saving ? 'Saving…' : 'Set default'}</button>
+			</div>
+		</div>
+		<div style="margin-top:12px">
+			<div class="row">
+				<div>
+					<label class="label">New preset name</label>
+					<input class="input" type="text" bind:value={newPresetName} placeholder="e.g., H265 9.7MB (NVENC)" />
+				</div>
+				<div style="display:flex; align-items:flex-end">
+					<button class="btn" on:click={addPresetFromCurrent} disabled={saving}>{saving ? 'Saving…' : 'Add from current defaults'}</button>
+				</div>
+			</div>
+		</div>
+		{#if presetProfiles.length}
+			<div style="margin-top:12px">
+				<div class="row" style="grid-template-columns: 1fr auto; gap:8px">
+					{#each presetProfiles as p}
+						<div style="background:#1f2937; border:1px solid #374151; border-radius:8px; padding:10px">
+							<div style="font-weight:600">{p.name}</div>
+							<div style="font-size:12px; color:#9ca3af">{p.video_codec} • {p.audio_codec} • {p.preset} • {p.target_mb}MB</div>
+						</div>
+						<div style="display:flex; align-items:center"><button class="btn" style="background:#374151" on:click={()=>deletePreset(p.name)} disabled={saving}>Delete</button></div>
+					{/each}
+				</div>
+			</div>
+		{/if}
+	</div>
+
+	<!-- Retention -->
+	<div class="card">
+		<div class="title">File retention</div>
+		<p class="label" style="color:#9ca3af">How long files remain on the server before automatic deletion.</p>
+		<div class="row">
+			<div>
+				<label class="label">Hours</label>
+				<input class="input" type="number" min="0" bind:value={retentionHours} />
+			</div>
+			<div style="display:flex; align-items:flex-end">
+				<button class="btn" on:click={saveRetention} disabled={saving}>{saving ? 'Saving…' : 'Save retention'}</button>
+			</div>
+		</div>
+	</div>
 
   <!-- Defaults -->
   <div class="card">

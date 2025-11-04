@@ -5,12 +5,18 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .config import settings
+from . import settings_manager
 
 UPLOADS_DIR = "/app/uploads"
 OUTPUTS_DIR = "/app/outputs"
 
 async def cleanup_files():
-    cutoff = datetime.utcnow() - timedelta(hours=settings.FILE_RETENTION_HOURS)
+    # Use dynamic retention from settings.json if present
+    try:
+        retention = settings_manager.get_retention_hours()
+    except Exception:
+        retention = settings.FILE_RETENTION_HOURS
+    cutoff = datetime.utcnow() - timedelta(hours=retention)
     cutoff_ts = cutoff.timestamp()
     for base in (UPLOADS_DIR, OUTPUTS_DIR):
         if not os.path.isdir(base):

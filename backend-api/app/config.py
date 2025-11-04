@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     AUTH_USER: str = Field(default="admin")
     AUTH_PASS: str = Field(default="changeme")
     BACKEND_HOST: str = Field(default="0.0.0.0")
-    BACKEND_PORT: int = Field(default=8000)
+    BACKEND_PORT: int = Field(default=8001)
 
     class Config:
         env_file = ".env"

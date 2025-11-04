@@ -4,10 +4,86 @@ Handles reading and writing configuration at runtime
 """
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
+import json
 
 
 ENV_FILE = Path("/app/.env")
+SETTINGS_FILE = Path("/app/settings.json")
+
+
+def _read_settings() -> Dict[str, Any]:
+    """Read JSON settings file (persistent across updates when volume-mounted)."""
+    if not SETTINGS_FILE.exists():
+        return {}
+    try:
+        with SETTINGS_FILE.open('r') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_settings(data: Dict[str, Any]):
+    """Write JSON settings file safely."""
+    try:
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with SETTINGS_FILE.open('w') as f:
+            json.dump(data, f, indent=2)
+        os.chmod(SETTINGS_FILE, 0o600)
+    except Exception as e:
+        raise RuntimeError(f"Failed to write settings.json: {e}")
+
+
+def _ensure_defaults() -> Dict[str, Any]:
+    """Ensure settings.json exists with sane defaults and return it."""
+    data = _read_settings()
+    changed = False
+    if 'size_buttons' not in data:
+        data['size_buttons'] = [4, 5, 8, 9.7, 20, 50, 100]
+        changed = True
+    if 'preset_profiles' not in data:
+        data['preset_profiles'] = [
+            {"name":"H265 9.7MB (NVENC)", "target_mb":9.7, "video_codec":"hevc_nvenc", "audio_codec":"libopus", "preset":"p6", "audio_kbps":128, "container":"mp4", "tune":"hq"},
+            {"name":"H264 8MB (NVENC)", "target_mb":8, "video_codec":"h264_nvenc", "audio_codec":"libopus", "preset":"p6", "audio_kbps":128, "container":"mp4", "tune":"hq"},
+            {"name":"AV1 8MB (CPU)", "target_mb":8, "video_codec":"libaom-av1", "audio_codec":"libopus", "preset":"p6", "audio_kbps":128, "container":"mkv", "tune":"hq"},
+            {"name":"H265 50MB HQ", "target_mb":50, "video_codec":"hevc_nvenc", "audio_codec":"aac", "preset":"p7", "audio_kbps":192, "container":"mp4", "tune":"hq"},
+            {"name":"H264 25MB Fast", "target_mb":25, "video_codec":"h264_nvenc", "audio_codec":"aac", "preset":"p3", "audio_kbps":128, "container":"mp4", "tune":"ll"}
+        ]
+        changed = True
+    # Ensure an AV1 NVENC profile exists even if preset_profiles already seeded earlier
+    try:
+        profiles = data.get('preset_profiles', [])
+        has_av1_nvenc = any(p.get('video_codec') == 'av1_nvenc' for p in profiles)
+        if not has_av1_nvenc:
+            # Add a sensible default AV1 NVENC profile
+            profiles.append({
+                "name": "AV1 9.7MB (NVENC)",
+                "target_mb": 9.7,
+                "video_codec": "av1_nvenc",
+                "audio_codec": "aac",
+                "preset": "p6",
+                "audio_kbps": 128,
+                "container": "mp4",
+                "tune": "hq"
+            })
+            data['preset_profiles'] = profiles
+            changed = True
+    except Exception:
+        pass
+    if 'default_preset' not in data:
+        data['default_preset'] = 'H265 9.7MB (NVENC)'
+        changed = True
+    if 'retention_hours' not in data:
+        # fallback to env if present
+        env_vars = read_env_file()
+        try:
+            data['retention_hours'] = int(os.getenv('FILE_RETENTION_HOURS', env_vars.get('FILE_RETENTION_HOURS', '1')))
+        except Exception:
+            data['retention_hours'] = 1
+        changed = True
+    if changed:
+        _write_settings(data)
+    return data
 
 
 def read_env_file() -> dict:
@@ -15,22 +91,43 @@ def read_env_file() -> dict:
     if not ENV_FILE.exists():
         return {}
     
+    # Check if it's a directory (common Docker mount issue)
+    if ENV_FILE.is_dir():
+        print(f"WARNING: {ENV_FILE} is a directory, not a file. Falling back to environment variables only.")
+        print("To fix: Remove the directory and mount a proper .env file, or don't mount .env at all.")
+        return {}
+    
     env_vars = {}
-    with open(ENV_FILE, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                env_vars[key.strip()] = value.strip()
+    try:
+        with open(ENV_FILE, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    env_vars[key.strip()] = value.strip()
+    except Exception as e:
+        print(f"WARNING: Failed to read {ENV_FILE}: {e}")
+        return {}
+    
     return env_vars
 
 
 def write_env_file(env_vars: dict):
     """Write env vars to .env file"""
-    with open(ENV_FILE, 'w') as f:
-        for key, value in env_vars.items():
-            f.write(f"{key}={value}\n")
-    os.chmod(ENV_FILE, 0o600)
+    # Check if it's a directory (common Docker mount issue)
+    if ENV_FILE.exists() and ENV_FILE.is_dir():
+        raise RuntimeError(f"{ENV_FILE} is a directory. Cannot write settings. Remove the directory or fix your Docker mount.")
+    
+    # Create parent directory if needed
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        with open(ENV_FILE, 'w') as f:
+            for key, value in env_vars.items():
+                f.write(f"{key}={value}\n")
+        os.chmod(ENV_FILE, 0o600)
+    except Exception as e:
+        raise RuntimeError(f"Failed to write {ENV_FILE}: {e}")
 
 
 def get_auth_settings() -> dict:
@@ -67,7 +164,8 @@ def update_auth_settings(auth_enabled: bool, auth_user: Optional[str] = None, au
     env_vars.setdefault('REDIS_URL', 'redis://127.0.0.1:6379/0')
     env_vars.setdefault('BACKEND_HOST', '0.0.0.0')
     env_vars.setdefault('BACKEND_PORT', '8000')
-    env_vars.setdefault('HISTORY_ENABLED', 'false')
+    # Enable history by default
+    env_vars.setdefault('HISTORY_ENABLED', 'true')
     
     write_env_file(env_vars)
     
@@ -94,15 +192,31 @@ def initialize_env_if_missing():
             'FILE_RETENTION_HOURS': '1',
             'REDIS_URL': 'redis://127.0.0.1:6379/0',
             'BACKEND_HOST': '0.0.0.0',
-            'BACKEND_PORT': '8000'
+            'BACKEND_PORT': '8000',
+            # History on by default
+            'HISTORY_ENABLED': 'true'
         }
         write_env_file(default_env)
 
 
 def get_default_presets() -> dict:
     """Get default preset values"""
+    # Prefer settings.json default preset if present
+    data = _ensure_defaults()
+    default_name = data.get('default_preset')
+    for p in data.get('preset_profiles', []):
+        if p.get('name') == default_name:
+            return {
+                'target_mb': float(p.get('target_mb', 9.7)),
+                'video_codec': p.get('video_codec', 'hevc_nvenc'),
+                'audio_codec': p.get('audio_codec', 'libopus'),
+                'preset': p.get('preset', 'p6'),
+                'audio_kbps': int(p.get('audio_kbps', 128)),
+                'container': p.get('container', 'mp4'),
+                'tune': p.get('tune', 'hq')
+            }
+    # Fallback to legacy .env
     env_vars = read_env_file()
-    
     return {
         'target_mb': float(os.getenv('DEFAULT_TARGET_MB', env_vars.get('DEFAULT_TARGET_MB', '9.7'))),
         'video_codec': os.getenv('DEFAULT_VIDEO_CODEC', env_vars.get('DEFAULT_VIDEO_CODEC', 'hevc_nvenc')),
@@ -115,7 +229,7 @@ def get_default_presets() -> dict:
 
 
 def update_default_presets(
-    target_mb: int,
+    target_mb: float,
     video_codec: str,
     audio_codec: str,
     preset: str,
@@ -123,27 +237,29 @@ def update_default_presets(
     container: str,
     tune: str
 ):
-    """Update default preset values in .env file"""
-    env_vars = read_env_file()
-    
-    env_vars['DEFAULT_TARGET_MB'] = str(target_mb)
-    env_vars['DEFAULT_VIDEO_CODEC'] = video_codec
-    env_vars['DEFAULT_AUDIO_CODEC'] = audio_codec
-    env_vars['DEFAULT_PRESET'] = preset
-    env_vars['DEFAULT_AUDIO_KBPS'] = str(audio_kbps)
-    env_vars['DEFAULT_CONTAINER'] = container
-    env_vars['DEFAULT_TUNE'] = tune
-    
-    write_env_file(env_vars)
-    
-    # Update environment variables for current process
-    os.environ['DEFAULT_TARGET_MB'] = str(target_mb)
-    os.environ['DEFAULT_VIDEO_CODEC'] = video_codec
-    os.environ['DEFAULT_AUDIO_CODEC'] = audio_codec
-    os.environ['DEFAULT_PRESET'] = preset
-    os.environ['DEFAULT_AUDIO_KBPS'] = str(audio_kbps)
-    os.environ['DEFAULT_CONTAINER'] = container
-    os.environ['DEFAULT_TUNE'] = tune
+    """Update default preset values by updating the default_preset profile or creating one."""
+    data = _ensure_defaults()
+    new_profile = {
+        'name': data.get('default_preset', 'Custom Default'),
+        'target_mb': float(target_mb),
+        'video_codec': video_codec,
+        'audio_codec': audio_codec,
+        'preset': preset,
+        'audio_kbps': int(audio_kbps),
+        'container': container,
+        'tune': tune,
+    }
+    # Replace if exists by name; else append and set as default
+    replaced = False
+    for i, p in enumerate(data['preset_profiles']):
+        if p.get('name') == data['default_preset']:
+            data['preset_profiles'][i] = new_profile
+            replaced = True
+            break
+    if not replaced:
+        data['preset_profiles'].append(new_profile)
+        data['default_preset'] = new_profile['name']
+    _write_settings(data)
 
 
 def get_codec_visibility_settings() -> dict:
@@ -211,7 +327,8 @@ def update_codec_visibility_settings(settings: dict):
 def get_history_enabled() -> bool:
     """Get history enabled setting"""
     env_vars = read_env_file()
-    history_enabled = os.getenv('HISTORY_ENABLED', env_vars.get('HISTORY_ENABLED', 'false'))
+    # Default ON if not set
+    history_enabled = os.getenv('HISTORY_ENABLED', env_vars.get('HISTORY_ENABLED', 'true'))
     return history_enabled.lower() in ('true', '1', 'yes')
 
 
@@ -221,3 +338,83 @@ def update_history_enabled(enabled: bool):
     env_vars['HISTORY_ENABLED'] = 'true' if enabled else 'false'
     write_env_file(env_vars)
     os.environ['HISTORY_ENABLED'] = 'true' if enabled else 'false'
+
+
+# New JSON-backed settings accessors
+def get_size_buttons() -> List[float]:
+    data = _ensure_defaults()
+    return [float(x) for x in data.get('size_buttons', [])]
+
+
+def update_size_buttons(buttons: List[float]):
+    if not isinstance(buttons, list) or not all(isinstance(x, (int, float)) for x in buttons):
+        raise ValueError("buttons must be a list of numbers")
+    data = _ensure_defaults()
+    # dedupe & sort ascending
+    cleaned = sorted({round(float(x), 2) for x in buttons})
+    data['size_buttons'] = list(cleaned)
+    _write_settings(data)
+
+
+def get_preset_profiles() -> Dict[str, Any]:
+    data = _ensure_defaults()
+    return { 'profiles': data.get('preset_profiles', []), 'default': data.get('default_preset') }
+
+
+def set_default_preset(name: str):
+    data = _ensure_defaults()
+    names = {p.get('name') for p in data.get('preset_profiles', [])}
+    if name not in names:
+        raise ValueError("preset not found")
+    data['default_preset'] = name
+    _write_settings(data)
+
+
+def add_preset_profile(profile: Dict[str, Any]):
+    required = {'name','target_mb','video_codec','audio_codec','preset','audio_kbps','container','tune'}
+    if not required.issubset(profile.keys()):
+        raise ValueError("missing fields in preset profile")
+    data = _ensure_defaults()
+    # prevent duplicate names
+    if any(p.get('name') == profile['name'] for p in data['preset_profiles']):
+        raise ValueError("preset name already exists")
+    data['preset_profiles'].append(profile)
+    _write_settings(data)
+
+
+def update_preset_profile(name: str, updates: Dict[str, Any]):
+    data = _ensure_defaults()
+    for i, p in enumerate(data['preset_profiles']):
+        if p.get('name') == name:
+            data['preset_profiles'][i] = { **p, **{k:v for k,v in updates.items() if k != 'name'} }
+            _write_settings(data)
+            return
+    raise ValueError("preset not found")
+
+
+def delete_preset_profile(name: str):
+    data = _ensure_defaults()
+    before = len(data['preset_profiles'])
+    data['preset_profiles'] = [p for p in data['preset_profiles'] if p.get('name') != name]
+    if len(data['preset_profiles']) == before:
+        raise ValueError("preset not found")
+    # if default removed, reset to first if exists
+    if data.get('default_preset') == name:
+        data['default_preset'] = data['preset_profiles'][0]['name'] if data['preset_profiles'] else None
+    _write_settings(data)
+
+
+def get_retention_hours() -> int:
+    data = _ensure_defaults()
+    try:
+        return int(data.get('retention_hours', 1))
+    except Exception:
+        return 1
+
+
+def update_retention_hours(hours: int):
+    if hours < 0:
+        raise ValueError("retention hours must be >= 0")
+    data = _ensure_defaults()
+    data['retention_hours'] = int(hours)
+    _write_settings(data)

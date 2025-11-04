@@ -53,7 +53,7 @@ class PasswordChange(BaseModel):
     new_password: str
 
 class DefaultPresets(BaseModel):
-    target_mb: int = 25
+    target_mb: float = 25
     video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1','h264_qsv','hevc_qsv','av1_qsv','h264_vaapi','hevc_vaapi','av1_vaapi'] = 'av1_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
@@ -86,3 +86,31 @@ class CodecVisibilitySettings(BaseModel):
     libx264: bool = True
     libx265: bool = True
     libaom_av1: bool = True  # Note: using underscore because dash is invalid in Python identifiers
+
+
+class PresetProfile(BaseModel):
+    name: str
+    target_mb: float
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1','h264_qsv','hevc_qsv','av1_qsv','h264_vaapi','hevc_vaapi','av1_vaapi']
+    audio_codec: Literal['libopus','aac','none']
+    preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality']
+    audio_kbps: Literal[64,96,128,160,192,256]
+    container: Literal['mp4','mkv']
+    tune: Literal['hq','ll','ull','lossless']
+
+
+class PresetProfilesResponse(BaseModel):
+    profiles: list[PresetProfile]
+    default: str | None
+
+
+class SetDefaultPresetRequest(BaseModel):
+    name: str
+
+
+class SizeButtons(BaseModel):
+    buttons: list[float]
+
+
+class RetentionHours(BaseModel):
+    hours: int

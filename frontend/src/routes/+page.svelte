@@ -1,7 +1,7 @@
 <script lang="ts">
   import '../app.css';
   import { onMount } from 'svelte';
-  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs } from '$lib/api';
+  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob } from '$lib/api';
 
   let file: File | null = null;
   let uploadedFileName: string | null = null; // Track what file was uploaded
@@ -20,7 +20,7 @@
   let endTime: string = '';
   // New UI options
   let playSoundWhenDone = true; // default ON
-  let autoDownload = false;
+  let autoDownload = true;
   
   $: containerNote = (container === 'mp4' && audioCodec === 'libopus') ? 'MP4 does not support Opus; audio will be encoded as AAC automatically.' : null;
   $: estimated = jobInfo ? {
@@ -41,6 +41,7 @@
   let errorText: string | null = null;
   let isUploading = false;
   let uploadProgress = 0;
+  let isCancelling = false;
   // Support widget state
   let showSupport = false;
   function toggleSupport(){ showSupport = !showSupport; }
@@ -50,6 +51,15 @@
   // Available codecs from backend
   let availableCodecs: Array<{value: string, label: string, group: string}> = [];
   let hardwareType = 'cpu';
+  let sysCaps: any = null;
+  let sysCapsError: string | null = null;
+  // Presets and size buttons
+  let presetProfiles: Array<any> = [];
+  let selectedPreset: string | null = null;
+  let sizeButtons: number[] = [4,5,8,9.7,50,100];
+  // Recent history
+  let history: any[] = [];
+  let historyEnabled = false;
 
   // Load default presets and available codecs on mount
   onMount(async () => {
@@ -59,6 +69,8 @@
       if (ps !== null) playSoundWhenDone = (ps === 'true');
       const ad = localStorage.getItem('autoDownload');
       if (ad !== null) autoDownload = (ad === 'true');
+      // If not present in localStorage, default to true and set it
+      if (ad === null) localStorage.setItem('autoDownload', 'true');
     } catch {}
     try {
       const res = await fetch('/api/settings/presets');
@@ -79,7 +91,8 @@
     // Load available codecs
     try {
       const codecData = await getAvailableCodecs();
-      hardwareType = codecData.hardware_type;
+      // Tentatively set hardware based on worker-reported type; we'll refine after sysCaps
+      hardwareType = codecData.hardware_type || 'cpu';
       availableCodecs = buildCodecList(codecData);
     } catch (err) {
       console.warn('Failed to load available codecs, using fallback');
@@ -89,7 +102,58 @@
         { value: 'libaom-av1', label: 'AV1 (CPU)', group: 'cpu' },
       ];
     }
+
+    // Load system capabilities (CPU, memory, GPUs)
+    try {
+      sysCaps = await getSystemCapabilities();
+      // Prefer the system capabilities' hardware view (backend includes worker.hw under sysCaps.hardware)
+      const hw = sysCaps?.hardware?.type;
+      // If NVIDIA driver present and GPUs listed, force NVIDIA for UI clarity
+      const hasNvidia = !!sysCaps?.nvidia_driver && Array.isArray(sysCaps?.gpus) && sysCaps.gpus.length > 0;
+      if (hasNvidia) {
+        hardwareType = 'nvidia';
+      } else if (hw) {
+        hardwareType = hw;
+      }
+    } catch (e:any) {
+      sysCapsError = e?.message || 'Failed to fetch system capabilities';
+    }
+
+    // Load preset profiles and size buttons
+    try {
+      const pp = await getPresetProfiles();
+      presetProfiles = pp.profiles || [];
+      selectedPreset = pp.default || (presetProfiles[0]?.name ?? null);
+      if (selectedPreset) applyPreset(selectedPreset);
+    } catch {}
+    try {
+      const sb = await getSizeButtons();
+      if (sb?.buttons?.length) sizeButtons = sb.buttons;
+    } catch {}
+
+    // Fetch recent history (best-effort)
+    try {
+      const res = await fetch('/api/history');
+      if (res.ok) {
+        const data = await res.json();
+        historyEnabled = !!data.enabled;
+        history = (data.entries || []).slice(0,5);
+      }
+    } catch {}
   });
+
+  function applyPreset(name: string){
+    const p = presetProfiles.find(x => x.name === name);
+    if (!p) return;
+    selectedPreset = name;
+    targetMB = p.target_mb;
+    // Do NOT override codec; keep codec selection independent
+    audioCodec = p.audio_codec;
+    preset = p.preset;
+    audioKbps = p.audio_kbps;
+    container = p.container;
+    tune = p.tune;
+  }
 
   function buildCodecList(codecData: any): Array<{value: string, label: string, group: string}> {
     const list: Array<{value: string, label: string, group: string}> = [];
@@ -232,11 +296,18 @@
         try { const data = JSON.parse(ev.data);
           if (data.type === 'progress') { progress = data.progress; }
           if (data.type === 'log' && data.message) { logLines = [data.message, ...logLines].slice(0, 500); }
+          if (data.type === 'canceled') {
+            isCompressing = false;
+            errorText = 'Job canceled';
+          }
           if (data.type === 'done') { 
             doneStats = data.stats; 
             progress = 100;
             isCompressing = false;
             try { esRef?.close(); } catch {}
+          } else if (data.type === 'canceled') {
+            isCompressing = false;
+            errorText = 'Job canceled';
             
             // Play sound when done if enabled
             if (playSoundWhenDone) {
@@ -245,14 +316,20 @@
             }
             
             // Auto-download if enabled
-            if (autoDownload && doneStats?.output_filename) {
+            if (autoDownload && taskId) {
               setTimeout(() => {
-                window.location.href = downloadUrl(doneStats.output_filename);
+                window.location.href = downloadUrl(taskId!);
               }, 500);
             }
           }
           if (data.type === 'error') { logLines = [data.message, ...logLines]; isCompressing = false; try { esRef?.close(); } catch {} }
         } catch {}
+      }
+      es.onerror = () => {
+        logLines = ['[SSE] Connection error: lost progress stream.', ...logLines].slice(0, 500);
+        errorText = 'Lost connection to progress stream. Check server/network and try again.';
+        isCompressing = false;
+        try { esRef?.close(); } catch {}
       }
     } catch (err: any) {
       console.error('Compress failed:', err);
@@ -260,7 +337,59 @@
     }
   }
 
+  function reconnectStream(){
+    if (!taskId) return;
+    errorText = null;
+    try { esRef?.close(); } catch {}
+    const es = openProgressStream(taskId);
+    esRef = es;
+    isCompressing = true;
+    es.onmessage = (ev) => {
+      try { const data = JSON.parse(ev.data);
+        if (data.type === 'progress') { progress = data.progress; }
+        if (data.type === 'log' && data.message) { logLines = [data.message, ...logLines].slice(0, 500); }
+        if (data.type === 'done') { 
+          doneStats = data.stats; 
+          progress = 100;
+          isCompressing = false;
+          try { esRef?.close(); } catch {}
+          // Play sound when done if enabled
+          if (playSoundWhenDone) {
+            const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBTGH0fPTgjMGHm7A7+OZURE');
+            audio.play().catch(() => {});
+          }
+          // Auto-download if enabled
+          if (autoDownload && taskId) {
+            setTimeout(() => {
+              window.location.href = downloadUrl(taskId!);
+            }, 500);
+          }
+        }
+        if (data.type === 'error') { logLines = [data.message, ...logLines]; isCompressing = false; try { esRef?.close(); } catch {} }
+      } catch {}
+    }
+    es.onerror = () => {
+      logLines = ['[SSE] Connection error: lost progress stream.', ...logLines].slice(0, 500);
+      errorText = 'Lost connection to progress stream. Check server/network and try again.';
+      isCompressing = false;
+      try { esRef?.close(); } catch {}
+    }
+  }
+
   function reset(){ file=null; uploadedFileName=null; jobInfo=null; taskId=null; progress=0; logLines=[]; doneStats=null; warnText=null; errorText=null; isUploading=false; isCompressing=false; try { esRef?.close(); } catch {} }
+
+  async function onCancel(){
+    if (!taskId || isCancelling) return;
+    isCancelling = true;
+    try {
+      await cancelJob(taskId);
+      logLines = ['Cancellation requested…', ...logLines].slice(0, 500);
+    } catch (e:any) {
+      errorText = e?.message || 'Failed to cancel';
+    } finally {
+      isCancelling = false;
+    }
+  }
 
   // Persist UI preferences
   $: (() => { try { localStorage.setItem('playSoundWhenDone', String(playSoundWhenDone)); } catch {} })();
@@ -273,6 +402,39 @@
     <a href="/settings" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors text-sm">
       ⚙️ Settings
     </a>
+  </div>
+
+  <!-- System capabilities -->
+  <div class="card">
+    <div class="grid sm:grid-cols-2 gap-4">
+      <div>
+        <h3 class="font-semibold mb-2">System</h3>
+        {#if sysCaps}
+          <p class="text-sm">CPU: {sysCaps.cpu?.model || 'Unknown'} ({sysCaps.cpu?.cores_physical}C/{sysCaps.cpu?.cores_logical}T)</p>
+          <p class="text-sm">Memory: {sysCaps.memory?.available_gb} GB free / {sysCaps.memory?.total_gb} GB</p>
+          <p class="text-sm">Hardware: <span class="inline-flex items-center gap-1"><span class="inline-block w-2 h-2 rounded-full" style={`background-color:${getCodecColor(hardwareType)}`}></span>{hardwareType.toUpperCase()}</span></p>
+        {:else if sysCapsError}
+          <p class="text-sm text-amber-400">{sysCapsError}</p>
+        {:else}
+          <p class="text-sm opacity-70">Detecting system capabilities…</p>
+        {/if}
+      </div>
+      <div>
+        <h3 class="font-semibold mb-2">GPUs</h3>
+        {#if sysCaps?.gpus?.length}
+          <ul class="text-sm space-y-1">
+            {#each sysCaps.gpus as g}
+              <li>#{g.index} {g.name} — {g.memory_used_gb}/{g.memory_total_gb} GB</li>
+            {/each}
+          </ul>
+          {#if sysCaps.nvidia_driver}
+            <p class="text-xs opacity-70 mt-1">NVIDIA Driver: {sysCaps.nvidia_driver}</p>
+          {/if}
+        {:else}
+          <p class="text-sm opacity-70">No dedicated GPUs detected</p>
+        {/if}
+      </div>
+    </div>
   </div>
 
   <div class="card">
@@ -295,17 +457,57 @@
   </div>
 
   <div class="card grid grid-cols-2 gap-4">
-    <div class="space-x-2">
-      <button class="btn" on:click={()=>setPresetMB(4)}>4MB</button>
-      <button class="btn" on:click={()=>setPresetMB(5)}>5MB</button>
-      <button class="btn" on:click={()=>setPresetMB(8)}>8MB</button>
-      <button class="btn" on:click={setPresetMBSafe10}>10MB (Discord)</button>
-      <button class="btn" on:click={()=>setPresetMB(50)}>50MB</button>
-      <button class="btn" on:click={()=>setPresetMB(100)}>100MB</button>
+    <div class="space-x-2 flex flex-wrap gap-2">
+      {#each sizeButtons as b}
+        <button class="btn" on:click={()=>setPresetMB(b)}>{b}MB</button>
+      {/each}
     </div>
     <div class="flex items-center gap-2 justify-end">
       <label class="text-sm">Custom size (MB)</label>
       <input class="input w-28" type="number" bind:value={targetMB} min="1" />
+    </div>
+  </div>
+
+  <!-- Primary controls: Codec and Speed/Quality preset (visible without expanding) -->
+  <div class="card grid sm:grid-cols-3 gap-4">
+    <div>
+      <label class="block mb-1 text-sm">Video Codec</label>
+      <select class="input w-full codec-select" bind:value={videoCodec}>
+        {#each availableCodecs as codec}
+          <option value={codec.value} data-group={codec.group}>
+            {getCodecIcon(codec.group)} {codec.label}
+          </option>
+        {/each}
+      </select>
+      {#if hardwareType !== 'cpu'}
+        <p class="text-xs text-gray-400 mt-1">
+          <span class="inline-block w-2 h-2 rounded-full mr-1" style="background-color: {getCodecColor(hardwareType)}"></span>
+          Detected: {hardwareType.toUpperCase()} acceleration
+        </p>
+      {:else}
+        <p class="text-xs text-gray-400 mt-1">
+          <span class="inline-block w-2 h-2 rounded-full bg-gray-500 mr-1"></span>
+          CPU encoding (no GPU detected)
+        </p>
+      {/if}
+    </div>
+    <div>
+      <label class="block mb-1 text-sm">Speed/Quality</label>
+      <select class="input w-full" bind:value={preset}>
+        <option value="p1">Fast (P1)</option>
+        <option value="p5">Balanced (P5)</option>
+        <option value="p7">Best Quality (P7)</option>
+        <option value="p6">Default (P6)</option>
+        <option value="extraquality">🌟 Extra Quality (Slowest)</option>
+      </select>
+    </div>
+    <div>
+      <label class="block mb-1 text-sm">Profile</label>
+      <select class="input w-full" bind:value={selectedPreset} on:change={(e:any)=>applyPreset(e.target.value)}>
+        {#each presetProfiles as p}
+          <option value={p.name}>{p.name}</option>
+        {/each}
+      </select>
     </div>
   </div>
 
@@ -314,48 +516,11 @@
       <summary class="cursor-pointer">Advanced Options</summary>
       <div class="mt-4 grid sm:grid-cols-4 gap-4">
         <div>
-          <label class="block mb-1 text-sm">Video Codec</label>
-          <select class="input w-full codec-select" bind:value={videoCodec}>
-            {#each availableCodecs as codec}
-              <option value={codec.value} data-group={codec.group}>
-                {getCodecIcon(codec.group)} {codec.label}
-              </option>
-            {/each}
-          </select>
-          {#if hardwareType !== 'cpu'}
-            <p class="text-xs text-gray-400 mt-1">
-              <span class="inline-block w-2 h-2 rounded-full mr-1" style="background-color: {getCodecColor(hardwareType)}"></span>
-              Detected: {hardwareType.toUpperCase()} acceleration
-            </p>
-          {:else}
-            <p class="text-xs text-gray-400 mt-1">
-              <span class="inline-block w-2 h-2 rounded-full bg-gray-500 mr-1"></span>
-              CPU encoding (no GPU detected)
-            </p>
-          {/if}
-          <div class="mt-2 text-[10px] space-y-0.5 opacity-75">
-            <div><span class="inline-block w-2 h-2 rounded-full bg-green-500 mr-1"></span> Green = NVIDIA GPU</div>
-            <div><span class="inline-block w-2 h-2 rounded-full bg-blue-500 mr-1"></span> Blue = Intel GPU</div>
-            <div><span class="inline-block w-2 h-2 rounded-full bg-orange-500 mr-1"></span> Orange = AMD GPU</div>
-            <div><span class="inline-block w-2 h-2 rounded-full bg-gray-500 mr-1"></span> Gray = CPU (slower)</div>
-          </div>
-        </div>
-        <div>
           <label class="block mb-1 text-sm">Audio Codec</label>
           <select class="input w-full" bind:value={audioCodec}>
             <option value="libopus">Opus (Default)</option>
             <option value="aac">AAC</option>
             <option value="none">🔇 None (Mute)</option>
-          </select>
-        </div>
-        <div>
-          <label class="block mb-1 text-sm">Speed/Quality</label>
-          <select class="input w-full" bind:value={preset}>
-            <option value="p1">Fast (P1)</option>
-            <option value="p5">Balanced (P5)</option>
-            <option value="p7">Best Quality (P7)</option>
-            <option value="p6">Default (P6)</option>
-            <option value="extraquality">🌟 Extra Quality (Slowest)</option>
           </select>
         </div>
         <div>
@@ -457,6 +622,12 @@
   {#if errorText}
     <div class="card border-red-500">
       <p class="text-red-400">{errorText}</p>
+      {#if taskId && !doneStats}
+        <div class="mt-2 flex gap-2 items-center">
+          <button class="btn" on:click={reconnectStream}>Reconnect to progress</button>
+          <span class="text-xs opacity-70">This just reopens the live log/progress stream; the job may still be running on the server.</span>
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -465,6 +636,9 @@
       {isUploading ? `Uploading… ${uploadProgress}%` : 'Analyze'}
     </button>
     <button class="btn" on:click={doCompress} disabled={!jobInfo}>Compress</button>
+    {#if taskId && isCompressing}
+      <button class="btn" on:click={onCancel} disabled={isCancelling}>{isCancelling ? 'Canceling…' : 'Cancel'}</button>
+    {/if}
     <button class="btn" on:click={reset} disabled={!file && !taskId}>Reset</button>
   </div>
 
@@ -481,11 +655,37 @@
       {#if doneStats}
         <div class="mt-4 text-sm">
           <p>Completed. Final size: {doneStats.final_size_mb} MB</p>
-          <a class="btn inline-block mt-2" href={downloadUrl(taskId)} target="_blank">Download</a>
+          {#if doneStats.output_filename}
+            <a class="btn inline-block mt-2" href={downloadUrl(doneStats.output_filename)} target="_blank">Download</a>
+          {:else}
+            <a class="btn inline-block mt-2" href={downloadUrl(taskId)} target="_blank">Download</a>
+          {/if}
         </div>
       {/if}
     </div>
   {/if}
+
+  <!-- Recent history on main screen -->
+  <div class="card">
+    <div class="flex items-center justify-between mb-2">
+      <h3 class="font-semibold">Recent History</h3>
+      <a href="/history" class="text-sm text-blue-400 underline">View all →</a>
+    </div>
+    {#if !historyEnabled}
+      <p class="text-sm opacity-70">History tracking is disabled. Enable it in Settings.</p>
+    {:else if history.length === 0}
+      <p class="text-sm opacity-70">No history yet.</p>
+    {:else}
+      <ul class="text-sm space-y-2">
+        {#each history as item}
+          <li class="flex items-center justify-between gap-2">
+            <span class="truncate">{item.filename}</span>
+            <span class="opacity-70">{item.compressed_size_mb.toFixed(2)} MB</span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </div>
 
   <!-- Support badge moved to corner (smaller, unobtrusive) -->
 </div>
@@ -521,6 +721,22 @@
     </div>
     <div class="mt-2">
       <a class="underline text-xs hover:text-rose-300" href="https://paypal.me/jasonselsley" target="_blank" rel="noopener noreferrer">paypal.me/jasonselsley</a>
+    </div>
+  </div>
+{/if}
+
+{#if isUploading || isCompressing}
+  <!-- Non-blocking mini status panel in bottom-right -->
+  <div class="fixed bottom-4 right-4 z-40 pointer-events-none">
+    <div class="pointer-events-auto bg-gray-900/95 border border-gray-700 rounded-lg p-3 shadow-xl flex items-center gap-3">
+      <div class="h-5 w-5 rounded-full border-2 border-gray-600 border-t-indigo-500 animate-spin"></div>
+      <div class="text-sm">
+        {#if isUploading}
+          <div>Uploading… {uploadProgress}%</div>
+        {:else if isCompressing}
+          <div>Compressing… {progress}%</div>
+        {/if}
+      </div>
     </div>
   </div>
 {/if}
