@@ -93,6 +93,8 @@
   // Download readiness
   let isReady: boolean = false;
   let readyFilename: string | null = null;
+  let showTryDownload: boolean = false;
+  let readyTimer: any = null;
   // ETA / status helpers
   let startedAt: number | null = null;
   let etaSeconds: number | null = null;
@@ -400,6 +402,10 @@
               }
               etaLabel = etaSeconds != null ? formatEta(etaSeconds) : null;
             }
+            // If we hit 100% but haven't seen 'ready' yet, show a manual download option after a short grace period
+            if (displayedProgress >= 100 && !isReady && !readyTimer) {
+              readyTimer = setTimeout(() => { showTryDownload = true; }, 1500);
+            }
           }
           if (data.type === 'ready') {
             // Backend marked file ready to download
@@ -407,6 +413,8 @@
             readyFilename = data.output_filename || null;
             displayedProgress = Math.max(displayedProgress, 100);
             isFinalizing = false;
+            showTryDownload = false;
+            if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
             // Auto-download if enabled
             if (autoDownload && taskId) {
               setTimeout(() => { window.location.href = downloadUrl(taskId!); }, 200);
@@ -448,6 +456,8 @@
             displayedProgress = 100;
             isCompressing = false;
             isFinalizing = false;
+            showTryDownload = false;
+            if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
             startedAt = null; etaSeconds = null; etaLabel = null; currentSpeedX = null; hasProgress = false;
             try { esRef?.close(); } catch {}
             // Play sound when done if enabled
@@ -523,6 +533,7 @@
   // Remove older reset; replace with one that clears readiness flags too
   
   function reset(){ file=null; uploadedFileName=null; jobInfo=null; taskId=null; progress=0; displayedProgress=0; logLines=[]; doneStats=null; warnText=null; errorText=null; isUploading=false; isCompressing=false; isFinalizing=false; decodeMethod=null; encodeMethod=null; isReady=false; readyFilename=null; try { esRef?.close(); } catch {} }
+  function reset(){ file=null; uploadedFileName=null; jobInfo=null; taskId=null; progress=0; displayedProgress=0; logLines=[]; doneStats=null; warnText=null; errorText=null; isUploading=false; isCompressing=false; isFinalizing=false; decodeMethod=null; encodeMethod=null; isReady=false; readyFilename=null; showTryDownload=false; if (readyTimer) { clearTimeout(readyTimer); readyTimer=null; } try { esRef?.close(); } catch {} }
   $: (() => { /* clear ETA when not compressing */ if (!isCompressing) { startedAt = null; etaSeconds = null; etaLabel = null; currentSpeedX = null; hasProgress = false; isFinalizing = false; } })();
 
   async function onCancel(){
@@ -843,6 +854,12 @@
         <div class="mt-4 text-sm">
           <p>Ready to download.</p>
           <a class="btn inline-block mt-2" href={downloadUrl(taskId)} target="_blank">Download</a>
+        </div>
+      {/if}
+      {#if !isReady && !doneStats && showTryDownload}
+        <div class="mt-4 text-sm">
+          <p>Finalizing… You can try downloading now.</p>
+          <a class="btn inline-block mt-2" href={downloadUrl(taskId)} target="_blank">Try Download</a>
         </div>
       {/if}
 

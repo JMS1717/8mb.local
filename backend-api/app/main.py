@@ -239,6 +239,14 @@ async def download(task_id: str):
     res = celery_app.AsyncResult(task_id)
     meta = res.info if isinstance(res.info, dict) else {}
     path = meta.get("output_path")
+    # Fallback: if Celery meta isn't populated yet, check Redis 'ready' key
+    if not path:
+        try:
+            cached = await redis.get(f"ready:{task_id}")
+            if cached:
+                path = cached
+        except Exception:
+            pass
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not ready")
     filename = os.path.basename(path)
