@@ -409,6 +409,15 @@ async def add_preset_profile(profile: PresetProfile, _auth=Depends(basic_auth)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.put("/api/settings/preset-profiles/default")
+async def set_default_preset(req: SetDefaultPresetRequest, _auth=Depends(basic_auth)):
+    try:
+        settings_manager.set_default_preset(req.name)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.put("/api/settings/preset-profiles/{name}")
 async def update_preset_profile(name: str, updates: PresetProfile, _auth=Depends(basic_auth)):
     try:
@@ -425,15 +434,6 @@ async def delete_preset_profile(name: str, _auth=Depends(basic_auth)):
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
-
-
-@app.put("/api/settings/preset-profiles/default")
-async def set_default_preset(req: SetDefaultPresetRequest, _auth=Depends(basic_auth)):
-    try:
-        settings_manager.set_default_preset(req.name)
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/settings/codecs")
