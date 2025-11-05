@@ -13,9 +13,14 @@
 
 <br/>
 
-![8mb.local – initial screen](docs/images/ui-empty.png)
-
-![8mb.local – analyze, advanced options, progress, download](docs/images/ui-job-complete.png)
+![Advanced](docs/images/advanced.png)
+![Compressing](docs/images/compressing.png)
+![Encoder Tests](docs/images/encodertests.png)
+![GPU List](docs/images/gpulist.png)
+![History](docs/images/history.png)
+![Main](docs/images/main.png)
+![Queue](docs/images/queue.png)
+![Settings](docs/images/settings.png)
 
 </details>
 
