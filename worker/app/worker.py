@@ -15,6 +15,7 @@ from .utils import ffprobe_info, calc_bitrates
 from .hw_detect import get_hw_info, map_codec_to_hw
 from .startup_tests import run_startup_tests
 from threading import Thread
+from .gpu_env import get_gpu_env
 
 # Configure logging BEFORE any tests run
 logging.basicConfig(
@@ -30,28 +31,7 @@ REDIS = None
 ENCODER_TEST_CACHE: Dict[str, bool] = {}
 
 
-def get_gpu_env():
-    """
-    Get environment with NVIDIA GPU variables and library paths for subprocess calls.
-    Includes LD_LIBRARY_PATH locations needed for CUDA on WSL2 and NVIDIA toolkit.
-    """
-    env = os.environ.copy()
-    # Ensure NVIDIA variables are set for GPU access
-    env['NVIDIA_VISIBLE_DEVICES'] = env.get('NVIDIA_VISIBLE_DEVICES', 'all')
-    env['NVIDIA_DRIVER_CAPABILITIES'] = env.get('NVIDIA_DRIVER_CAPABILITIES', 'compute,video,utility')
-    # Add common library locations (non-destructive append)
-    lib_paths = [
-        '/usr/local/nvidia/lib64',
-        '/usr/local/nvidia/lib',
-        '/usr/local/cuda/lib64',
-        '/usr/local/cuda/lib',
-        '/usr/lib/wsl/lib',  # WSL2 libcuda.so location
-        '/usr/lib/x86_64-linux-gnu',
-    ]
-    existing = env.get('LD_LIBRARY_PATH', '')
-    add = ':'.join(p for p in lib_paths if p)
-    env['LD_LIBRARY_PATH'] = (existing + (':' if existing and add else '') + add) if (existing or add) else ''
-    return env
+## get_gpu_env now imported from .gpu_env
 
 def _start_encoder_tests_async():
     def _run():

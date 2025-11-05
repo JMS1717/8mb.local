@@ -2,7 +2,7 @@
 # Build-time args let us produce multiple variants from one Dockerfile
 ARG CUDA_VERSION=12.8.0
 ARG UBUNTU_FLAVOR=ubuntu22.04
-ARG FFMPEG_VERSION=7.0
+ARG FFMPEG_VERSION=8.0
 ARG NV_CODEC_HEADERS_REF=sdk/12.2
 ARG BUILD_FLAVOR=latest
 ARG DRIVER_MIN=550.00

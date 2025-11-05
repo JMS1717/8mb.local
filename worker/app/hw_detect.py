@@ -2,6 +2,7 @@
 import os
 import subprocess
 from typing import Dict, Optional
+from .gpu_env import get_gpu_env
 
 # Cache hardware detection result to avoid repeated subprocess calls
 _HW_CACHE: Optional[Dict] = None
@@ -89,13 +90,14 @@ def _check_nvidia() -> bool:
             capture_output=True,
             text=True,
             timeout=2,
+            env=get_gpu_env(),
         )
         if q.returncode == 0:
             names = [l.strip() for l in (q.stdout or '').splitlines() if l.strip()]
             if len(names) > 0:
                 return True
         # Fallback: list mode
-        l = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=2)
+        l = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=2, env=get_gpu_env())
         if l.returncode == 0 and (l.stdout or '').strip():
             return True
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -107,7 +109,8 @@ def _check_nvidia() -> bool:
             ["ffmpeg", "-hide_banner", "-hwaccels"],
             capture_output=True,
             text=True,
-            timeout=2
+            timeout=2,
+            env=get_gpu_env(),
         )
         if "cuda" in result.stdout.lower():
             return True
@@ -124,7 +127,8 @@ def _check_intel_qsv() -> bool:
             ["ffmpeg", "-hide_banner", "-hwaccels"],
             capture_output=True,
             text=True,
-            timeout=2
+            timeout=2,
+            env=get_gpu_env(),
         )
         if "qsv" in result.stdout.lower():
             # Verify encoder is available
@@ -132,7 +136,8 @@ def _check_intel_qsv() -> bool:
                 ["ffmpeg", "-hide_banner", "-encoders"],
                 capture_output=True,
                 text=True,
-                timeout=2
+                timeout=2,
+                env=get_gpu_env(),
             )
             if "h264_qsv" in encoders.stdout:
                 return True
@@ -157,7 +162,8 @@ def _check_vaapi() -> Dict[str, any]:
             ["ffmpeg", "-hide_banner", "-hwaccels"],
             capture_output=True,
             text=True,
-            timeout=2
+            timeout=2,
+            env=get_gpu_env(),
         )
         if "vaapi" not in hwaccels.stdout.lower():
             return result
@@ -167,7 +173,8 @@ def _check_vaapi() -> Dict[str, any]:
             ["ffmpeg", "-hide_banner", "-encoders"],
             capture_output=True,
             text=True,
-            timeout=2
+            timeout=2,
+            env=get_gpu_env(),
         )
         if "h264_vaapi" not in encoders.stdout:
             return result

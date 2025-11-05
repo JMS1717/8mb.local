@@ -420,16 +420,16 @@ cd 8mb.local
 
 2. Build the image with appropriate arguments:
 
-**For latest (CUDA 12.8, FFmpeg 7, driver 550+):**
+**For latest (CUDA 12.8 or 13.0.1, FFmpeg 8.0, driver 550+):**
 ```bash
 docker build \
   --build-arg BUILD_VERSION=134 \
   --build-arg BUILD_FLAVOR=latest \
-  --build-arg CUDA_VERSION=12.8.0 \
+  --build-arg CUDA_VERSION=12.8.0 \  # or 13.0.1
   --build-arg UBUNTU_FLAVOR=ubuntu22.04 \
-  --build-arg FFMPEG_VERSION=7.0 \
-  --build-arg NV_CODEC_HEADERS_REF=sdk/12.2 \
-  --build-arg NV_CODEC_COMPAT=12.2 \
+  --build-arg FFMPEG_VERSION=8.0 \
+  --build-arg NV_CODEC_HEADERS_REF=sdk/12.2 \  # for Blackwell consider sdk/12.4+
+  --build-arg NV_CODEC_COMPAT=sdk/12.2 \
   --build-arg DRIVER_MIN=550.00 \
   -t jms1717/8mblocal:latest .
 ```
@@ -443,7 +443,7 @@ docker build \
   --build-arg UBUNTU_FLAVOR=ubuntu22.04 \
   --build-arg FFMPEG_VERSION=6.1.1 \
   --build-arg NV_CODEC_HEADERS_REF=sdk/12.2 \
-  --build-arg NV_CODEC_COMPAT=12.0 \
+  --build-arg NV_CODEC_COMPAT=sdk/12.0 \
   --build-arg DRIVER_MIN=535.54.03 \
   -t jms1717/8mblocal:legacy .
 ```
@@ -453,15 +453,15 @@ docker build \
 - `BUILD_FLAVOR`: `latest` or `legacy` (display label)
 - `CUDA_VERSION`: NVIDIA CUDA toolkit version (12.8.0 for RTX 50/40-series, 12.2.0 for legacy)
 - `UBUNTU_FLAVOR`: Base OS version (ubuntu22.04 recommended)
-- `FFMPEG_VERSION`: FFmpeg version (7.0 for latest features, 6.1.1 for legacy compatibility)
-- `NV_CODEC_HEADERS_REF`: NVENC headers git branch/tag from [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers)
-- `NV_CODEC_COMPAT`: API version override for FFmpeg compatibility (12.2 for FFmpeg 7.x, 12.0 for FFmpeg 6.x)
+- `FFMPEG_VERSION`: FFmpeg version (8.0 recommended for Blackwell; 6.1.1 for legacy compatibility)
+- `NV_CODEC_HEADERS_REF`: NVENC headers git branch/tag from [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) (reference only, not used if NV_CODEC_COMPAT set)
+- `NV_CODEC_COMPAT`: Override headers version (sdk/12.0 for FFmpeg 6.x, omit or match REF for FFmpeg 8+)
 - `DRIVER_MIN`: Minimum NVIDIA driver version required
 
 **Why two build variants?**
 - **FFmpeg 6.1.1 is incompatible with NVENC SDK 12.1+** due to removed API fields (`pixelBitDepthMinus8`, `NV_ENC_BUFFER_FORMAT_*_PL`)
-- Legacy builds use `NV_CODEC_COMPAT=12.0` to force FFmpeg 6.x to compile against SDK 12.2 headers using the 12.0 API subset
-- Latest builds use FFmpeg 7.0 which is fully compatible with SDK 12.2+
+- Legacy builds use `NV_CODEC_COMPAT=sdk/12.0` to checkout the older SDK 12.0 headers that FFmpeg 6.x can compile against
+- Latest builds use FFmpeg 8.0 which is fully compatible with newer SDKs and adds official Blackwell support
 
 3. Run:
 ```bash
