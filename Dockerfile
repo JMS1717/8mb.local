@@ -54,7 +54,7 @@ FROM node:20-alpine AS frontend-build
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci --only=production
+    npm ci
 
 COPY frontend/ ./
 # Build with empty backend URL (same-origin deployment)
