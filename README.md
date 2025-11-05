@@ -28,9 +28,11 @@
 - **Resolution control**: Set max width/height while maintaining aspect ratio
 - **Video trimming**: Specify start/end times (seconds or HH:MM:SS format)
 - ffprobe analysis on upload for instant estimates and warnings
-- **Real‑time progress tracking**: Live encoding progress via Server-Sent Events (SSE) on both main and queue pages
+- **Real‑time progress tracking**: Multi-signal progress using actual output size, time processed, bitrate, and wall-clock estimates for smooth, accurate updates
 - **Real‑time FFmpeg logs**: Streaming logs during compression for instant feedback
+- **Live Queue Management**: View all active jobs with real-time progress, cancel individual jobs, or clear entire queue
 - **One‑click Cancel**: Stop an in‑flight encode; worker interrupts FFmpeg immediately
+- **Queue Clear**: Remove all jobs (cancel running, remove queued/completed) with one click
 - **Automatic file size optimization**: If output exceeds target by >2%, automatically re-encodes with adjusted bitrate
 - **Smart retry notifications**: Audio alerts and visual notifications when auto-retry occurs
 - **History tracking enabled by default**: Recent jobs stored in `/app/history.json`
@@ -38,6 +40,7 @@
 - Hardware encoders: AV1, HEVC (H.265), H.264 (GPU-accelerated when available)
 - Software fallback: libx264, libx265, libaom-av1 for CPU-only systems
 - Output container choice: MP4 or MKV, with compatibility safeguards
+- **Version tracking**: UI displays current version (v125+), backend provides `/api/version` endpoint
 
 ## Architecture (technical deep dive)
 
