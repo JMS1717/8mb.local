@@ -6,10 +6,10 @@
 >
 > We now publish two Docker tags to support both new and legacy NVIDIA environments from the same codebase.
 >
-> - `:latest` (Blackwell / 50‑series): CUDA 12.8 + FFmpeg 7, NVENC headers sdk/12.3. Minimum driver: 550.00
-> - `:legacy` (Turing/Ampere on 535.x): CUDA 12.2 + FFmpeg 6.1.1, NVENC headers sdk/12.1. Minimum driver: 535.54.03
+> - `:latest` (Blackwell / 50‑series): CUDA 12.8 + FFmpeg 7, NVENC headers sdk/12.2. Minimum driver: 550.00
+> - `:legacy` (Turing/Ampere on 535.x): CUDA 12.2 + FFmpeg 6.1.1, NVENC headers sdk/12.2. Minimum driver: 535.54.03
 >
-> The image auto-detects your NVIDIA driver at startup and prints a clear warning if the tag doesn't match your host. CPU/VAAPI still work; NVENC will be disabled if incompatible.
+> Both images use the `cuda:*-base-*` runtime to ensure CUDA libraries are present for NVENC. The container auto-detects your NVIDIA driver at startup and prints a clear warning if the tag doesn't match your host. CPU/VAAPI still work; NVENC will be disabled if incompatible.
 
 ## Table of Contents
 * [Features](#features)
@@ -524,6 +524,65 @@ If progress still doesn't update until completion, check your proxy logs and ver
 
 ### Platform-Specific Setup
 
+#### Debian (Recommended for Servers)
+For Debian 12 (Bookworm) with NVIDIA GPUs:
+
+1. **Install NVIDIA Driver 535+ (for :legacy) or 550+ (for :latest)**
+   ```bash
+   # Add NVIDIA CUDA repository
+   wget https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb
+   sudo dpkg -i cuda-keyring_1.1-1_all.deb
+   sudo apt update
+   
+   # Install driver (535 for legacy, 550+ for latest)
+   sudo apt install nvidia-driver
+   # Or specify version: sudo apt install nvidia-driver-535
+   
+   sudo reboot
+   ```
+
+2. **Verify Driver Installation**
+   ```bash
+   nvidia-smi  # Should show driver version and GPU info
+   ```
+
+3. **Install Docker**
+   ```bash
+   curl -fsSL https://get.docker.com | sh
+   sudo usermod -aG docker $USER
+   # Logout and login for group changes to take effect
+   ```
+
+4. **Install NVIDIA Container Toolkit**
+   ```bash
+   distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+   curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | \
+     sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+     sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+   
+   sudo apt update
+   sudo apt install -y nvidia-container-toolkit
+   sudo systemctl restart docker
+   ```
+
+5. **Test GPU Access**
+   ```bash
+   docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi
+   ```
+
+6. **Run 8mb.local**
+   ```bash
+   # Use :legacy for driver 535.x, :latest for driver 550+
+   docker run -d --name 8mblocal \
+     --gpus all \
+     -e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
+     -p 8001:8001 \
+     -v ./uploads:/app/uploads \
+     -v ./outputs:/app/outputs \
+     jms1717/8mblocal:legacy
+   ```
+
 #### Windows
 1. Install Docker Desktop
 2. For NVIDIA GPU: Install NVIDIA drivers, enable WSL2 GPU support in Docker Desktop settings
@@ -622,7 +681,7 @@ docker compose up -d
     
     After reboot, verify: `nvidia-smi` should show driver 550+ and `ffmpeg -encoders | grep nvenc` inside container should work.
     
-  - **Why this happens**: The `:legacy` image targets NVENC SDK **12.1** (min driver 535.54.03). The `:latest` image targets newer CUDA/NVENC for Blackwell (min driver 550).
+  - **Why this happens**: The `:legacy` image targets CUDA 12.2 with NVENC SDK **12.2** (min driver 535.54.03). The `:latest` image targets newer CUDA/NVENC for Blackwell (min driver 550).
   
   - **Verification steps**:
     1. Check host driver: `nvidia-smi` (look for version 550+)

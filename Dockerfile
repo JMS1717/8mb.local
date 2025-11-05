@@ -28,6 +28,9 @@ WORKDIR /build
 RUN git clone --depth=1 https://github.com/FFmpeg/nv-codec-headers.git && \
     cd nv-codec-headers && (git checkout ${NV_CODEC_HEADERS_REF} || echo "Ref ${NV_CODEC_HEADERS_REF} not found, using default HEAD") && make install && cd ..
 
+# Ensure pkg-config can find ffnvcodec (nv-codec-headers installs ffnvcodec.pc under /usr/local/lib/pkgconfig)
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+
 # Build FFmpeg with all hardware acceleration support
 RUN wget -q https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
     tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && cd ffmpeg-${FFMPEG_VERSION} && \
@@ -62,7 +65,8 @@ RUN npm run build && \
     find build -name "*.ts" -delete
 
 # Stage 3: Runtime with all services
-FROM nvidia/cuda:${CUDA_VERSION}-runtime-${UBUNTU_FLAVOR}
+# Use base-* instead of runtime-* to get core CUDA runtime libs needed by NVENC
+FROM nvidia/cuda:${CUDA_VERSION}-base-${UBUNTU_FLAVOR}
 ARG BUILD_FLAVOR
 ARG FFMPEG_VERSION
 ARG CUDA_VERSION
@@ -89,10 +93,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     pciutils procps \
     && apt-get clean && rm -rf /tmp/*
 
-# Copy FFmpeg from build stage (only what we need)
+# Copy FFmpeg binaries and their library dependencies from build stage
 COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg-build /usr/local/bin/ffprobe /usr/local/bin/ffprobe
-# Copy only FFmpeg libraries (not entire /usr/local/lib)
+# Copy FFmpeg libraries
 COPY --from=ffmpeg-build /usr/local/lib/libavcodec.so* /usr/local/lib/
 COPY --from=ffmpeg-build /usr/local/lib/libavformat.so* /usr/local/lib/
 COPY --from=ffmpeg-build /usr/local/lib/libavutil.so* /usr/local/lib/
@@ -100,6 +104,9 @@ COPY --from=ffmpeg-build /usr/local/lib/libavfilter.so* /usr/local/lib/
 COPY --from=ffmpeg-build /usr/local/lib/libswscale.so* /usr/local/lib/
 COPY --from=ffmpeg-build /usr/local/lib/libswresample.so* /usr/local/lib/
 COPY --from=ffmpeg-build /usr/local/lib/libavdevice.so* /usr/local/lib/
+# Copy CUDA runtime libs required by NVENC (base image has libcuda.so but not these)
+COPY --from=ffmpeg-build /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+COPY --from=ffmpeg-build /usr/local/cuda/lib64/libnpp*.so* /usr/local/cuda/lib64/
 RUN ldconfig
 
 WORKDIR /app
