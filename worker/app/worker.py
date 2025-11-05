@@ -348,28 +348,11 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         except Exception:
             return False
 
-    # AV1: Prefer HW decode only if actually supported; otherwise libdav1d
+    # AV1: Use software decode (libdav1d) for better compatibility
+    # av1_cuvid often causes pixel format issues with av1_nvenc
     if in_codec == "av1":
-        if actual_encoder.endswith("_nvenc"):
-            used_cuda = False
-            # Be more aggressive when force_hw_decode is enabled
-            if force_hw_decode and can_av1_cuvid_decode(input_path):
-                init_hw_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"] + init_hw_flags
-                input_opts += ["-c:v", "av1_cuvid"]
-                _publish(self.request.id, {"type": "log", "message": "Decoder: using av1_cuvid (CUDA)"})
-                used_cuda = True
-            elif can_cuda_decode(input_path):
-                init_hw_flags = ["-hwaccel", "cuda"] + init_hw_flags
-                _publish(self.request.id, {"type": "log", "message": "Decoder: using cuda (AV1)"})
-                used_cuda = True
-
-            if not used_cuda:
-                input_opts += ["-c:v", "libdav1d"]
-                _publish(self.request.id, {"type": "log", "message": "Decoder: using libdav1d for AV1 input"})
-        else:
-            # Non-NVIDIA encoders: keep software AV1 decode for now
-            input_opts += ["-c:v", "libdav1d"]
-            _publish(self.request.id, {"type": "log", "message": "Decoder: using libdav1d for AV1 input"})
+        input_opts += ["-c:v", "libdav1d"]
+        _publish(self.request.id, {"type": "log", "message": "Decoder: using libdav1d for AV1 input"})
     elif in_codec in ("h264", "hevc") and actual_encoder.endswith("_nvenc"):
         # H.264/HEVC: NVDEC widely supported
         init_hw_flags = ["-hwaccel", "cuda"] + init_hw_flags
