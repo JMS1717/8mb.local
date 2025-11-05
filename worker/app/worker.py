@@ -29,6 +29,18 @@ REDIS = None
 # Cache encoder test results to avoid slow init tests on every job
 ENCODER_TEST_CACHE: Dict[str, bool] = {}
 
+
+def get_gpu_env():
+    """
+    Get environment with NVIDIA GPU variables for subprocess calls.
+    Critical: subprocess.Popen() does NOT inherit NVIDIA_DRIVER_CAPABILITIES by default.
+    """
+    env = os.environ.copy()
+    # Ensure NVIDIA variables are set for GPU access
+    env['NVIDIA_VISIBLE_DEVICES'] = env.get('NVIDIA_VISIBLE_DEVICES', 'all')
+    env['NVIDIA_DRIVER_CAPABILITIES'] = env.get('NVIDIA_DRIVER_CAPABILITIES', 'compute,video,utility')
+    return env
+
 def _start_encoder_tests_async():
     def _run():
         try:
@@ -435,7 +447,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     _publish(self.request.id, {"type": "log", "message": f"FFmpeg command: {cmd_str}"})
 
     def run_ffmpeg_and_stream(command: list) -> tuple[int, bool]:
-        proc_i = subprocess.Popen(command, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, bufsize=1)
+        proc_i = subprocess.Popen(command, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, bufsize=1, env=get_gpu_env())
         local_stderr = []
         nonlocal last_progress
         nonlocal speed_ewma

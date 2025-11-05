@@ -1,6 +1,17 @@
 import json
+import os
 import subprocess
 from typing import Optional
+
+
+def get_gpu_env():
+    """
+    Get environment with NVIDIA GPU variables for subprocess calls.
+    """
+    env = os.environ.copy()
+    env['NVIDIA_VISIBLE_DEVICES'] = env.get('NVIDIA_VISIBLE_DEVICES', 'all')
+    env['NVIDIA_DRIVER_CAPABILITIES'] = env.get('NVIDIA_DRIVER_CAPABILITIES', 'compute,video,utility')
+    return env
 
 
 def ffprobe_info(input_path: str) -> dict:
@@ -10,7 +21,7 @@ def ffprobe_info(input_path: str) -> dict:
         "-of", "json",
         input_path,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=get_gpu_env())
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr)
     data = json.loads(proc.stdout)

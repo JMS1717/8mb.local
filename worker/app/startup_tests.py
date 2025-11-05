@@ -12,6 +12,18 @@ from typing import Dict, List, Tuple
 logger = logging.getLogger(__name__)
 
 
+def get_gpu_env():
+    """
+    Get environment with NVIDIA GPU variables for subprocess calls.
+    Critical: subprocess.run() does NOT inherit NVIDIA_DRIVER_CAPABILITIES by default.
+    """
+    env = os.environ.copy()
+    # Ensure NVIDIA variables are set for GPU access
+    env['NVIDIA_VISIBLE_DEVICES'] = env.get('NVIDIA_VISIBLE_DEVICES', 'all')
+    env['NVIDIA_DRIVER_CAPABILITIES'] = env.get('NVIDIA_DRIVER_CAPABILITIES', 'compute,video,utility')
+    return env
+
+
 def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
     """
     Test hardware decoder separately.
@@ -42,7 +54,7 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
             create_cmd.extend(["-cpu-used", "8", "-row-mt", "1"])
         
         create_cmd.append(test_file)
-        subprocess.run(create_cmd, capture_output=True, timeout=10)
+        subprocess.run(create_cmd, capture_output=True, timeout=10, env=get_gpu_env())
         
         # Now test decoding with hardware
         cmd = ["ffmpeg", "-hide_banner"]
@@ -51,7 +63,7 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
             "-i", test_file,
             "-f", "null", "-"
         ])
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env())
         stderr_lower = result.stderr.lower()
         
         if "no device found" in stderr_lower or "cannot load" in stderr_lower:
@@ -88,7 +100,8 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
             cmd,
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=5,
+            env=get_gpu_env()
         )
         stderr_lower = result.stderr.lower()
         
@@ -139,7 +152,8 @@ def is_encoder_available(encoder_name: str) -> bool:
             ["ffmpeg", "-hide_banner", "-encoders"],
             capture_output=True,
             text=True,
-            timeout=2
+            timeout=2,
+            env=get_gpu_env()
         )
         # Look for exact encoder match
         # Format is like: " V..... h264_nvenc           Nvidia NVENC H.264 encoder"
@@ -241,7 +255,8 @@ def run_startup_tests(hw_info: Dict) -> Dict[str, bool]:
                             ["ffmpeg", "-hide_banner", "-encoders"],
                             capture_output=True,
                             text=True,
-                            timeout=2
+                            timeout=2,
+                            env=get_gpu_env()
                         )
                         # Look for similar encoders
                         similar = [line.strip() for line in enc_result.stdout.split('\n') 
