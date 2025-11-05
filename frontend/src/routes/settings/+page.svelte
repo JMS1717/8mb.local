@@ -360,15 +360,15 @@
   {#if message}<div class="msg ok">{message}</div>{/if}
   {#if error}<div class="msg err">{error}</div>{/if}
 
-  <!-- Authentication -->
-  <div class="card">
-	<div class="title">Authentication</div>
-	<div class="switch" style="margin-bottom:12px">
-	  <input id="auth_enabled" type="checkbox" bind:checked={authEnabled} />
-	  <label class="label" for="auth_enabled" style="margin:0">Require authentication</label>
-	</div>
+  <!-- Authentication (only show if enabled) -->
+  {#if authEnabled}
+	<div class="card">
+	  <div class="title">Authentication</div>
+	  <div class="switch" style="margin-bottom:12px">
+		<input id="auth_enabled" type="checkbox" bind:checked={authEnabled} />
+		<label class="label" for="auth_enabled" style="margin:0">Require authentication</label>
+	  </div>
 
-	{#if authEnabled}
 	  <div class="row">
 		<div>
 		  <label class="label" for="username">Username</label>
@@ -385,12 +385,23 @@
 		  <input id="confirmpass" class="input" type="password" bind:value={confirmPassword} />
 		</div>
 	  {/if}
-	{/if}
 
-	<div style="margin-top:12px">
-	  <button class="btn" on:click={saveAuth} disabled={saving}>{saving ? 'Saving…' : 'Save authentication'}</button>
+	  <div style="margin-top:12px">
+		<button class="btn" on:click={saveAuth} disabled={saving}>{saving ? 'Saving…' : 'Save authentication'}</button>
+	  </div>
 	</div>
-  </div>
+  {:else}
+	<!-- Note when auth is disabled -->
+	<div class="card">
+	  <div class="title">Authentication</div>
+	  <p class="label" style="color:#9ca3af; margin-bottom:12px">
+		Authentication is currently disabled. To enable authentication and secure your instance, you'll need to configure it via the Docker container environment variables or configuration file.
+	  </p>
+	  <p class="label" style="color:#9ca3af; font-size:13px">
+		See the <a href="https://github.com/JMS1717/8mb.local" target="_blank" rel="noopener noreferrer" style="color:#3b82f6; text-decoration:underline">documentation</a> for setup instructions.
+	  </p>
+	</div>
+  {/if}
 
   <!-- Codec Visibility -->
   <div class="card">

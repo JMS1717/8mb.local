@@ -1389,7 +1389,7 @@
         {:else if isCompressing}
           {#if hasProgress}
             <div>
-              Compressing… {displayedProgress}%
+              Compressing… {displayedProgress.toFixed(1)}%
               {#if displayedProgress<99 && etaLabel}
                 — ~{etaLabel} left
               {:else if displayedProgress>=99}
