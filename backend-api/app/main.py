@@ -707,6 +707,13 @@ async def health():
     return {"ok": True}
 
 
+@app.get("/api/version")
+async def api_version():
+    """Return application version baked at build time."""
+    ver = os.getenv("APP_VERSION", "123")
+    return {"version": ver}
+
+
 @app.get("/api/hardware")
 async def get_hardware_info():
     """Get available hardware acceleration info from worker."""

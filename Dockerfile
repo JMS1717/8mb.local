@@ -56,6 +56,10 @@ RUN npm run build && \
 # Using CUDA 11.8 runtime for compatibility with older NVIDIA drivers (535.x series)
 FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
 
+# Build-time version (can be overridden)
+ARG BUILD_VERSION=123
+ENV APP_VERSION=${BUILD_VERSION}
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1

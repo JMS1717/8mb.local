@@ -7,7 +7,7 @@ import time
 import logging
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 from redis import Redis
 
 from .celery_app import celery_app
@@ -113,11 +113,12 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     
     # Fallback to CPU only if startup tests explicitly marked encoder as unavailable.
     # If cache is empty (tests still running in background), attempt hardware and rely on runtime fallback below.
+    original_encoder = actual_encoder
     if actual_encoder not in ("libx264", "libx265", "libaom-av1"):
         global ENCODER_TEST_CACHE
         cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
         if cache_key in ENCODER_TEST_CACHE and not ENCODER_TEST_CACHE[cache_key]:
-            _publish(self.request.id, {"type": "log", "message": f"Warning: {actual_encoder} marked unavailable by startup tests, falling back to CPU"})
+            _publish(self.request.id, {"type": "log", "message": f"⚠️ {actual_encoder} marked unavailable by startup tests, falling back to CPU"})
             # Determine CPU fallback based on codec type
             if "h264" in actual_encoder:
                 actual_encoder = "libx264"
@@ -129,6 +130,8 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 actual_encoder = "libaom-av1"
                 v_flags = ["-pix_fmt", "yuv420p"]
             init_hw_flags = []
+            # Update hardware info display to show CPU fallback
+            _publish(self.request.id, {"type": "log", "message": f"Encoder: CPU ({actual_encoder})"})
     
     _publish(self.request.id, {"type": "log", "message": f"Using encoder: {actual_encoder} (requested: {video_codec})"})
     _publish(self.request.id, {"type": "log", "message": "Starting compression…"})
@@ -140,6 +143,19 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     
     # Start timing from here (actual encoding, not initialization)
     start_ts = time.time()
+    # Dynamic progress model parameters
+    # Reserve more time for finalization when not using fragmented MP4
+    is_mp4 = str(output_path).lower().endswith('.mp4')
+    if is_mp4 and fast_mp4_finalize:
+        encoding_portion = 0.985  # almost all progress goes to encoding
+    elif is_mp4 and not fast_mp4_finalize:
+        encoding_portion = 0.90   # leave more for moov/faststart move
+    else:
+        encoding_portion = 0.96   # mkv and others
+    finalize_portion = max(0.0, 1.0 - encoding_portion)
+    # Track measured speed from ffmpeg (EWMA of "speed=..x")
+    speed_ewma: Optional[float] = None
+    ewma_alpha = 0.3
     
     # Log decode path info
     try:
@@ -422,8 +438,21 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         proc_i = subprocess.Popen(command, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, bufsize=1)
         local_stderr = []
         nonlocal last_progress
+        nonlocal speed_ewma
         emitted_initial_progress = False
         cancelled = False
+        last_update_time = time.time()
+        
+        # Track multiple progress signals from ffmpeg
+        current_time_s = 0.0  # out_time_ms converted to seconds
+        current_size_bytes = 0  # total_size in bytes
+        current_bitrate_kbps = 0.0  # bitrate in kbps
+        
+        # Dynamic progress emit threshold
+        min_step = 0.0005  # 0.05%
+        if duration and duration < 120:
+            min_step = 0.00025  # 0.025% for very short content
+        max_update_interval = 2.0  # Force update every 2 seconds
         try:
             assert proc_i.stderr is not None
             for line in proc_i.stderr:
@@ -450,34 +479,128 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 # Emit a small initial progress bump on first stderr line to avoid long "Starting…"
                 if not emitted_initial_progress and duration > 0:
                     emitted_initial_progress = True
-                    if last_progress < 0.01:
-                        last_progress = 0.01
-                        _publish(self.request.id, {"type": "progress", "progress": 1.0, "phase": "encoding"})
+                    if last_progress < 0.001:
+                        last_progress = 0.001
+                        _publish(self.request.id, {"type": "progress", "progress": 0.1, "phase": "encoding"})
                         try:
-                            self.update_state(state="PROGRESS", meta={"progress": 1.0, "phase": "encoding"})
+                            self.update_state(state="PROGRESS", meta={"progress": 0.1, "phase": "encoding"})
                         except Exception:
                             pass
                 if "=" in line:
                     key, _, val = line.partition("=")
+                    
+                    # Collect all progress metrics from ffmpeg
                     if key == "out_time_ms":
                         try:
-                            ms = int(val)
-                            if duration > 0:
-                                # Use 0-96% for encoding (reserve 96-100% for finalization & file handling)
-                                p = min(max(ms / 1000.0 / duration, 0.0), 1.0)
-                                scaled_progress = p * 0.96  # 0.0 to 0.96
-                                # Update every 0.5% or on nearing 96%
-                                if (scaled_progress - last_progress) >= 0.005 or scaled_progress >= 0.959:
-                                    last_progress = scaled_progress
-                                    prog = round(scaled_progress*100, 2)
-                                    _publish(self.request.id, {"type": "progress", "progress": prog, "phase": "encoding"})
-                                    try:
-                                        self.update_state(state="PROGRESS", meta={"progress": prog, "phase": "encoding"})
-                                    except Exception:
-                                        pass
+                            current_time_s = int(val) / 1000.0
                         except Exception:
                             pass
-                    elif key in ("bitrate", "total_size", "speed"):
+                    elif key == "total_size":
+                        try:
+                            current_size_bytes = int(val)
+                        except Exception:
+                            pass
+                    elif key == "bitrate":
+                        try:
+                            # bitrate comes as "1234.5kbits/s" - extract number
+                            br_str = val.strip().replace("kbits/s", "").replace("kbit/s", "")
+                            current_bitrate_kbps = float(br_str)
+                        except Exception:
+                            pass
+                    elif key == "speed":
+                        try:
+                            sval = (val or "").strip()
+                            if sval.endswith("x"):
+                                sval = sval[:-1]
+                            sp = float(sval)
+                            if math.isfinite(sp) and sp > 0:
+                                speed_ewma = sp if (speed_ewma is None) else (ewma_alpha*sp + (1.0-ewma_alpha)*speed_ewma)
+                        except Exception:
+                            pass
+                    
+                    # Calculate progress using multiple signals
+                    if key == "out_time_ms" and duration > 0:
+                        try:
+                            # 1. Time-based progress (most straightforward)
+                            time_progress = min(max(current_time_s / duration, 0.0), 1.0)
+                            
+                            # 2. Size-based progress (actual output size vs estimated target)
+                            # Target size in bytes = target_size_mb * 1024 * 1024
+                            target_bytes = target_size_mb * 1024 * 1024
+                            size_progress = 0.0
+                            if current_size_bytes > 0 and target_bytes > 0:
+                                size_progress = min(max(current_size_bytes / target_bytes, 0.0), 1.2)  # Allow slight overage
+                            
+                            # 3. Wall-clock time estimate using speed
+                            elapsed = max(time.time() - start_ts, 0.0)
+                            wallclock_progress = 0.0
+                            if speed_ewma and speed_ewma > 0.01 and duration > 0:
+                                try:
+                                    est_total_time = duration / speed_ewma
+                                    if est_total_time > 0:
+                                        wallclock_progress = min(max(elapsed / est_total_time, 0.0), 1.0)
+                                except Exception:
+                                    pass
+                            
+                            # Smart blending: use the most reliable signal based on what's available
+                            # Priority: size > time > wallclock
+                            if size_progress > 0.01:
+                                # Size is most accurate - use it primarily, smooth with time
+                                scaled_progress = (0.7 * size_progress + 0.3 * time_progress) * encoding_portion
+                            elif wallclock_progress > 0.01 and elapsed > 3.0:
+                                # Wall clock reliable after a few seconds
+                                scaled_progress = (0.6 * wallclock_progress + 0.4 * time_progress) * encoding_portion
+                            else:
+                                # Fall back to time-based
+                                scaled_progress = time_progress * encoding_portion
+                            
+                            # Safety clamp
+                            scaled_progress = min(max(scaled_progress, 0.0), encoding_portion)
+
+                            # Compute ETA
+                            eta_seconds = None
+                            if speed_ewma and speed_ewma > 0.01 and duration > 0:
+                                try:
+                                    est_total = (duration / speed_ewma)
+                                    fin_factor = 1.0
+                                    if is_mp4 and not fast_mp4_finalize:
+                                        fin_factor = 1.15
+                                    total_with_final = est_total * (encoding_portion + fin_factor*finalize_portion)
+                                    eta_seconds = max(total_with_final - elapsed, 0.0)
+                                except Exception:
+                                    eta_seconds = None
+
+                            # Update if progress changed OR time elapsed
+                            time_since_update = time.time() - last_update_time
+                            progress_delta = abs(scaled_progress - last_progress)
+                            should_update = (
+                                progress_delta >= min_step or 
+                                scaled_progress >= (encoding_portion - 0.001) or
+                                time_since_update >= max_update_interval
+                            )
+                            
+                            if should_update:
+                                last_progress = scaled_progress
+                                last_update_time = time.time()
+                                prog = round(scaled_progress*100, 2)
+                                evt = {"type": "progress", "progress": prog, "phase": "encoding"}
+                                if eta_seconds is not None and math.isfinite(eta_seconds):
+                                    evt["eta_seconds"] = round(float(eta_seconds), 1)
+                                if speed_ewma is not None and math.isfinite(speed_ewma):
+                                    evt["speed_x"] = round(float(speed_ewma), 2)
+                                _publish(self.request.id, evt)
+                                try:
+                                    meta = {"progress": prog, "phase": "encoding"}
+                                    if "eta_seconds" in evt:
+                                        meta["eta_seconds"] = evt["eta_seconds"]
+                                    self.update_state(state="PROGRESS", meta=meta)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    
+                    # Log non-progress keys for debugging
+                    if key not in ("out_time_ms", "total_size", "bitrate", "speed"):
                         _publish(self.request.id, {"type": "log", "message": f"{key}={val}"})
                 else:
                     _publish(self.request.id, {"type": "log", "message": line})
@@ -499,7 +622,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         raise RuntimeError(msg)
 
     if rc != 0 and (actual_encoder.endswith("_nvenc") or actual_encoder.endswith("_qsv") or actual_encoder.endswith("_vaapi") or actual_encoder.endswith("_amf")):
-        _publish(self.request.id, {"type": "log", "message": f"Hardware encode failed (rc={rc}). Retrying on CPU..."})
+        _publish(self.request.id, {"type": "log", "message": f"⚠️ Hardware encode failed (rc={rc}). Retrying on CPU..."})
         # Determine CPU fallback
         if "h264" in actual_encoder:
             fb_encoder = "libx264"; fb_flags = ["-pix_fmt","yuv420p","-profile:v","high"]
@@ -507,6 +630,10 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             fb_encoder = "libx265"; fb_flags = ["-pix_fmt","yuv420p"]
         else:
             fb_encoder = "libaom-av1"; fb_flags = ["-pix_fmt","yuv420p"]
+        
+        # Update encoder display to show CPU fallback
+        _publish(self.request.id, {"type": "log", "message": f"Encoder: CPU ({fb_encoder})"})
+        actual_encoder = fb_encoder  # Update for stats tracking
 
         # Rebuild command for CPU
         cmd2 = [
@@ -553,10 +680,11 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         _publish(self.request.id, {"type": "error", "message": msg})
         raise RuntimeError(msg)
 
-    # Encoding complete - move to 96% and start finalization steps
-    _publish(self.request.id, {"type": "progress", "progress": 96.0, "phase": "finalizing"})
+    # Encoding complete - move to end of encoding portion and start finalization steps
+    enc_done_pct = round(encoding_portion*100, 2)
+    _publish(self.request.id, {"type": "progress", "progress": enc_done_pct, "phase": "finalizing"})
     try:
-        self.update_state(state="PROGRESS", meta={"progress": 96.0, "phase": "finalizing"})
+        self.update_state(state="PROGRESS", meta={"progress": enc_done_pct, "phase": "finalizing"})
     except Exception:
         pass
     _publish(self.request.id, {"type": "log", "message": "Encoding complete. Finalizing output..."})
@@ -588,34 +716,15 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         final_size = 0
     
     _publish(self.request.id, {"type": "log", "message": f"Output verified: {final_size / (1024*1024):.2f} MB"})
-    # Bump progress as we complete verification
-    _publish(self.request.id, {"type": "progress", "progress": 97.5, "phase": "finalizing"})
+    # Bump progress as we complete verification - halfway through finalization
+    verify_pct = round((encoding_portion + finalize_portion*0.5)*100, 2)
+    _publish(self.request.id, {"type": "progress", "progress": verify_pct, "phase": "finalizing"})
     try:
-        self.update_state(state="PROGRESS", meta={"progress": 97.5, "phase": "finalizing"})
+        self.update_state(state="PROGRESS", meta={"progress": verify_pct, "phase": "finalizing"})
     except Exception:
         pass
 
     # Checking file size and preparing for possible retry
-    final_size_mb = round(final_size / (1024*1024), 2) if final_size else 0
-
-    # Make the file downloadable immediately after encode finishes
-    # Expose output_path early via task meta and send a 'ready' event for the UI
-    try:
-        # Persist readiness in both Celery meta and Redis for robust download lookup
-        self.update_state(state="PROGRESS", meta={"output_path": output_path, "progress": 100.0, "detail": "ready"})
-    except Exception:
-        pass
-    try:
-        # Store a short-lived ready pointer for the API to fetch if Celery meta lags
-        _redis().setex(f"ready:{self.request.id}", 24*3600, str(output_path))
-    except Exception:
-        pass
-    try:
-        from pathlib import Path as _Path
-        _publish(self.request.id, {"type": "ready", "output_filename": _Path(output_path).name})
-    except Exception:
-        pass
-    
     final_size_mb = round(final_size / (1024*1024), 2) if final_size else 0
     
     # Check if file is too large (>2% over target) and retry with lower bitrate
@@ -706,10 +815,11 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         "final_size_mb": final_size_mb,
     }
     
-    # Advance to 99% before final save
-    _publish(self.request.id, {"type": "progress", "progress": 99.0, "phase": "finalizing"})
+    # Advance progress before final save - 3/4 through finalization
+    presave_pct = round((encoding_portion + finalize_portion*0.75)*100, 2)
+    _publish(self.request.id, {"type": "progress", "progress": presave_pct, "phase": "finalizing"})
     try:
-        self.update_state(state="PROGRESS", meta={"progress": 99.0, "phase": "finalizing"})
+        self.update_state(state="PROGRESS", meta={"progress": presave_pct, "phase": "finalizing"})
     except Exception:
         pass
 

@@ -12,19 +12,58 @@ from typing import Dict, List, Tuple
 logger = logging.getLogger(__name__)
 
 
-def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
+def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
     """
-    Test if encoder can actually be initialized (not just listed).
+    Test hardware decoder separately.
     Returns (success: bool, message: str)
     """
     try:
+        # Create a tiny test video first (h264 for testing decoders)
+        test_file = "/tmp/test_decode.mp4"
+        create_cmd = [
+            "ffmpeg", "-hide_banner", "-y",
+            "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
+            "-c:v", "libx264", "-t", "0.1", "-frames:v", "3",
+            test_file
+        ]
+        subprocess.run(create_cmd, capture_output=True, timeout=5)
+        
+        # Now test decoding with hardware
         cmd = ["ffmpeg", "-hide_banner"]
         cmd.extend(hw_flags)
+        cmd.extend([
+            "-i", test_file,
+            "-f", "null", "-"
+        ])
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        stderr_lower = result.stderr.lower()
+        
+        if "no device found" in stderr_lower or "cannot load" in stderr_lower:
+            return False, "Hardware decode failed"
+        if result.returncode != 0:
+            return False, f"Decode error (code {result.returncode})"
+        return True, "Decode OK"
+    except subprocess.TimeoutExpired:
+        return False, "Decode timeout"
+    except Exception as e:
+        return False, f"Decode exception: {str(e)}"
+
+
+def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
+    """
+    Test if encoder can actually be initialized (not just listed).
+    Tests ONLY encoding, separate from decode.
+    Returns (success: bool, message: str)
+    """
+    try:
+        # Test encoding directly without hardware decode
+        cmd = ["ffmpeg", "-hide_banner"]
+        # Don't use hw_flags here - we're testing encoder only
         cmd.extend([
             "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
             "-c:v", encoder_name,
             "-t", "0.1",
-            "-frames:v", "1",
+            "-frames:v", "3",  # Encode a few frames to be sure
             "-f", "null", "-"
         ])
         result = subprocess.run(
@@ -36,29 +75,41 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
         stderr_lower = result.stderr.lower()
         
         # CPU encoders: "Operation not permitted" is often a Docker seccomp issue, not encoder failure
-        # If encoder is in the list and test shows "operation not permitted", assume it works
         is_cpu_encoder = encoder_name.startswith("lib")
         if "operation not permitted" in stderr_lower:
             if is_cpu_encoder:
-                # CPU encoder seccomp issue - will work at runtime with proper flags
                 return True, "OK (seccomp bypass)"
             return False, "Operation not permitted"
         
-        # Check for specific errors that indicate driver/library issues
-        if "could not open encoder" in stderr_lower:
+        # Check for specific errors that indicate encoder problems
+        if "unknown encoder" in stderr_lower:
+            return False, "Unknown encoder"
+        if "could not open" in stderr_lower and encoder_name in stderr_lower:
             return False, "Could not open encoder"
+        if "no nvenc capable devices found" in stderr_lower:
+            return False, "No NVENC device"
+        if "driver does not support" in stderr_lower:
+            return False, "Driver doesn't support encoder"
         if "no device found" in stderr_lower:
             return False, "No device found"
-        if "failed to set value" in stderr_lower and "init_hw_device" in stderr_lower:
-            return False, "Hardware device initialization failed"
+        if "failed to" in stderr_lower and "encoder" in stderr_lower:
+            return False, "Encoder init failed"
         if "cannot load" in stderr_lower and ".so" in stderr_lower:
             lib = result.stderr.split('Cannot load')[1].split()[0] if 'Cannot load' in result.stderr else 'unknown'
             return False, f"Missing library ({lib})"
         
+        # Check return code
+        if result.returncode != 0:
+            # Try to extract meaningful error
+            error_lines = [l for l in result.stderr.split('\n') if 'error' in l.lower() or 'fail' in l.lower()]
+            if error_lines:
+                return False, error_lines[0][:60]
+            return False, f"Exit code {result.returncode}"
+        
         # Success
-        return True, "OK"
+        return True, "Encode OK"
     except subprocess.TimeoutExpired:
-        return True, "Timeout (>10s) - assuming works"
+        return False, "Encode timeout (>10s)"
     except Exception as e:
         return False, f"Exception: {str(e)}"
 

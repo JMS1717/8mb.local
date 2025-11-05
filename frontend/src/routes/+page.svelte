@@ -1,7 +1,7 @@
 <script lang="ts">
   import '../app.css';
   import { onMount } from 'svelte';
-  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults } from '$lib/api';
+  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion } from '$lib/api';
 
   let file: File | null = null;
   let uploadInput: HTMLInputElement | null = null; // reference to clear file input
@@ -118,6 +118,8 @@
   function toggleSupport(){ showSupport = !showSupport; }
   function closeSupport(){ showSupport = false; }
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeSupport(); };
+  // App version (subtle badge)
+  let appVersion: string | null = null;
 
   // Available codecs from backend
   let availableCodecs: Array<{value: string, label: string, group: string}> = [];
@@ -195,6 +197,12 @@
       const tests = await getEncoderTestResults();
       gpuOk = !!tests?.any_hardware_passed;
       encoderTests = (tests?.results || []);
+    } catch {}
+
+    // Fetch app version
+    try {
+      const v = await getVersion();
+      appVersion = v?.version || null;
     } catch {}
 
     // Load preset profiles and size buttons
@@ -493,32 +501,36 @@
           if (data.type === 'progress') {
             progress = data.progress;
             
+            // ETA from server if present; otherwise hide (no client-side guess)
+            if (typeof data.eta_seconds === 'number' && isFinite(data.eta_seconds) && data.eta_seconds > 0) {
+              etaSeconds = data.eta_seconds;
+              const s = Math.round(etaSeconds);
+              const h = Math.floor(s / 3600);
+              const m = Math.floor((s % 3600) / 60);
+              const r = s % 60;
+              etaLabel = h > 0 ? `${h}h ${m}m` : (m > 0 ? `${m}m ${r}s` : `${r}s`);
+            } else {
+              etaSeconds = null;
+              etaLabel = null;
+            }
+
+            // Update current speed if provided
+            if (typeof data.speed_x === 'number' && isFinite(data.speed_x) && data.speed_x > 0) {
+              currentSpeedX = data.speed_x;
+            }
+
             // If we hit 100%, mark as complete
             if (data.progress >= 100 || data.phase === 'done') {
               progress = 100;
               displayedProgress = 100;
               isCompressing = false;
               isFinalizing = false;
-              isReady = true;
               logLines = ['✅ 100% - Waiting for final confirmation...', ...logLines].slice(0, 500);
             }
             
             // Mark that we've received at least one progress update
             else if (!hasProgress && data.progress > 0) {
               hasProgress = true;
-            }
-            
-            // Calculate ETA
-            if (hasProgress && startedAt && data.progress > 0 && data.progress < 100) {
-              const elapsed = (Date.now() - startedAt) / 1000;
-              const rate = data.progress / elapsed;
-              if (rate > 0) {
-                const remaining = (100 - data.progress) / rate;
-                etaSeconds = remaining;
-                const mins = Math.floor(remaining / 60);
-                const secs = Math.floor(remaining % 60);
-                etaLabel = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-              }
             }
             
             // Detect finalization phase (95-100%)
@@ -550,13 +562,7 @@
             }
           }
           
-          // Handle ready event (file is ready for download)
-          if (data.type === 'ready' && data.output_filename) {
-            isReady = true;
-            readyFilename = data.output_filename;
-            isFinalizing = false;
-            logLines = [`✅ File ready: ${data.output_filename}`, ...logLines].slice(0, 500);
-          }
+          // Do not handle early 'ready' events; download is enabled only after 'done'
           
           // Handle completion
           if (data.type === 'done') {
@@ -809,7 +815,7 @@
 
 <div class="max-w-3xl mx-auto mt-8 space-y-6">
   <div class="flex items-center justify-between mb-4">
-    <h1 class="text-2xl font-bold">8mb.local</h1>
+    <h1 class="text-2xl font-bold">8mb.local {#if appVersion}<span class="align-middle text-xs ml-2 px-2 py-0.5 rounded border border-gray-700 text-gray-400">v{appVersion}</span>{/if}</h1>
     <div class="flex gap-2">
       <a href="/queue" class="px-4 py-2 bg-blue-700 hover:bg-blue-600 text-white rounded-lg transition-colors text-sm">
         📋 Queue
@@ -1146,7 +1152,7 @@
   </div>
 
   <!-- Download Ready Card - Prominent when file is ready -->
-  {#if taskId && (isReady || doneStats)}
+  {#if taskId && doneStats}
     <div class="card bg-gradient-to-r from-green-900/30 to-blue-900/30 border-2 border-green-500/50">
       <div class="flex items-center justify-between gap-4 flex-wrap">
         <div class="flex-1">
