@@ -64,8 +64,25 @@ export async function startCompress(payload: any, auth?: {user: string, pass: st
 }
 
 export function openProgressStream(taskId: string, auth?: {user: string, pass: string}): EventSource {
-  const url = new URL(`${BACKEND}/api/stream/${taskId}`, typeof window !== 'undefined' ? window.location.origin : undefined);
-  const es = new EventSource(url.toString());
+  // Build absolute URL for SSE
+  let sseUrl: string;
+  if (BACKEND) {
+    // External backend specified
+    sseUrl = `${BACKEND}/api/stream/${taskId}`;
+  } else {
+    // Same-origin: use relative path
+    sseUrl = `/api/stream/${taskId}`;
+  }
+  
+  // EventSource doesn't support custom headers, so if auth is needed,
+  // append credentials as query params (backend must support this)
+  if (auth) {
+    const authParam = btoa(`${auth.user}:${auth.pass}`);
+    sseUrl += `?auth=${encodeURIComponent(authParam)}`;
+  }
+  
+  console.log('Opening SSE connection to:', sseUrl);
+  const es = new EventSource(sseUrl);
   return es;
 }
 

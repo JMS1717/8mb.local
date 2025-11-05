@@ -118,3 +118,33 @@ class SizeButtons(BaseModel):
 
 class RetentionHours(BaseModel):
     hours: int
+
+
+# Queue system models
+class JobMetadata(BaseModel):
+    """Metadata for a single compression job in the queue."""
+    task_id: str
+    job_id: str  # Upload job_id
+    filename: str
+    target_size_mb: float
+    video_codec: str
+    state: Literal['queued', 'running', 'completed', 'failed', 'canceled'] = 'queued'
+    progress: float = 0.0
+    phase: Optional[Literal['queued', 'encoding', 'finalizing', 'done']] = 'queued'  # NEW: Current phase
+    created_at: float  # Unix timestamp
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    error: Optional[str] = None
+    output_path: Optional[str] = None
+    final_size_mb: Optional[float] = None
+    # Time estimation fields
+    last_progress_update: Optional[float] = None  # Timestamp of last progress update
+    estimated_completion_time: Optional[float] = None  # Estimated Unix timestamp when job will complete
+
+
+class QueueStatusResponse(BaseModel):
+    """Response showing all jobs in the system."""
+    active_jobs: list[JobMetadata]
+    queued_count: int
+    running_count: int
+    completed_count: int  # Recently completed (last hour)

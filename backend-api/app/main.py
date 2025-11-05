@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import sys
 import time
 import json
 import logging
@@ -21,7 +22,7 @@ import psutil
 from .auth import basic_auth
 from .config import settings
 from .celery_app import celery_app
-from .models import UploadResponse, CompressRequest, StatusResponse, AuthSettings, AuthSettingsUpdate, PasswordChange, DefaultPresets, AvailableCodecsResponse, CodecVisibilitySettings, PresetProfile, PresetProfilesResponse, SetDefaultPresetRequest, SizeButtons, RetentionHours
+from .models import UploadResponse, CompressRequest, StatusResponse, AuthSettings, AuthSettingsUpdate, PasswordChange, DefaultPresets, AvailableCodecsResponse, CodecVisibilitySettings, PresetProfile, PresetProfilesResponse, SetDefaultPresetRequest, SizeButtons, RetentionHours, JobMetadata, QueueStatusResponse
 from .cleanup import start_scheduler
 from . import settings_manager
 from . import history_manager
@@ -322,10 +323,19 @@ async def compress(req: CompressRequest):
     # Remove job_id prefix if present (36 char UUID + underscore = 37 chars)
     if len(stem) > 37 and stem[36] == '_':
         stem = stem[37:]
-    output_name = stem + "_8mblocal" + ext
+    
+    # Generate a unique task_id first
+    import uuid
+    task_id = str(uuid.uuid4())
+    
+    # Use task_id in output filename to prevent concurrent jobs from overwriting each other
+    # Format: originalname_8mblocal_taskid.ext (e.g., "video_8mblocal_abc123.mp4")
+    output_name = f"{stem}_8mblocal_{task_id[:8]}{ext}"
     output_path = OUTPUTS_DIR / output_name
+    
     task = celery_app.send_task(
         "worker.worker.compress_video",
+        task_id=task_id,
         kwargs=dict(
             job_id=req.job_id,
             input_path=str(input_path),
@@ -349,7 +359,129 @@ async def compress(req: CompressRequest):
         await redis.publish(f"progress:{task.id}", orjson.dumps({"type":"log","message":"Job queued – waiting for worker…"}).decode())
     except Exception:
         pass
+    
+    # Store job metadata in Redis for queue tracking
+    try:
+        job_meta = JobMetadata(
+            task_id=task.id,
+            job_id=req.job_id,
+            filename=req.filename,
+            target_size_mb=req.target_size_mb,
+            video_codec=req.video_codec,
+            state='queued',
+            progress=0.0,
+            created_at=time.time()
+        )
+        await redis.setex(f"job:{task.id}", 86400, orjson.dumps(job_meta.dict()).decode())  # 24h TTL
+        # Add to active jobs set
+        await redis.zadd("jobs:active", {task.id: time.time()})
+    except Exception as e:
+        logger.warning(f"Failed to store job metadata: {e}")
+    
     return {"task_id": task.id}
+
+
+@app.get("/api/queue/status", response_model=QueueStatusResponse, dependencies=[Depends(basic_auth)])
+async def queue_status():
+    """Get current queue status showing all active, queued, and recently completed jobs."""
+    try:
+        # Get all active job IDs from sorted set (sorted by creation time)
+        job_ids = await redis.zrange("jobs:active", 0, -1)
+        
+        jobs = []
+        for task_id in job_ids:
+            try:
+                job_data = await redis.get(f"job:{task_id}")
+                if job_data:
+                    job_meta = JobMetadata(**orjson.loads(job_data))
+                    # Update state from Celery if still running
+                    if job_meta.state in ('queued', 'running'):
+                        try:
+                            res = celery_app.AsyncResult(task_id)
+                            celery_state = res.state
+                            meta = res.info if isinstance(res.info, dict) else {}
+                            
+                            if celery_state == 'PENDING':
+                                job_meta.state = 'queued'
+                                job_meta.phase = 'queued'
+                            elif celery_state in ('STARTED', 'PROGRESS'):
+                                job_meta.state = 'running'
+                                old_progress = job_meta.progress
+                                job_meta.progress = meta.get('progress', job_meta.progress)
+                                
+                                # Update phase from meta if available
+                                if 'phase' in meta:
+                                    job_meta.phase = meta['phase']
+                                elif job_meta.progress < 95:
+                                    job_meta.phase = 'encoding'
+                                elif job_meta.progress < 100:
+                                    job_meta.phase = 'finalizing'
+                                else:
+                                    job_meta.phase = 'done'
+                                
+                                if not job_meta.started_at:
+                                    job_meta.started_at = time.time()
+                                
+                                # Calculate time estimation when progress changes
+                                now_ts = time.time()
+                                if job_meta.progress > old_progress and job_meta.progress > 0:
+                                    job_meta.last_progress_update = now_ts
+                                    elapsed = now_ts - job_meta.started_at
+                                    if job_meta.progress < 100:
+                                        # Estimate total time based on current progress rate
+                                        estimated_total_time = elapsed / (job_meta.progress / 100.0)
+                                        job_meta.estimated_completion_time = job_meta.started_at + estimated_total_time
+                                
+                            elif celery_state == 'SUCCESS':
+                                job_meta.state = 'completed'
+                                job_meta.progress = 100.0
+                                job_meta.phase = 'done'
+                                if not job_meta.completed_at:
+                                    job_meta.completed_at = time.time()
+                                job_meta.output_path = meta.get('output_path')
+                                if 'final_size_mb' in meta:
+                                    job_meta.final_size_mb = meta.get('final_size_mb')
+                            elif celery_state == 'FAILURE':
+                                job_meta.state = 'failed'
+                                job_meta.phase = 'done'
+                                if not job_meta.completed_at:
+                                    job_meta.completed_at = time.time()
+                                job_meta.error = str(meta) if meta else 'Unknown error'
+                            
+                            # Update Redis with current state
+                            await redis.setex(f"job:{task_id}", 86400, orjson.dumps(job_meta.dict()).decode())
+                        except Exception:
+                            pass
+                    
+                    jobs.append(job_meta)
+            except Exception as e:
+                logger.warning(f"Failed to load job {task_id}: {e}")
+                continue
+        
+        # Clean up completed/failed jobs older than 1 hour from active set
+        now = time.time()
+        for job in jobs:
+            if job.state in ('completed', 'failed', 'canceled') and job.completed_at:
+                if now - job.completed_at > 3600:
+                    try:
+                        await redis.zrem("jobs:active", job.task_id)
+                    except Exception:
+                        pass
+        
+        # Count by state
+        queued = sum(1 for j in jobs if j.state == 'queued')
+        running = sum(1 for j in jobs if j.state == 'running')
+        completed = sum(1 for j in jobs if j.state == 'completed' and j.completed_at and (now - j.completed_at) < 3600)
+        
+        return QueueStatusResponse(
+            active_jobs=jobs,
+            queued_count=queued,
+            running_count=running,
+            completed_count=completed
+        )
+    except Exception as e:
+        logger.error(f"Queue status error: {e}")
+        return QueueStatusResponse(active_jobs=[], queued_count=0, running_count=0, completed_count=0)
 
 
 @app.get("/api/jobs/{task_id}/status", response_model=StatusResponse, dependencies=[Depends(basic_auth)])
@@ -503,6 +635,9 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
     await pubsub.subscribe(channel)
 
     queue: asyncio.Queue[str] = asyncio.Queue()
+    
+    # Send initial connection message
+    await queue.put(orjson.dumps({"type": "connected", "task_id": task_id, "ts": time.time()}).decode())
 
     async def reader():
         try:
@@ -510,11 +645,15 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
                 if msg.get("type") != "message":
                     continue
                 data = msg.get("data")
+                logger.info(f"[SSE {task_id[:8]}] Received Redis message: {data[:100] if isinstance(data, str) else data}")
+                sys.stdout.flush()  # Force flush
                 # push raw json string from publisher
                 await queue.put(str(data))
         except asyncio.CancelledError:
             pass
         except Exception as e:
+            logger.error(f"[SSE {task_id[:8]}] pubsub error: {e}")
+            sys.stdout.flush()
             # Emit an error log and exit; outer loop will close
             try:
                 await queue.put(orjson.dumps({"type": "error", "message": f"[SSE] pubsub error: {e}"}).decode())
@@ -536,10 +675,13 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
     reader_task = asyncio.create_task(reader())
     hb_task = asyncio.create_task(heartbeater())
     try:
+        logger.info(f"[SSE {task_id[:8]}] Stream started")
         while True:
             data = await queue.get()
+            logger.info(f"[SSE {task_id[:8]}] Yielding: {data[:100] if len(data) > 100 else data}")
             yield f"data: {data}\n\n".encode()
     finally:
+        logger.info(f"[SSE {task_id[:8]}] Stream closing")
         reader_task.cancel()
         hb_task.cancel()
         with contextlib.suppress(Exception):
@@ -549,7 +691,15 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
 
 @app.get("/api/stream/{task_id}")
 async def stream(task_id: str):
-    return StreamingResponse(_sse_event_generator(task_id), media_type="text/event-stream")
+    return StreamingResponse(
+        _sse_event_generator(task_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+            "Connection": "keep-alive",
+        }
+    )
 
 
 @app.get("/healthz")
@@ -631,6 +781,76 @@ async def system_capabilities():
         caps["hardware"] = _get_hw_info_cached()
         SYSTEM_CAPS_CACHE = caps
     return SYSTEM_CAPS_CACHE
+
+
+@app.get("/api/diagnostics/gpu", dependencies=[Depends(basic_auth)])
+async def gpu_diagnostics():
+    """Run basic GPU checks inside the container to validate NVIDIA and NVENC.
+
+    Returns structured results for:
+    - nvidia-smi presence and GPU list
+    - FFmpeg hwaccels listing
+    - FFmpeg encoders listing (nvenc presence)
+    - Quick NVENC encode smoke test using a synthetic color source
+    - Presence of NVIDIA device files
+    """
+    def run_cmd(cmd: list[str], timeout: int = 6):
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return {
+                "cmd": " ".join(cmd),
+                "rc": p.returncode,
+                "stdout": (p.stdout or "")[-4000:],
+                "stderr": (p.stderr or "")[-4000:]
+            }
+        except FileNotFoundError:
+            return {"cmd": " ".join(cmd), "rc": 127, "stdout": "", "stderr": "command not found"}
+        except subprocess.TimeoutExpired:
+            return {"cmd": " ".join(cmd), "rc": 124, "stdout": "", "stderr": "timeout"}
+        except Exception as e:
+            return {"cmd": " ".join(cmd), "rc": 1, "stdout": "", "stderr": str(e)}
+
+    # Collect checks
+    checks: dict[str, any] = {}
+
+    # Device files
+    try:
+        devs = []
+        for d in ("/dev/nvidia0", "/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-modeset"):
+            try:
+                devs.append({"path": d, "exists": os.path.exists(d)})
+            except Exception:
+                devs.append({"path": d, "exists": False})
+        checks["device_files"] = devs
+    except Exception:
+        checks["device_files"] = []
+
+    # nvidia-smi (GPU presence)
+    checks["nvidia_smi_L"] = run_cmd(["nvidia-smi", "-L"], timeout=4)
+    # ffmpeg hardware listing
+    checks["ffmpeg_hwaccels"] = run_cmd(["ffmpeg", "-hide_banner", "-hwaccels"], timeout=4)
+    # ffmpeg encoders list (look for *_nvenc)
+    checks["ffmpeg_encoders"] = run_cmd(["ffmpeg", "-hide_banner", "-encoders"], timeout=6)
+
+    # NVENC smoke test: encode 0.1s black 720p to null using h264_nvenc
+    nvenc_test = run_cmd([
+        "ffmpeg", "-hide_banner", "-v", "error",
+        "-f", "lavfi", "-i", "color=c=black:s=1280x720:d=0.1",
+        "-c:v", "h264_nvenc",
+        "-f", "null", "-"
+    ], timeout=8)
+    checks["nvenc_smoke_test"] = nvenc_test
+
+    # Summarize pass/fail heuristics
+    summary = {
+        "nvidia_device_present": any(x.get("exists") for x in checks.get("device_files", [])),
+        "nvidia_smi_ok": checks["nvidia_smi_L"]["rc"] == 0 and bool(checks["nvidia_smi_L"].get("stdout")),
+        "ffmpeg_sees_cuda": "cuda" in (checks["ffmpeg_hwaccels"].get("stdout", "") + checks["ffmpeg_hwaccels"].get("stderr", "")).lower(),
+        "ffmpeg_has_nvenc": any(tok in checks["ffmpeg_encoders"].get("stdout", "") for tok in ["h264_nvenc", "hevc_nvenc", "av1_nvenc"]),
+        "nvenc_encode_ok": nvenc_test["rc"] == 0 and "error" not in (nvenc_test.get("stderr", "").lower()),
+    }
+
+    return {"summary": summary, "checks": checks}
 
 
 # Settings management endpoints

@@ -4,13 +4,18 @@
   import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob } from '$lib/api';
 
   let file: File | null = null;
+  let uploadInput: HTMLInputElement | null = null; // reference to clear file input
   let uploadedFileName: string | null = null; // Track what file was uploaded
   let isAnalyzing: boolean = false; // Track analysis state for UI feedback
   let targetMB = 25;
   let videoCodec: string = 'av1_nvenc';
   let audioCodec: 'libopus' | 'aac' | 'none' = 'libopus';
   let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p6';
-  let audioKbps: 64|96|128|160|192|256 = 128;
+  let audioKbps: 32|48|64|96|128|160|192|256 = 128;
+  // Auto audio bitrate control: downshift audio for extreme compressions
+  let autoAudioBitrate: boolean = true;
+  // User's preferred audio bitrate (used as an upper bound when auto is ON)
+  let baseAudioKbps: 32|48|64|96|128|160|192|256 = 128;
   let fileSizeLabel: string | null = null;
   let container: 'mp4' | 'mkv' = 'mp4';
   let tune: 'hq'|'ll'|'ull'|'lossless' = 'hq';
@@ -28,55 +33,57 @@
   let autoDownload = true;
   let warnText: string | null = null;
   
+  // Helper function to parse time string to seconds
+  function parseTimeToSeconds(timeStr: string): number | null {
+    if (!timeStr || timeStr.trim() === '') return null;
+    const str = timeStr.trim();
+    
+    // Try HH:MM:SS or MM:SS format
+    if (str.includes(':')) {
+      const parts = str.split(':').map(p => parseFloat(p));
+      if (parts.length === 3) {
+        // HH:MM:SS
+        return parts[0] * 3600 + parts[1] * 60 + parts[2];
+      } else if (parts.length === 2) {
+        // MM:SS
+        return parts[0] * 60 + parts[1];
+      }
+    }
+    
+    // Try plain number (seconds)
+    const num = parseFloat(str);
+    return isNaN(num) ? null : num;
+  }
+
+  // Calculate effective duration based on trim settings
+  $: effectiveDuration = (() => {
+    if (!jobInfo) return 0;
+    
+    const fullDuration = jobInfo.duration_s;
+    const startSec = parseTimeToSeconds(startTime);
+    const endSec = parseTimeToSeconds(endTime);
+    
+    const effectiveStart = startSec !== null ? startSec : 0;
+    const effectiveEnd = endSec !== null ? endSec : fullDuration;
+    
+    // Calculate trimmed duration
+    const trimmedDuration = Math.max(0, effectiveEnd - effectiveStart);
+    
+    return trimmedDuration > 0 ? trimmedDuration : fullDuration;
+  })();
+
   $: containerNote = (container === 'mp4' && audioCodec === 'libopus') ? 'MP4 does not support Opus; audio will be encoded as AAC automatically.' : null;
   $: estimated = jobInfo ? {
-    duration_s: jobInfo.duration_s,
-    total_kbps: jobInfo.duration_s > 0 ? (targetMB * 8192.0) / jobInfo.duration_s : 0,
-    video_kbps: jobInfo.duration_s > 0 ? Math.max(((targetMB * 8192.0) / jobInfo.duration_s) - (audioCodec === 'none' ? 0 : audioKbps), 0) : 0,
+    duration_s: effectiveDuration,
+    total_kbps: effectiveDuration > 0 ? (targetMB * 8192.0) / effectiveDuration : 0,
+    video_kbps: effectiveDuration > 0 ? Math.max(((targetMB * 8192.0) / effectiveDuration) - (audioCodec === 'none' ? 0 : audioKbps), 0) : 0,
     final_mb: targetMB
   } : null;
   // Update warning dynamically based on current estimate (no need to re-upload)
   $: warnText = estimated && estimated.video_kbps < 100 ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
   
-  // Auto-analyze when target size or audio bitrate changes (if file exists and was already analyzed)
-  // Track last values to avoid infinite loops
-  let autoAnalyzeEnabled = true;
-  let lastAutoAnalyzeTarget = targetMB;
-  let lastAutoAnalyzeAudio: 64|96|128|160|192|256 = audioKbps;
-  
-  $: {
-    if (!autoAnalyzeEnabled) {
-      // Don't trigger auto-analyze while initial upload is in progress
-      // or while we explicitly suppress it
-      // Keep last values in sync
-      lastAutoAnalyzeTarget = targetMB;
-      lastAutoAnalyzeAudio = audioKbps;
-      // Skip
-      // Note: leaving this scope without scheduling upload
-    } else {
-    // Only trigger if the values actually changed AND file was already uploaded
-    const targetChanged = targetMB !== lastAutoAnalyzeTarget;
-    const audioChanged = audioKbps !== lastAutoAnalyzeAudio;
-    
-    if ((targetChanged || audioChanged) && file && uploadedFileName === file.name && jobInfo) {
-      // Update tracking IMMEDIATELY to prevent double-trigger
-      lastAutoAnalyzeTarget = targetMB;
-      lastAutoAnalyzeAudio = audioKbps;
-      
-      // Debounce: clear existing timer and set new one
-      if (typeof window !== 'undefined') {
-        clearTimeout((window as any).__analyzeTimer);
-        (window as any).__analyzeTimer = setTimeout(() => {
-          if (file && !isUploading && !isAnalyzing) {
-            console.log('Settings changed, re-analyzing...');
-            uploadedFileName = null; // Force re-upload
-            doUpload();
-          }
-        }, 500);
-      }
-    }
-    }
-  }
+  // Removed auto-reupload on settings changes. Analysis is now separate from upload.
+  // Changing target size or audio bitrate only updates client-side estimates.
 
   let jobInfo: any = null;
   let taskId: string | null = null;
@@ -135,6 +142,9 @@
       if (ad !== null) autoDownload = (ad === 'true');
       // If not present in localStorage, default to true and set it
       if (ad === null) localStorage.setItem('autoDownload', 'true');
+      const aab = localStorage.getItem('autoAudioBitrate');
+      if (aab !== null) autoAudioBitrate = (aab === 'true');
+      if (aab === null) localStorage.setItem('autoAudioBitrate', 'true');
     } catch {}
     try {
       const res = await fetch('/api/settings/presets');
@@ -213,6 +223,18 @@
     tune = p.tune;
   }
 
+  function formatDurationTime(seconds: number): string {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    
+    if (h > 0) {
+      return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    } else {
+      return `${m}:${s.toString().padStart(2, '0')}`;
+    }
+  }
+
   function buildCodecList(codecData: any): Array<{value: string, label: string, group: string}> {
     const list: Array<{value: string, label: string, group: string}> = [];
     const enabledCodecs = codecData.enabled_codecs || [];
@@ -250,6 +272,52 @@
     
     return list;
   }
+
+  // Auto-adjust audio bitrate for extreme compressions:
+  // Ensure at least minVideoKbps is left for video; lower audio down to a floor of 32 kbps if needed.
+  $: (async () => {
+    try {
+      if (!autoAudioBitrate) return;
+      if (audioCodec === 'none') return;
+      const dur = effectiveDuration;
+      if (!dur || dur <= 0) return;
+      const totalKbps = (targetMB * 8192.0) / dur;
+      if (!isFinite(totalKbps) || totalKbps <= 0) return;
+      const minVideoKbps = 100; // keep at least ~100 kbps for video to avoid severe degradation
+      const allowed: Array<32|48|64|96|128|160|192|256> = [256,192,160,128,96,64,48,32];
+      const base = baseAudioKbps;
+      let newAudio: 32|48|64|96|128|160|192|256 = base as any;
+      if ((totalKbps - base) < minVideoKbps) {
+        const maxAudio = Math.max(32, Math.floor(totalKbps - minVideoKbps));
+        // Find the largest allowed bitrate not exceeding maxAudio and the user's base preference
+        let chosen: 32|48|64|96|128|160|192|256 = 32;
+        for (const v of allowed) {
+          if (v <= maxAudio && v <= base) { chosen = v; break; }
+        }
+        newAudio = chosen;
+      }
+      if (newAudio !== audioKbps) {
+        audioKbps = newAudio as any;
+      }
+    } catch {}
+  })();
+
+  // Smooth progress animation - gradually update displayedProgress towards actual progress
+  $: (() => {
+    // Direct update for significant changes or completion
+    if (progress >= 100 || Math.abs(progress - displayedProgress) > 10) {
+      displayedProgress = progress;
+    } else if (progress > displayedProgress) {
+      // Only animate forward, not backward
+      const diff = progress - displayedProgress;
+      if (diff > 0.1) {
+        const step = Math.min(diff / 5, 1);
+        displayedProgress = Math.min(displayedProgress + step, progress);
+      } else {
+        displayedProgress = progress;
+      }
+    }
+  })();
 
   function getCodecColor(group: string): string {
     switch(group) {
@@ -314,8 +382,6 @@
   async function doUpload(){
     if (!file) return;
     if (isUploading || isAnalyzing) return;
-    // Disable reactive auto-analyze during initial upload cycle
-    autoAnalyzeEnabled = false;
     // Skip re-upload when same file is already uploaded; recompute client-side estimates only
     if (uploadedFileName === file.name && jobInfo?.filename) {
       warnText = (estimated && estimated.video_kbps < 100) ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
@@ -338,15 +404,16 @@
     } finally {
       isUploading = false;
       isAnalyzing = false;
-      // Re-enable reactive auto-analyze after initial analyze completes
-      lastAutoAnalyzeTarget = targetMB;
-      lastAutoAnalyzeAudio = audioKbps;
-      autoAnalyzeEnabled = true;
     }
   }
 
   async function doCompress(){
-    if (!jobInfo) return;
+    // Ensure we have analysis; if not, perform upload/analyze once
+    if (!jobInfo) {
+      if (!file) { errorText = 'Please select a file and analyze first.'; return; }
+      await doUpload();
+      if (!jobInfo) return; // if upload failed
+    }
     if (isCompressing) return; // prevent double submission
     errorText = null;
     try {
@@ -381,117 +448,192 @@
       console.log('Starting compression...', payload);
       const { task_id } = await startCompress(payload);
       taskId = task_id;
-      try { esRef?.close(); } catch {}
-      const es = openProgressStream(taskId);
+      
+      console.log('🔴 [DEBUG] About to open SSE for task_id:', task_id);
+      
+      // Open SSE progress stream
+      logLines = ['✓ Job started. Opening progress stream...', ...logLines].slice(0, 500);
+      
+      const es = openProgressStream(task_id);
+      console.log('🔴 [DEBUG] openProgressStream returned:', es);
       esRef = es;
+      
+      es.onopen = () => {
+        console.log('SSE connection opened for task:', task_id);
+        logLines = ['✅ Connected to progress stream', ...logLines].slice(0, 500);
+      };
+      
       es.onmessage = (ev) => {
-        try { const data = JSON.parse(ev.data);
+        try {
+          const data = JSON.parse(ev.data);
+          console.log('SSE event:', data.type, data);
+          
+          // Handle connection confirmation
+          if (data.type === 'connected') {
+            console.log('SSE connection confirmed, task_id:', data.task_id);
+            return; // Just log, don't show to user
+          }
+          
+          // Handle pings
+          if (data.type === 'ping') {
+            return; // Silent heartbeat
+          }
+          
+          // Handle progress updates
           if (data.type === 'progress') {
             progress = data.progress;
-            // Show actual progress including 100% (backend sends 100% before finalization now)
-            displayedProgress = Math.max(0, progress || 0);
-            if (progress > 0) {
+            
+            // If we hit 100%, mark as complete
+            if (data.progress >= 100 || data.phase === 'done') {
+              progress = 100;
+              displayedProgress = 100;
+              isCompressing = false;
+              isFinalizing = false;
+              isReady = true;
+              logLines = ['✅ 100% - Waiting for final confirmation...', ...logLines].slice(0, 500);
+            }
+            
+            // Mark that we've received at least one progress update
+            else if (!hasProgress && data.progress > 0) {
               hasProgress = true;
-              // Prefer duration/speed-based ETA when available
-              const dur = Number(jobInfo?.duration_s) || 0;
-              if (dur > 0 && currentSpeedX && currentSpeedX > 0) {
-                const elapsedVideo = (progress/100) * dur;
-                const remainingVideo = Math.max(dur - elapsedVideo, 0);
-                etaSeconds = remainingVideo / currentSpeedX;
-              } else if (startedAt && progress > 0) {
-                const elapsedWall = (Date.now() - startedAt) / 1000;
-                etaSeconds = elapsedWall * (100 - progress) / progress;
-              }
-              etaLabel = etaSeconds != null ? formatEta(etaSeconds) : null;
             }
-            // If we hit 100% but haven't seen 'ready' yet, show a manual download option after a short grace period
-            if (displayedProgress >= 100 && !isReady && !readyTimer) {
-              readyTimer = setTimeout(() => { showTryDownload = true; }, 1500);
-            }
-          }
-          if (data.type === 'ready') {
-            // Backend marked file ready to download
-            isReady = true;
-            readyFilename = data.output_filename || null;
-            displayedProgress = Math.max(displayedProgress, 100);
-            isFinalizing = false;
-            showTryDownload = false;
-            tryDownloading = false;
-            if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
-            // Auto-download if enabled
-            if (autoDownload && taskId) {
-              setTimeout(() => { window.location.href = downloadUrl(taskId!); }, 200);
-            }
-          }
-          if (data.type === 'log' && data.message) {
-            // Update mini-ETA from speed if present
-            if (data.message.startsWith('speed=')) {
-              const m = data.message.match(/speed=([0-9]*\.?[0-9]+)x/i);
-              if (m) {
-                const sp = parseFloat(m[1]);
-                if (isFinite(sp) && sp > 0) {
-                  currentSpeedX = sp;
-                }
+            
+            // Calculate ETA
+            if (hasProgress && startedAt && data.progress > 0 && data.progress < 100) {
+              const elapsed = (Date.now() - startedAt) / 1000;
+              const rate = data.progress / elapsed;
+              if (rate > 0) {
+                const remaining = (100 - data.progress) / rate;
+                etaSeconds = remaining;
+                const mins = Math.floor(remaining / 60);
+                const secs = Math.floor(remaining % 60);
+                etaLabel = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
               }
             }
-            // Detect finalization phase
-            if (data.message.includes('Finalizing:')) {
+            
+            // Detect finalization phase (95-100%)
+            if (data.phase === 'finalizing' || (data.progress >= 95 && data.progress < 100)) {
               isFinalizing = true;
+            } else if (data.phase === 'encoding') {
+              isFinalizing = false;
             }
-            // Capture pipeline hints
-            if (data.message.startsWith('Decoder:')) {
-              decodeMethod = data.message.replace('Decoder: ', '').trim();
-            }
-            if (data.message.startsWith('Using encoder:')) {
-              const m2 = data.message.match(/Using encoder:\s*([^\s]+)\s*\(requested:/i);
-              if (m2) encodeMethod = m2[1];
-            }
+          }
+          
+          // Handle log messages
+          if (data.type === 'log' && data.message) {
             logLines = [data.message, ...logLines].slice(0, 500);
+            
+            // Extract encoding speed
+            const speedMatch = data.message.match(/speed=([\d.]+)x/);
+            if (speedMatch) {
+              currentSpeedX = parseFloat(speedMatch[1]);
+            }
+            
+            // Detect hardware methods
+            if (data.message.includes('hwaccel:')) {
+              const m = data.message.match(/hwaccel:\s*(\w+)/);
+              if (m) decodeMethod = m[1];
+            }
+            if (data.message.includes('encoder:')) {
+              const m = data.message.match(/encoder:\s*([\w_]+)/);
+              if (m) encodeMethod = m[1];
+            }
           }
-          if (data.type === 'canceled') {
-            isCompressing = false;
-            startedAt = null; etaSeconds = null; etaLabel = null; currentSpeedX = null; hasProgress = false;
-            errorText = 'Job canceled';
+          
+          // Handle ready event (file is ready for download)
+          if (data.type === 'ready' && data.output_filename) {
+            isReady = true;
+            readyFilename = data.output_filename;
+            isFinalizing = false;
+            logLines = [`✅ File ready: ${data.output_filename}`, ...logLines].slice(0, 500);
           }
-          if (data.type === 'done') { 
-            doneStats = data.stats; 
+          
+          // Handle completion
+          if (data.type === 'done') {
+            console.log('Received done event, completing job');
+            doneStats = data.stats;
             progress = 100;
             displayedProgress = 100;
             isCompressing = false;
             isFinalizing = false;
-            showTryDownload = false;
-            tryDownloading = false;
-            if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
-            startedAt = null; etaSeconds = null; etaLabel = null; currentSpeedX = null; hasProgress = false;
-            try { esRef?.close(); } catch {}
-            // Play sound when done if enabled
+            isReady = true;
+            hasProgress = false;
+            
+            logLines = ['✅ Compression complete!', ...logLines].slice(0, 500);
+            
+            try { esRef?.close(); esRef = null; } catch {}
+            
+            // Play sound if enabled
             if (playSoundWhenDone) {
               const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBTGH0fPTgjMGHm7A7+OZURE');
               audio.play().catch(() => {});
             }
-            // Auto-download if enabled (if not already triggered on 'ready')
-            if (autoDownload && taskId && !isReady) {
-              setTimeout(() => { window.location.href = downloadUrl(taskId!); }, 200);
+            
+            // Auto-download if enabled
+            if (autoDownload && taskId) {
+              setTimeout(() => {
+                window.location.href = downloadUrl(taskId!);
+              }, 500);
             }
-          } else if (data.type === 'canceled') {
+          }
+          
+          // Handle errors
+          if (data.type === 'error') {
+            logLines = [`❌ Error: ${data.message}`, ...logLines];
+            errorText = data.message;
             isCompressing = false;
             isFinalizing = false;
-            errorText = 'Job canceled';
-            // No sound and no download on cancellation
+            try { esRef?.close(); } catch {}
           }
-          if (data.type === 'error') { logLines = [data.message, ...logLines]; isCompressing = false; isFinalizing = false; startedAt = null; etaSeconds = null; etaLabel = null; currentSpeedX = null; hasProgress = false; try { esRef?.close(); } catch {} }
-        } catch {}
-      }
-      es.onerror = () => {
-        logLines = ['[SSE] Connection error: lost progress stream.', ...logLines].slice(0, 500);
-        errorText = 'Lost connection to progress stream. Check server/network and try again.';
-        isCompressing = false;
-        startedAt = null; etaSeconds = null; etaLabel = null; currentSpeedX = null; hasProgress = false;
-        try { esRef?.close(); } catch {}
-      }
+          
+          // Handle retry
+          if (data.type === 'retry') {
+            logLines = [`🔄 ${data.message}`, ...logLines].slice(0, 500);
+            // Play a different sound for retry
+            try {
+              const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBTGH0fPTgjMGHm7A7+OZURE');
+              audio.play().catch(() => {});
+            } catch {}
+          }
+          
+          // Handle cancellation
+          if (data.type === 'canceled') {
+            logLines = ['🚫 Job canceled', ...logLines];
+            isCompressing = false;
+            isFinalizing = false;
+            try { esRef?.close(); } catch {}
+          }
+          
+        } catch (e) {
+          console.error('Failed to parse SSE message:', e);
+        }
+      };
+      
+      es.onerror = (err) => {
+        console.error('SSE error:', err);
+        console.log('SSE readyState:', es.readyState, 'taskId:', taskId);
+        
+        // Don't immediately fail - the job might still be running
+        // Only show warning, don't stop isCompressing
+        logLines = ['⚠️ Progress stream connection issue. Checking queue for updates...', ...logLines].slice(0, 500);
+        
+        // Close this connection attempt
+        try { esRef?.close(); esRef = null; } catch {}
+        
+        // Suggest checking queue page
+        if (!doneStats && taskId) {
+          logLines = [
+            `💡 View live progress at: <a href="/queue" class="text-blue-400 underline">/queue</a>`,
+            `Task ID: ${taskId}`,
+            ...logLines
+          ].slice(0, 500);
+        }
+      };
+      
     } catch (err: any) {
       console.error('Compress failed:', err);
       errorText = `Compression failed: ${err.message || err}`;
+      isCompressing = false;
     }
   }
 
@@ -523,7 +665,7 @@
         try {
           console.log('[Watchdog] Polling download endpoint...');
           // Try GET request with short wait instead of HEAD (more reliable)
-          const dlRes = await fetch(`${downloadUrl(taskId)}?wait=1`, { 
+          const dlRes = await fetch(`${downloadUrl(taskId)}?wait=2`, { 
             method: 'GET',
             cache: 'no-store',
             redirect: 'manual' // Don't follow redirects, just check response
@@ -598,7 +740,42 @@
 
   // Remove older reset; replace with one that clears readiness flags too
   
-  function reset(){ file=null; uploadedFileName=null; jobInfo=null; taskId=null; progress=0; displayedProgress=0; logLines=[]; doneStats=null; warnText=null; errorText=null; isUploading=false; isCompressing=false; isFinalizing=false; decodeMethod=null; encodeMethod=null; isReady=false; readyFilename=null; showTryDownload=false; if (readyTimer) { clearTimeout(readyTimer); readyTimer=null; } if (finalizePoller) { clearInterval(finalizePoller); finalizePoller=null; } try { esRef?.close(); } catch {} }
+  function reset(){
+    // Clear all job-related state but keep the selected file loaded so it can be reused
+    uploadedFileName = null;
+    jobInfo = null;
+    taskId = null;
+    progress = 0;
+    displayedProgress = 0;
+    logLines = [];
+    doneStats = null;
+    warnText = null;
+    errorText = null;
+    isUploading = false;
+    isCompressing = false;
+    isFinalizing = false;
+    decodeMethod = null;
+    encodeMethod = null;
+    isReady = false;
+    readyFilename = null;
+    showTryDownload = false;
+    if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
+    if (finalizePoller) { clearInterval(finalizePoller); finalizePoller = null; }
+    try { esRef?.close(); } catch {}
+    // Note: we intentionally do NOT clear `file` or `fileSizeLabel` here
+  }
+
+  function clearSelectedFile(){
+    // Clear the chosen file and related analysis state
+    file = null;
+    fileSizeLabel = null;
+    uploadedFileName = null;
+    jobInfo = null;
+    warnText = null;
+    errorText = null;
+    // Reset the input element so the same file can be selected again
+    try { if (uploadInput) uploadInput.value = ''; } catch {}
+  }
   $: (() => { /* clear ETA when not compressing */ if (!isCompressing) { startedAt = null; etaSeconds = null; etaLabel = null; currentSpeedX = null; hasProgress = false; isFinalizing = false; } })();
 
   async function onCancel(){
@@ -617,14 +794,20 @@
   // Persist UI preferences
   $: (() => { try { localStorage.setItem('playSoundWhenDone', String(playSoundWhenDone)); } catch {} })();
   $: (() => { try { localStorage.setItem('autoDownload', String(autoDownload)); } catch {} })();
+  $: (() => { try { localStorage.setItem('autoAudioBitrate', String(autoAudioBitrate)); } catch {} })();
 </script>
 
 <div class="max-w-3xl mx-auto mt-8 space-y-6">
   <div class="flex items-center justify-between mb-4">
     <h1 class="text-2xl font-bold">8mb.local</h1>
-    <a href="/settings" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors text-sm">
-      ⚙️ Settings
-    </a>
+    <div class="flex gap-2">
+      <a href="/queue" class="px-4 py-2 bg-blue-700 hover:bg-blue-600 text-white rounded-lg transition-colors text-sm">
+        📋 Queue
+      </a>
+      <a href="/settings" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors text-sm">
+        ⚙️ Settings
+      </a>
+    </div>
   </div>
 
   <!-- System capabilities -->
@@ -664,9 +847,12 @@
     <div class="border-2 border-dashed border-gray-700 rounded p-8 text-center"
          on:drop={onDrop} on:dragover={allowDrop}>
       <p class="mb-2">Drag & drop a video here</p>
-  <input type="file" accept="video/*" on:change={(e:any)=>{ const f=e.target.files?.[0]||null; file=f; fileSizeLabel = f? formatSize(f.size): null; if(f) setTimeout(()=>doUpload(), 100); }} />
+  <input bind:this={uploadInput} type="file" accept="video/*" on:change={(e:any)=>{ const f=e.target.files?.[0]||null; file=f; fileSizeLabel = f? formatSize(f.size): null; if(f) setTimeout(()=>doUpload(), 100); }} />
       {#if file}
-        <p class="mt-2 text-sm text-gray-400">{file.name} {#if fileSizeLabel}<span class="opacity-70">• {fileSizeLabel}</span>{/if}</p>
+        <div class="mt-2 flex items-center gap-2">
+          <p class="text-sm text-gray-400">{file.name} {#if fileSizeLabel}<span class="opacity-70">• {fileSizeLabel}</span>{/if}</p>
+          <button class="btn" on:click={clearSelectedFile} title="Clear selected file">Clear</button>
+        </div>
       {/if}
       {#if isUploading}
         <div class="mt-4">
@@ -756,7 +942,9 @@
         </div>
         <div>
           <label class="block mb-1 text-sm">Audio Bitrate (kbps)</label>
-          <select class="input w-full" bind:value={audioKbps} disabled={audioCodec === 'none'}>
+          <select class="input w-full" bind:value={audioKbps} disabled={audioCodec === 'none' || autoAudioBitrate} on:change={(e:any)=>{ const v = parseInt(e.target.value); if (!Number.isNaN(v)) baseAudioKbps = v as any; }}>
+            <option value={32}>32</option>
+            <option value={48}>48</option>
             <option value={64}>64</option>
             <option value={96}>96</option>
             <option value={128}>128</option>
@@ -766,6 +954,8 @@
           </select>
           {#if audioCodec === 'none'}
             <p class="text-xs text-gray-400 mt-1">Disabled (audio muted)</p>
+          {:else if autoAudioBitrate}
+            <p class="text-xs text-gray-400 mt-1">Auto audio bitrate is ON (will downshift for extreme compression)</p>
           {/if}
         </div>
         <div>
@@ -823,6 +1013,10 @@
             <input type="checkbox" bind:checked={autoDownload} class="w-4 h-4" />
             <span class="text-sm">⬇️ Auto-download when done</span>
           </label>
+          <label class="flex items-center gap-2 cursor-pointer" title="Automatically reduce audio bitrate when target size is tight to preserve minimum video quality.">
+            <input type="checkbox" bind:checked={autoAudioBitrate} class="w-4 h-4" />
+            <span class="text-sm">🎚️ Auto audio bitrate</span>
+          </label>
           {#if container === 'mp4'}
           <label class="flex items-center gap-2 cursor-pointer" title="Fragmented MP4 eliminates the long 'finalizing' step (99%->100%). Works with all modern players and Discord. Recommended!">
             <input type="checkbox" bind:checked={fastMp4Finalize} class="w-4 h-4" />
@@ -844,8 +1038,14 @@
 
   {#if jobInfo}
     <div class="card">
-      <p class="text-sm">Original: {Math.round((jobInfo.original_video_bitrate_kbps||0)+(jobInfo.original_audio_bitrate_kbps||0))} kbps
-        Target: {estimated ? Math.round(estimated.total_kbps) : Math.round(jobInfo.estimate_total_kbps)} kbps -> Video ~{estimated ? Math.round(estimated.video_kbps) : Math.round(jobInfo.estimate_video_kbps)} kbps</p>
+      <p class="text-sm">
+        {#if effectiveDuration !== jobInfo.duration_s}
+          <span class="text-blue-400">Duration: {formatDurationTime(effectiveDuration)} (trimmed from {formatDurationTime(jobInfo.duration_s)})</span>
+          <br />
+        {/if}
+        Original: {Math.round((jobInfo.original_video_bitrate_kbps||0)+(jobInfo.original_audio_bitrate_kbps||0))} kbps
+        Target: {estimated ? Math.round(estimated.total_kbps) : Math.round(jobInfo.estimate_total_kbps)} kbps -> Video ~{estimated ? Math.round(estimated.video_kbps) : Math.round(jobInfo.estimate_video_kbps)} kbps
+      </p>
       {#if estimated}
         <p class="text-xs opacity-80">Estimated final size: ~{estimated.final_mb.toFixed(2)} MB</p>
       {/if}
@@ -926,7 +1126,14 @@
         <div class="h-3 bg-indigo-600 rounded" style={`width:${displayedProgress}%`}></div>
       </div>
       <div class="mt-2 text-xs text-gray-400 flex items-center justify-between">
-        <span>{displayedProgress}%{#if isCompressing && isFinalizing && !doneStats} (finalizing…){/if}</span>
+        <span>
+          {displayedProgress.toFixed(1)}%
+          {#if isCompressing && isFinalizing && !doneStats} 
+            <span class="text-blue-300">(finalizing…)</span>
+          {:else if currentSpeedX && displayedProgress < 95}
+            <span class="text-green-300">• {currentSpeedX.toFixed(2)}x</span>
+          {/if}
+        </span>
         {#if isCompressing && displayedProgress<99 && etaLabel}
           <span>~{etaLabel} remaining</span>
         {:else if isCompressing && isFinalizing && !doneStats}

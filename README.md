@@ -28,8 +28,11 @@
 - **Resolution control**: Set max width/height while maintaining aspect ratio
 - **Video trimming**: Specify start/end times (seconds or HH:MM:SS format)
 - ffprobe analysis on upload for instant estimates and warnings
-- Real‑time progress and FFmpeg logs via SSE
+- **Real‑time progress tracking**: Live encoding progress via Server-Sent Events (SSE) on both main and queue pages
+- **Real‑time FFmpeg logs**: Streaming logs during compression for instant feedback
 - **One‑click Cancel**: Stop an in‑flight encode; worker interrupts FFmpeg immediately
+- **Automatic file size optimization**: If output exceeds target by >2%, automatically re-encodes with adjusted bitrate
+- **Smart retry notifications**: Audio alerts and visual notifications when auto-retry occurs
 - **History tracking enabled by default**: Recent jobs stored in `/app/history.json`
 - **Auto‑download enabled by default**
 - Hardware encoders: AV1, HEVC (H.265), H.264 (GPU-accelerated when available)
@@ -321,12 +324,70 @@ CODEC_LIBX265=true
 CODEC_LIBAOM_AV1=true
 
 # Redis (internal, usually no need to change)
-REDIS_URL=redis://127.0.0.1:6379/0
+REDIS_URL=redis://127.0.0.0:6379/0
 BACKEND_HOST=0.0.0.0
 BACKEND_PORT=8001
 ```
 
 Mount it with `-v ./.env:/app/.env` in docker run, or add it to volumes in docker-compose.yml.
+
+### Reverse Proxy Configuration
+
+**CRITICAL for Real-Time Progress**: If using a reverse proxy (nginx, Nginx Proxy Manager, Traefik, etc.), SSE (Server-Sent Events) requires special configuration to prevent buffering:
+
+#### Nginx / Nginx Proxy Manager
+Add to your proxy configuration for the `/api/stream/` location:
+
+```nginx
+location /api/stream/ {
+    proxy_pass http://backend:8001;
+    proxy_buffering off;              # REQUIRED - Disables response buffering for SSE
+    proxy_cache off;                  # Recommended - Disables caching
+    proxy_set_header Connection '';   # Recommended - Removes connection header
+    chunked_transfer_encoding on;     # Recommended - Enables chunked transfer
+}
+```
+
+**In Nginx Proxy Manager**: 
+1. Edit your Proxy Host
+2. Go to "Advanced" tab
+3. Add to "Custom Nginx Configuration":
+```nginx
+location /api/stream/ {
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_set_header Connection '';
+    chunked_transfer_encoding on;
+}
+```
+
+#### Traefik
+Add labels to your docker-compose:
+```yaml
+labels:
+  - "traefik.http.middlewares.no-buffer.buffering.maxRequestBodyBytes=0"
+  - "traefik.http.middlewares.no-buffer.buffering.maxResponseBodyBytes=0"
+  - "traefik.http.routers.8mblocal.middlewares=no-buffer"
+```
+
+#### Apache
+```apache
+<Location /api/stream/>
+    ProxyPass http://backend:8001/api/stream/
+    ProxyPassReverse http://backend:8001/api/stream/
+    SetEnv proxy-sendchunked 1
+    SetEnv proxy-interim-response RFC
+</Location>
+```
+
+**Why this matters**: Without `proxy_buffering off`, nginx buffers the entire SSE response and sends all progress events at once when the job completes, instead of streaming them in real-time. You'll see "progress stuck at 0%" until completion, then everything updates instantly.
+
+**Testing**: After configuring, start a compression job. You should see:
+- Progress bar updating smoothly in real-time
+- FFmpeg logs appearing as encoding happens
+- Browser console showing SSE events: `SSE connection opened`, `SSE event: progress`
+
+If progress still doesn't update until completion, check your proxy logs and verify `proxy_buffering off;` is applied.
 
 ### Platform-Specific Setup
 
@@ -546,14 +607,22 @@ This resolved the exact issue encountered on the powerhouse server.
   - Change port mapping: `-p 8080:8001` instead of `-p 8001:8001`
   - Usually no need to set `PUBLIC_BACKEND_URL` (frontend uses same‑origin)
   
-- **No progress events**: 
-  - Ensure frontend can reach backend directly (check browser console)
-  - SSE may be buffered by reverse proxy - add proper headers
+- **Progress bar stuck at 0% until job completes**: 
+  - **Cause**: Reverse proxy (nginx/NPM/Traefik) is buffering SSE responses
+  - **Symptom**: All progress events arrive at once when encoding finishes
+  - **Fix**: Add `proxy_buffering off;` to your proxy config for `/api/stream/` location (see Reverse Proxy Configuration section above)
+  - **Test**: Check browser console for SSE events during encoding, not just at completion
   
 - **Container won't start**:
   - Check logs: `docker logs 8mblocal`
   - Verify .env file syntax if using custom configuration
   - Try removing container and running again: `docker rm -f 8mblocal`
+  
+- **Files slightly over target size**:
+  - **Expected behavior**: System automatically retries if >2% over target
+  - You'll see a notification: "File exceeded target by X.X%, retrying with adjusted bitrate"
+  - Sound alert plays when retry occurs
+  - Check logs for "Retry attempt" messages
   
 - **FFmpeg errors**:
   - Full command and last 20 lines of stderr are logged for debugging
@@ -599,6 +668,9 @@ docker logs -f 8mblocal
 ## Notes
 - Hardware acceleration is automatically detected and validated at runtime
 - System automatically falls back to CPU encoding if hardware encoder unavailable
+- **Automatic file size optimization**: Files >2% over target are automatically re-encoded with adjusted bitrate
+- **Real-time progress tracking**: SSE streams progress updates to both main and queue pages
+- **Reverse proxy configuration required**: nginx/NPM users must add `proxy_buffering off;` for `/api/stream/` (see Reverse Proxy Configuration section)
 - AV1 support varies by hardware: NVIDIA (RTX 40/50-series), Intel (Arc GPUs), AMD (RDNA 3+), or CPU fallback
 - MP4 + Opus is not supported; the worker auto‑encodes AAC in MP4 containers
 - Configure codec visibility in Settings → Available Codecs or via environment variables

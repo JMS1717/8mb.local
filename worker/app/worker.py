@@ -111,15 +111,13 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Map requested codec to actual encoder and flags
     actual_encoder, v_flags, init_hw_flags = map_codec_to_hw(video_codec, hw_info)
     
-    # Fallback to CPU if hardware encoder not available or failed startup tests
+    # Fallback to CPU only if startup tests explicitly marked encoder as unavailable.
+    # If cache is empty (tests still running in background), attempt hardware and rely on runtime fallback below.
     if actual_encoder not in ("libx264", "libx265", "libaom-av1"):
         global ENCODER_TEST_CACHE
         cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
-        
-        # If not in cache or failed test, fall back to CPU
-        if cache_key not in ENCODER_TEST_CACHE or not ENCODER_TEST_CACHE[cache_key]:
-            _publish(self.request.id, {"type": "log", "message": f"Warning: {actual_encoder} unavailable or failed startup test, falling back to CPU"})
-            
+        if cache_key in ENCODER_TEST_CACHE and not ENCODER_TEST_CACHE[cache_key]:
+            _publish(self.request.id, {"type": "log", "message": f"Warning: {actual_encoder} marked unavailable by startup tests, falling back to CPU"})
             # Determine CPU fallback based on codec type
             if "h264" in actual_encoder:
                 actual_encoder = "libx264"
@@ -447,10 +445,13 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                         try:
                             ms = int(val)
                             if duration > 0:
+                                # Use 0-99% for encoding (the actual work), reserve only 99-100% for finalization
                                 p = min(max(ms / 1000.0 / duration, 0.0), 1.0)
-                                if (p - last_progress) >= 0.01 or p >= 0.999:
-                                    last_progress = p
-                                    _publish(self.request.id, {"type": "progress", "progress": round(p*100, 2)})
+                                scaled_progress = p * 0.99  # 0.0 to 0.99 (99%)
+                                # Update every 0.5% or when reaching 99%
+                                if (scaled_progress - last_progress) >= 0.005 or scaled_progress >= 0.989:
+                                    last_progress = scaled_progress
+                                    _publish(self.request.id, {"type": "progress", "progress": round(scaled_progress*100, 2), "phase": "encoding"})
                         except Exception:
                             pass
                     elif key in ("bitrate", "total_size", "speed"):
@@ -529,9 +530,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         _publish(self.request.id, {"type": "error", "message": msg})
         raise RuntimeError(msg)
 
-    # Send progress update BEFORE doing slow finalization work
-    _publish(self.request.id, {"type": "progress", "progress": 100.0})
-    _publish(self.request.id, {"type": "log", "message": "Finalizing: verifying output file..."})
+    # Encoding complete - move to 99% and start finalization
+    _publish(self.request.id, {"type": "progress", "progress": 99.0, "phase": "finalizing"})
+    _publish(self.request.id, {"type": "log", "message": "Encoding complete. Finalizing output..."})
 
     # CRITICAL: Wait for file to be fully written and readable (especially on networked/slow filesystems)
     max_wait = 10  # seconds
@@ -561,6 +562,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     
     _publish(self.request.id, {"type": "log", "message": f"Output verified: {final_size / (1024*1024):.2f} MB"})
 
+    # Still 99% - checking file size and preparing for possible retry
+    final_size_mb = round(final_size / (1024*1024), 2) if final_size else 0
+
     # Make the file downloadable immediately after encode finishes
     # Expose output_path early via task meta and send a 'ready' event for the UI
     try:
@@ -580,6 +584,82 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         pass
     
     final_size_mb = round(final_size / (1024*1024), 2) if final_size else 0
+    
+    # Check if file is too large (>2% over target) and retry with lower bitrate
+    size_overage_percent = ((final_size_mb - target_size_mb) / target_size_mb) * 100 if target_size_mb > 0 else 0
+    
+    if size_overage_percent > 2.0 and final_size_mb > target_size_mb:
+        # File is too large! Notify user and retry
+        _publish(self.request.id, {"type": "log", "message": f"⚠️ File is {size_overage_percent:.1f}% over target ({final_size_mb:.2f} MB vs {target_size_mb:.2f} MB)"})
+        _publish(self.request.id, {"type": "log", "message": "🔄 Retrying with reduced bitrate to meet size constraint..."})
+        _publish(self.request.id, {"type": "retry", "message": f"File too large ({final_size_mb:.2f} MB), retrying to fit {target_size_mb:.2f} MB target", "overage_percent": round(size_overage_percent, 1)})
+        
+        # Calculate adjusted bitrate (reduce by overage + 5% safety margin)
+        reduction_factor = max(0.5, 1.0 - (size_overage_percent / 100.0) - 0.05)
+        adjusted_video_kbps = int(video_kbps * reduction_factor)
+        
+        _publish(self.request.id, {"type": "log", "message": f"Adjusted video bitrate: {video_kbps} → {adjusted_video_kbps} kbps (reduction: {(1-reduction_factor)*100:.1f}%)"})
+        
+        # Delete the oversized file
+        try:
+            os.remove(output_path)
+            _publish(self.request.id, {"type": "log", "message": "Removed oversized file"})
+        except Exception as e:
+            _publish(self.request.id, {"type": "log", "message": f"Warning: Could not remove oversized file: {e}"})
+        
+        # Reset progress for retry
+        _publish(self.request.id, {"type": "progress", "progress": 1.0, "phase": "encoding"})
+        
+        # Re-run the encoding with adjusted bitrate by modifying cmd
+        # Find and replace the bitrate values in the original command
+        retry_cmd = []
+        i = 0
+        while i < len(cmd):
+            if cmd[i] == "-b:v":
+                retry_cmd.append(cmd[i])
+                retry_cmd.append(f"{adjusted_video_kbps}k")
+                i += 2
+            elif cmd[i] == "-maxrate":
+                retry_cmd.append(cmd[i])
+                retry_cmd.append(f"{int(adjusted_video_kbps * 1.2)}k")
+                i += 2
+            elif cmd[i] == "-bufsize":
+                retry_cmd.append(cmd[i])
+                retry_cmd.append(f"{int(adjusted_video_kbps * 2)}k")
+                i += 2
+            else:
+                retry_cmd.append(cmd[i])
+                i += 1
+        
+        _publish(self.request.id, {"type": "log", "message": f"Retry FFmpeg command: {' '.join(retry_cmd[:10])}..."})
+        
+        # Run the retry encode
+        last_progress = 0.0
+        stderr_lines = []
+        rc, was_cancelled = run_ffmpeg_and_stream(retry_cmd)
+        
+        if was_cancelled:
+            _publish(self.request.id, {"type": "canceled"})
+            msg = "Job canceled during retry"
+            _publish(self.request.id, {"type": "error", "message": msg})
+            raise RuntimeError(msg)
+        
+        if rc != 0:
+            _publish(self.request.id, {"type": "error", "message": f"Retry encode failed with return code {rc}. Keeping original result."})
+            # Don't fail completely, just note the retry failed
+        else:
+            # Update final size after successful retry
+            try:
+                final_size = os.path.getsize(output_path)
+                final_size_mb = round(final_size / (1024*1024), 2)
+                new_overage = ((final_size_mb - target_size_mb) / target_size_mb) * 100 if target_size_mb > 0 else 0
+                if new_overage <= 0:
+                    _publish(self.request.id, {"type": "log", "message": f"✅ Retry successful! Final size: {final_size_mb:.2f} MB (under target)"})
+                else:
+                    _publish(self.request.id, {"type": "log", "message": f"✅ Retry complete! Final size: {final_size_mb:.2f} MB ({new_overage:+.1f}% vs target)"})
+            except Exception:
+                final_size = 0
+                final_size_mb = 0
     
     stats = {
         "input_path": input_path,
@@ -635,6 +715,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     except Exception as e:
         # Don't fail the job if history fails
         _publish(self.request.id, {"type": "log", "message": f"Failed to save history: {str(e)}"})
+    
+    # 100% - Complete!
+    _publish(self.request.id, {"type": "progress", "progress": 100.0, "phase": "done"})
     
     self.update_state(state="SUCCESS", meta={"output_path": output_path, "progress": 100.0, "detail": "done", **stats})
     _publish(self.request.id, {"type": "done", "stats": stats})
