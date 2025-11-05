@@ -1,7 +1,7 @@
 <script lang="ts">
   import '../app.css';
   import { onMount } from 'svelte';
-  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob } from '$lib/api';
+  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults } from '$lib/api';
 
   let file: File | null = null;
   let uploadInput: HTMLInputElement | null = null; // reference to clear file input
@@ -124,6 +124,9 @@
   let hardwareType = 'cpu';
   let sysCaps: any = null;
   let sysCapsError: string | null = null;
+  // Encoder tests summary
+  let encoderTests: Array<{ codec: string; actual_encoder: string; passed: boolean; message?: string }>|null = null;
+  let gpuOk: boolean = false;
   // Presets and size buttons
   let presetProfiles: Array<any> = [];
   let selectedPreset: string | null = null;
@@ -186,6 +189,13 @@
     } catch (e:any) {
       sysCapsError = e?.message || 'Failed to fetch system capabilities';
     }
+
+    // Load encoder startup tests to report GPU availability
+    try {
+      const tests = await getEncoderTestResults();
+      gpuOk = !!tests?.any_hardware_passed;
+      encoderTests = (tests?.results || []);
+    } catch {}
 
     // Load preset profiles and size buttons
     try {
@@ -819,6 +829,23 @@
           <p class="text-sm">CPU: {sysCaps.cpu?.model || 'Unknown'} ({sysCaps.cpu?.cores_physical}C/{sysCaps.cpu?.cores_logical}T)</p>
           <p class="text-sm">Memory: {sysCaps.memory?.available_gb} GB free / {sysCaps.memory?.total_gb} GB</p>
           <p class="text-sm">Hardware: <span class="inline-flex items-center gap-1"><span class="inline-block w-2 h-2 rounded-full" style={`background-color:${getCodecColor(hardwareType)}`}></span>{hardwareType.toUpperCase()}</span></p>
+          <p class="text-sm mt-1">
+            {#if hardwareType !== 'cpu'}
+              {#if gpuOk}
+                <span class="inline-flex items-center gap-2 text-green-300">
+                  <span class="w-2 h-2 bg-green-500 rounded-full"></span>
+                  GPU encoding available
+                </span>
+              {:else}
+                <span class="inline-flex items-center gap-2 text-amber-300" title="Hardware encoder tests did not pass; encoding may fall back to CPU.">
+                  <span class="w-2 h-2 bg-amber-500 rounded-full"></span>
+                  GPU encoding unavailable — falling back to CPU
+                </span>
+              {/if}
+            {:else}
+              <span class="text-gray-400">CPU-only environment</span>
+            {/if}
+          </p>
         {:else if sysCapsError}
           <p class="text-sm text-amber-400">{sysCapsError}</p>
         {:else}
@@ -838,6 +865,34 @@
           {/if}
         {:else}
           <p class="text-sm opacity-70">No dedicated GPUs detected</p>
+        {/if}
+        {#if encoderTests}
+          <details class="mt-3">
+            <summary class="cursor-pointer text-sm">Encoder tests</summary>
+            <ul class="mt-2 text-xs space-y-1">
+              {#each encoderTests as t}
+                <li class="flex items-center justify-between">
+                  <span>{t.codec} <span class="opacity-60">({t.actual_encoder})</span></span>
+                  {#if t.passed}
+                    <span class="text-green-400">PASS</span>
+                  {:else}
+                    <span class="text-red-400" title={t.message || 'Failed'}>FAIL</span>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+            {#if !gpuOk && hardwareType !== 'cpu'}
+              <div class="mt-3 text-xs text-amber-300 bg-amber-900/20 border border-amber-700/30 rounded p-2">
+                GPU present but encoders failed. Common causes:
+                <ul class="list-disc ml-4 mt-1 opacity-90">
+                  <li>Container not started with GPU access (Compose gpus: all)</li>
+                  <li>Docker Desktop (Windows): enable WSL2 GPU support and set Resources → GPU</li>
+                  <li>Outdated or missing NVIDIA driver</li>
+                  <li>Permissions: NVENC init "Operation not permitted" inside container</li>
+                </ul>
+              </div>
+            {/if}
+          </details>
         {/if}
       </div>
     </div>
@@ -1067,9 +1122,7 @@
 
   <div class="flex gap-2">
     <button class="btn" on:click={doUpload} disabled={!file || isUploading || isAnalyzing}>
-      {#if isAnalyzing || isUploading}
-        Analyzing… {uploadProgress}%
-      {:else if jobInfo}
+      {#if jobInfo}
         Re-analyze
       {:else}
         Analyze
@@ -1117,10 +1170,30 @@
 
   {#if taskId}
     <div class="card">
-      {#if decodeMethod || encodeMethod}
-        <div class="text-xs text-gray-400 mb-2">
-          Pipeline: {decodeMethod || 'auto'} → {encodeMethod || (videoCodec || 'auto')}
-        </div>
+      <div class="flex items-center justify-between mb-2">
+        {#if decodeMethod || encodeMethod}
+          <div class="text-sm text-gray-300">
+            Pipeline: {decodeMethod || 'auto'} → {encodeMethod || (videoCodec || 'auto')}
+          </div>
+        {/if}
+        {#if encodeMethod}
+          {#if /_nvenc$/.test(encodeMethod)}
+            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: NVIDIA NVENC</span>
+          {:else if /_qsv$/.test(encodeMethod)}
+            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: Intel QSV</span>
+          {:else if /_amf$/.test(encodeMethod)}
+            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: AMD AMF</span>
+          {:else if /_vaapi$/.test(encodeMethod)}
+            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: VAAPI</span>
+          {:else}
+            <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-200 border border-slate-600/40">Encoder: CPU ({encodeMethod})</span>
+          {/if}
+        {:else}
+          <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-600/40">Encoder: detecting…</span>
+        {/if}
+      </div>
+      {#if encodeMethod && encodeMethod.startsWith('lib') && hardwareType !== 'cpu'}
+        <div class="text-xs text-amber-300 mt-1">Hardware encoder unavailable for this job — using CPU fallback.</div>
       {/if}
       <div class="h-3 bg-gray-800 rounded">
         <div class="h-3 bg-indigo-600 rounded" style={`width:${displayedProgress}%`}></div>

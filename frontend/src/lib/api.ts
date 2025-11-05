@@ -108,6 +108,12 @@ export async function getSystemCapabilities() {
   return res.json();
 }
 
+export async function getEncoderTestResults() {
+  const res = await fetch(`${BACKEND}/api/system/encoder-tests`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 // Settings APIs
 export async function getPresetProfiles() {
   const res = await fetch(`${BACKEND}/api/settings/preset-profiles`);

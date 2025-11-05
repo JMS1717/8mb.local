@@ -783,6 +783,89 @@ async def system_capabilities():
     return SYSTEM_CAPS_CACHE
 
 
+@app.get("/api/system/encoder-tests")
+async def system_encoder_tests():
+    """Return encoder startup test results and a simple summary.
+
+    Reads cached results from Redis written by the worker at startup.
+    """
+    try:
+        hw_info = _get_hw_info_cached()
+    except Exception:
+        hw_info = {"type": "cpu", "available_encoders": {}}
+
+    # Candidate codecs to report (union of common HW and CPU encoders)
+    test_codecs = [
+        "h264_nvenc","hevc_nvenc","av1_nvenc",
+        "h264_qsv","hevc_qsv","av1_qsv",
+        "h264_vaapi","hevc_vaapi","av1_vaapi",
+        "h264_amf","hevc_amf","av1_amf",
+        "libx264","libx265","libaom-av1",
+    ]
+
+    results = []
+    any_hw_passed = False
+    try:
+        for codec in test_codecs:
+            # Prefer JSON detail if present
+            detail_raw = await redis.get(f"encoder_test_json:{codec}")
+            if detail_raw:
+                try:
+                    detail = json.loads(detail_raw)
+                    passed = bool(detail.get("passed"))
+                    msg = detail.get("message") or ("OK" if passed else "Failed")
+                    results.append({
+                        "codec": codec,
+                        "actual_encoder": detail.get("actual_encoder", codec),
+                        "passed": passed,
+                        "message": msg,
+                    })
+                    if passed and not codec.startswith("lib"):
+                        any_hw_passed = True
+                    continue
+                except Exception:
+                    pass
+            # Fallback to boolean flag
+            flag = await redis.get(f"encoder_test:{codec}")
+            if flag is not None:
+                passed = (str(flag) == "1")
+                results.append({
+                    "codec": codec,
+                    "actual_encoder": codec,
+                    "passed": passed,
+                    "message": "OK" if passed else "Failed",
+                })
+                if passed and not codec.startswith("lib"):
+                    any_hw_passed = True
+
+        # Filter: only include encoders relevant to this hardware type plus CPUs
+        hw_type = (hw_info.get("type") or "cpu").lower()
+        def _matches_hw(c: str) -> bool:
+            if c.startswith("lib"):
+                return True
+            if hw_type == "nvidia":
+                return c.endswith("_nvenc")
+            if hw_type == "intel":
+                return c.endswith("_qsv")
+            if hw_type in ("amd","vaapi"):
+                return c.endswith("_amf") or c.endswith("_vaapi")
+            return False
+        filtered = [r for r in results if _matches_hw(r["codec"])]
+
+        return {
+            "hardware_type": hw_info.get("type", "cpu"),
+            "any_hardware_passed": any_hw_passed,
+            "results": filtered or results,
+        }
+    except Exception as e:
+        logger.warning(f"encoder-tests endpoint error: {e}")
+        return {
+            "hardware_type": hw_info.get("type", "cpu"),
+            "any_hardware_passed": False,
+            "results": [],
+        }
+
+
 @app.get("/api/diagnostics/gpu", dependencies=[Depends(basic_auth)])
 async def gpu_diagnostics():
     """Run basic GPU checks inside the container to validate NVIDIA and NVENC.

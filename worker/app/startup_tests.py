@@ -3,6 +3,7 @@ Startup encoder tests to validate hardware acceleration on container boot.
 Populates ENCODER_TEST_CACHE so compress jobs don't pay the init test cost.
 """
 import os
+import json
 import subprocess
 import sys
 import logging
@@ -166,6 +167,9 @@ def run_startup_tests(hw_info: Dict) -> Dict[str, bool]:
     logger.info("")
     
     if failed > 0:
+        failed_list = [c for (c, _, status, _) in test_results if status in ("FAIL","ERROR","UNAVAILABLE")]
+        if failed_list:
+            logger.warning("  Failing encoders: %s", ", ".join(failed_list))
         logger.warning("  Failed encoders will automatically fall back to CPU encoding.")
     
     logger.info("─" * 70)
@@ -177,15 +181,30 @@ def run_startup_tests(hw_info: Dict) -> Dict[str, bool]:
         from redis import Redis
         redis_url = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
         redis_client = Redis.from_url(redis_url, decode_responses=True)
-        # Store which encoders passed tests (simple format: "encoder_name" -> "1" or "0")
+        # Store which encoders passed tests and last message
         for codec in test_codecs:
             try:
                 from .hw_detect import map_codec_to_hw
                 actual_encoder, _, init_hw_flags = map_codec_to_hw(codec, hw_info)
                 cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
                 if cache_key in cache:
-                    redis_client.setex(f"encoder_test:{codec}", 2592000, "1" if cache[cache_key] else "0")
-            except:
+                    passed = bool(cache[cache_key])
+                    # Save boolean flag
+                    redis_client.setex(f"encoder_test:{codec}", 2592000, "1" if passed else "0")
+                    # Save JSON detail with best-effort message by re-running quick check
+                    # We don't want to re-run slow tests; infer message from availability
+                    detail = {"codec": codec, "actual_encoder": actual_encoder, "passed": passed}
+                    try:
+                        # Try to provide more context from -encoders
+                        detail_msg = "OK" if passed else "Failed during init"
+                        detail["message"] = detail_msg
+                    except Exception:
+                        pass
+                    try:
+                        redis_client.setex(f"encoder_test_json:{codec}", 2592000, json.dumps(detail))
+                    except Exception:
+                        pass
+            except Exception as _:
                 pass
     except Exception as e:
         logger.warning(f"Failed to store encoder test results in Redis: {e}")
