@@ -38,7 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnuma1 libopus0 \
  && rm -rf /var/lib/apt/lists/*
 
-ENV PATH=/opt/ffmpeg/bin:$PATH
+ARG PATH
+ENV PATH=/opt/ffmpeg/bin${PATH:+:$PATH}
 COPY --from=ffmpeg-build /opt/ffmpeg /opt/ffmpeg
 
 WORKDIR /app
