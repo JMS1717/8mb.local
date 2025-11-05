@@ -549,15 +549,15 @@ docker compose up -d
     ```
   - This tells the NVIDIA Container Toolkit to mount NVENC libraries into the container
   
-  - **Critical: Driver Version Mismatch** - The #1 cause of NVENC failures:
-    - **Error symptom**: `Driver does not support the required nvenc API version. Required: 13.0 Found: 12.1`
-    - **Root cause**: Container ffmpeg requires NVENC API 13.0, but host driver only provides 12.1
-    - **Who's affected**: Systems running NVIDIA driver 535.x (common on Debian 12 stable, older Ubuntu LTS)
+  - **Critical: Driver Version Mismatch** - A common cause of NVENC failures:
+    - **Error symptom**: `Driver does not support the required nvenc API version. Required: 12.1 Found: X`
+    - **Root cause**: Your NVIDIA driver is older than the NVENC API level used by the container (12.1)
+    - **Who's affected**: Systems running NVIDIA drivers older than **535.54.03** (e.g., some Debian 12 stock repos)
     - **Quick check**: Run `nvidia-smi` and look at driver version:
-      - Driver **535.x** = NVENC API 12.1 ❌ (too old)
-      - Driver **550.x or newer** = NVENC API 13.0 ✅ (compatible)
+      - Driver **535.54.03+** = NVENC API 12.1 ✅ (compatible)
+      - Driver **550.x or newer** = Newer API (also compatible)
     
-  - **Solution: Upgrade NVIDIA Driver**
+  - **Solution: Upgrade NVIDIA Driver (to at least 535.54.03)**
     
     For **Debian 12** systems:
     ```bash
@@ -569,24 +569,24 @@ docker compose up -d
     sudo reboot  # Required to load new driver
     ```
     
-    For **Ubuntu** systems:
+  For **Ubuntu** systems:
     ```bash
     # Add NVIDIA PPA for latest drivers
     sudo add-apt-repository ppa:graphics-drivers/ppa
     sudo apt update
-    sudo apt install nvidia-driver-550  # or newer
+  sudo apt install nvidia-driver-535  # or newer (550+ also fine)
     sudo reboot
     ```
     
     After reboot, verify: `nvidia-smi` should show driver 550+ and `ffmpeg -encoders | grep nvenc` inside container should work.
     
-  - **Why this happens**: Newer ffmpeg builds use NVENC API 13.0 features for better quality/performance. Older drivers (535.x) only support up to API 12.1.
+  - **Why this happens**: This container is built against NVENC SDK/API **12.1** for broad compatibility. Drivers older than 535.x expose a lower API level and cannot satisfy 12.1.
   
   - **Verification steps**:
     1. Check host driver: `nvidia-smi` (look for version 550+)
-    2. Test NVENC in container: `docker exec 8mblocal ffmpeg -f lavfi -i nullsrc -c:v h264_nvenc -f null -`
-    3. If you see "Cannot load libnvidia-encode.so.1", add the `NVIDIA_DRIVER_CAPABILITIES` env var above
-    4. If you see "Required: 13.0 Found: 12.1", upgrade your driver
+  2. Test NVENC in container: `docker exec 8mblocal ffmpeg -f lavfi -i nullsrc -c:v h264_nvenc -f null -`
+  3. If you see "Cannot load libnvidia-encode.so.1", add the `NVIDIA_DRIVER_CAPABILITIES` env var above
+  4. If you see "Required: 12.1 Found: X", upgrade your driver to 535.54.03 or newer
   
   - On Linux: Verify [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) is installed
   - **If driver upgrade not possible**: System will automatically fallback to CPU encoding
@@ -669,21 +669,21 @@ Your video will still compress, just using CPU instead of GPU.
    - Enable CPU codecs or VAAPI if you have Intel/AMD GPU
    - System will automatically use available encoders
 
-**Real-World Example: Debian 12 with Driver 535**
-On a fresh Debian 12 install with Quadro RTX 4000, the default driver (535.247.01) is too old:
+**Real-World Example: Debian 12 with older driver**
+On a fresh Debian 12 install with Quadro RTX 4000, the default driver from stock repos may be older than 535.54.03:
 ```bash
-# Initial state - fails with API 12.1 vs 13.0 error
-nvidia-smi  # Shows driver 535.247.01
+# Initial state - NVENC init fails with API mismatch
+nvidia-smi  # Shows driver < 535.54.03
 
 # Fix by upgrading to NVIDIA's official driver repository
 wget https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb
 sudo dpkg -i cuda-keyring_1.1-1_all.deb
 sudo apt update
-sudo apt install nvidia-driver  # Installs 550+ series
+sudo apt install nvidia-driver  # Installs a current driver (535+ or newer)
 sudo reboot
 
 # After reboot - NVENC works!
-nvidia-smi  # Shows driver 580.95.05 or newer
+nvidia-smi  # Shows driver 535.54.03+ (550+ also fine)
 ```
 
 This resolved the exact issue encountered on the powerhouse server.
