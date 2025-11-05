@@ -39,7 +39,9 @@ RUN git clone --depth=1 https://github.com/FFmpeg/nv-codec-headers.git && \
     make install && cd ..
 
 # Ensure pkg-config can find ffnvcodec (nv-codec-headers installs ffnvcodec.pc under /usr/local/lib/pkgconfig)
-ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+# Avoid UndefinedVar warning by declaring build arg and using parameter expansion safely
+ARG PKG_CONFIG_PATH
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}
 
 # Build FFmpeg with all hardware acceleration support
 RUN wget -q https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
