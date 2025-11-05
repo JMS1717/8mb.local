@@ -1,0 +1,72 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: latest
+            cuda: "12.8.0"
+            ffmpeg: "7.0"
+            nvcodec: "sdk/12.3"
+            drivermin: "550.00"
+            tagsuffix: latest
+          - flavor: legacy
+            cuda: "12.2.0"
+            ffmpeg: "6.1.1"
+            nvcodec: "sdk/12.1"
+            drivermin: "535.54.03"
+            tagsuffix: legacy
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Derive tags
+        id: meta
+        run: |
+          IMAGE=jms1717/8mblocal
+          if [ "${{ matrix.flavor }}" = "latest" ]; then
+            echo "tags=${IMAGE}:latest,${IMAGE}:v${{ github.run_number }}" >> $GITHUB_OUTPUT
+          else
+            echo "tags=${IMAGE}:${{ matrix.tagsuffix }},${IMAGE}:v${{ github.run_number }}-${{ matrix.tagsuffix }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push (${{ matrix.flavor }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          file: ./Dockerfile
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            BUILD_VERSION=${{ github.run_number }}
+            BUILD_FLAVOR=${{ matrix.flavor }}
+            CUDA_VERSION=${{ matrix.cuda }}
+            UBUNTU_FLAVOR=ubuntu22.04
+            FFMPEG_VERSION=${{ matrix.ffmpeg }}
+            NV_CODEC_HEADERS_REF=${{ matrix.nvcodec }}
+            DRIVER_MIN=${{ matrix.drivermin }}

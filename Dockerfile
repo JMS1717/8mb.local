@@ -1,7 +1,17 @@
 # Multi-stage unified 8mb.local container
-# Stage 1: Build FFmpeg with multi-vendor GPU support (NVIDIA NVENC, Intel QSV, AMD AMF/VAAPI)
-# Use CUDA 12.2 devel image: supports RTX 50-series and is compatible with NVIDIA driver 535+
-FROM nvidia/cuda:12.2.0-devel-ubuntu22.04 AS ffmpeg-build
+# Build-time args let us produce multiple variants from one Dockerfile
+ARG CUDA_VERSION=12.8.0
+ARG UBUNTU_FLAVOR=ubuntu22.04
+ARG FFMPEG_VERSION=7.0
+ARG NV_CODEC_HEADERS_REF=sdk/12.3
+ARG BUILD_FLAVOR=latest
+ARG DRIVER_MIN=550.00
+
+# Stage 1: Build FFmpeg with multi-vendor GPU support (NVIDIA NVENC, Intel QSV, AMD VAAPI)
+# CUDA is parameterized to support both legacy and latest builds
+FROM nvidia/cuda:${CUDA_VERSION}-devel-${UBUNTU_FLAVOR} AS ffmpeg-build
+ARG FFMPEG_VERSION
+ARG NV_CODEC_HEADERS_REF
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -14,14 +24,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 WORKDIR /build
 
-# NVIDIA NVENC headers
-# Pin to NVENC API 12.1 for widest compatibility with driver 535.x, while CUDA 12.2 runtime covers RTX 50‑series
+# NVIDIA NVENC headers (parameterized)
 RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
-    cd nv-codec-headers && git checkout sdk/12.1 && make install && cd ..
+    cd nv-codec-headers && git checkout ${NV_CODEC_HEADERS_REF} && make install && cd ..
 
 # Build FFmpeg with all hardware acceleration support
-RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
-        tar xf ffmpeg-6.1.1.tar.xz && cd ffmpeg-6.1.1 && \
+RUN wget -q https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && cd ffmpeg-${FFMPEG_VERSION} && \
         ./configure \
       --enable-nonfree --enable-gpl \
       --enable-cuda-nvcc --enable-libnpp --enable-nvenc \
@@ -34,7 +43,7 @@ RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
     # Strip binaries to reduce size
     strip --strip-all /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
     # Clean up build artifacts
-        cd .. && rm -rf ffmpeg-6.1.1 ffmpeg-6.1.1.tar.xz nv-codec-headers /build
+    cd .. && rm -rf ffmpeg-${FFMPEG_VERSION} ffmpeg-${FFMPEG_VERSION}.tar.xz nv-codec-headers /build
 
 # Stage 2: Build Frontend
 FROM node:20-alpine AS frontend-build
@@ -53,12 +62,19 @@ RUN npm run build && \
     find build -name "*.ts" -delete
 
 # Stage 3: Runtime with all services
-# Use CUDA 12.2 runtime: minimum driver 535; supports RTX 50-series and older (535+) systems
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-${UBUNTU_FLAVOR}
+ARG BUILD_FLAVOR
+ARG FFMPEG_VERSION
+ARG CUDA_VERSION
+ARG DRIVER_MIN
 
 # Build-time version (can be overridden)
 ARG BUILD_VERSION=123
 ENV APP_VERSION=${BUILD_VERSION}
+ENV BUILD_FLAVOR=${BUILD_FLAVOR}
+ENV BUILD_FFMPEG=${FFMPEG_VERSION}
+ENV BUILD_CUDA=${CUDA_VERSION}
+ENV DRIVER_MIN=${DRIVER_MIN}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -70,6 +86,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     python3.10 python3-pip supervisor redis-server \
     libopus0 libx264-163 libx265-199 libvpx7 libnuma1 \
     libva2 libva-drm2 libaom3 libdav1d5 \
+    pciutils procps \
     && apt-get clean && rm -rf /tmp/*
 
 # Copy FFmpeg from build stage (only what we need)
@@ -115,6 +132,11 @@ ENV NVIDIA_VISIBLE_DEVICES=all
 # Configure supervisord
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
+# Runtime compatibility check and entrypoint
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 EXPOSE 8001
 
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
