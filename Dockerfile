@@ -19,7 +19,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    build-essential yasm cmake pkg-config git wget ca-certificates \
+    build-essential yasm nasm cmake pkg-config git wget ca-certificates \
     libnuma-dev libx264-dev libx265-dev libvpx-dev libopus-dev \
     libaom-dev libdav1d-dev \
     libva-dev libdrm-dev
