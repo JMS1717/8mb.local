@@ -6,7 +6,7 @@ ARG FFMPEG_VERSION=8.0
 ARG NV_CODEC_HEADERS_REF=sdk/12.2
 ARG BUILD_FLAVOR=latest
 ARG DRIVER_MIN=550.00
-ARG NV_CODEC_COMPAT=12.0
+ARG NV_CODEC_COMPAT=
 ARG USE_CUDA_13=false
 
 # Stage 0: CUDA 13 base (if needed) - manually install CUDA 13 toolkit
@@ -55,17 +55,22 @@ ENV CUDA_HOME=/usr/local/cuda
 ENV PATH=/usr/local/cuda/bin:${PATH}
 
 # NVIDIA NVENC headers
-# Use NV_CODEC_COMPAT for legacy builds (sdk/12.0 for FFmpeg 6.x, sdk/12.2+ for FFmpeg 7+)
-RUN REF="${NV_CODEC_HEADERS_REF}" && \
-    if [ -n "${NV_CODEC_COMPAT}" ] && [ "${NV_CODEC_COMPAT}" != "${NV_CODEC_HEADERS_REF}" ]; then \
-        echo "Using ${NV_CODEC_COMPAT} headers for FFmpeg ${FFMPEG_VERSION} compatibility" && \
+# Select compatible header branch based on FFmpeg major version
+# - FFmpeg < 7: allow NV_CODEC_COMPAT override (e.g., sdk/12.0 for 6.x)
+# - FFmpeg >= 7: use NV_CODEC_HEADERS_REF as provided (e.g., sdk/12.2 for 7+/8)
+RUN set -e; \
+    REF="${NV_CODEC_HEADERS_REF}"; \
+    FFMPEG_MAJOR=$(echo ${FFMPEG_VERSION} | cut -d. -f1); \
+    if [ "${FFMPEG_MAJOR}" -lt 7 ] && [ -n "${NV_CODEC_COMPAT}" ]; then \
+        echo "Using compatible headers ${NV_CODEC_COMPAT} for FFmpeg ${FFMPEG_VERSION}"; \
         REF="${NV_CODEC_COMPAT}"; \
-    fi && \
+    else \
+        echo "Using headers ${NV_CODEC_HEADERS_REF} for FFmpeg ${FFMPEG_VERSION}"; \
+    fi; \
     git clone --depth=1 --branch "${REF}" https://github.com/FFmpeg/nv-codec-headers.git || \
-    (echo "Warning: ${REF} not found, falling back to ${NV_CODEC_HEADERS_REF}" && \
-     git clone --depth=1 --branch "${NV_CODEC_HEADERS_REF}" https://github.com/FFmpeg/nv-codec-headers.git) && \
-    cd nv-codec-headers && \
-    make install && cd ..
+      (echo "Warning: ${REF} not found, falling back to ${NV_CODEC_HEADERS_REF}" && \
+       git clone --depth=1 --branch "${NV_CODEC_HEADERS_REF}" https://github.com/FFmpeg/nv-codec-headers.git); \
+    cd nv-codec-headers && make install && cd ..
 
 # Ensure pkg-config can find ffnvcodec (nv-codec-headers installs ffnvcodec.pc under /usr/local/lib/pkgconfig)
 # Avoid UndefinedVar warning by declaring build arg and using parameter expansion safely
@@ -198,18 +203,22 @@ COPY --from=ffmpeg-build /usr/local/cuda/lib64/libnpp*.so* /usr/local/cuda/lib64
 # The actual .so.1 files are mounted by the NVIDIA container toolkit at runtime
 # CRITICAL FIX for RTX 50-series: Replace stub libcuda.so.1 with symlink to WSL driver
 RUN ldconfig && \
-    mkdir -p /usr/local/nvidia/lib64 && \
-    # Replace the 172KB stub libcuda.so.1 with the real WSL driver
-    # The .wsl symlink exists but linker finds stub first - we need to replace the stub
-    rm -f /usr/lib/x86_64-linux-gnu/libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so && \
-    ln -s libcuda.so.1.wsl /usr/lib/x86_64-linux-gnu/libcuda.so.1 && \
-    ln -s libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so && \
-    # Update ldconfig to search in all NVIDIA library locations
-    echo "/usr/lib/x86_64-linux-gnu" >> /etc/ld.so.conf.d/nvidia.conf && \
-    echo "/usr/local/cuda/lib64" >> /etc/ld.so.conf.d/nvidia.conf && \
-    echo "/usr/local/nvidia/lib64" >> /etc/ld.so.conf.d/nvidia.conf && \
-    echo "/usr/lib/wsl/lib" >> /etc/ld.so.conf.d/nvidia.conf && \
-    ldconfig
+        mkdir -p /usr/local/nvidia/lib64 && \
+        # Only apply WSL-specific libcuda symlink if the .wsl target exists in this image
+        if [ -e /usr/lib/x86_64-linux-gnu/libcuda.so.1.wsl ]; then \
+            echo "WSL libcuda.so.1.wsl detected; adjusting libcuda symlinks"; \
+            rm -f /usr/lib/x86_64-linux-gnu/libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so; \
+            ln -s libcuda.so.1.wsl /usr/lib/x86_64-linux-gnu/libcuda.so.1; \
+            ln -s libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so; \
+        else \
+            echo "No WSL libcuda.so.1.wsl present; leaving libcuda symlinks unchanged"; \
+        fi && \
+        # Update ldconfig to search in all NVIDIA library locations
+        echo "/usr/lib/x86_64-linux-gnu" >> /etc/ld.so.conf.d/nvidia.conf && \
+        echo "/usr/local/cuda/lib64" >> /etc/ld.so.conf.d/nvidia.conf && \
+        echo "/usr/local/nvidia/lib64" >> /etc/ld.so.conf.d/nvidia.conf && \
+        echo "/usr/lib/wsl/lib" >> /etc/ld.so.conf.d/nvidia.conf && \
+        ldconfig
 
 WORKDIR /app
 ENV PYTHONPATH=/app
