@@ -26,10 +26,10 @@ jobs:
       matrix:
         include:
           - flavor: latest
-            cuda: "12.8.0"
+            cuda: "13.0.1"
             ffmpeg: "8.0"
             nvcodec: "sdk/12.2"
-            nvcc_archs: "90 89 86 80 75"
+            nvcc_archs: "100 90 89 86 80 75"
             drivermin: "550.00"
             tagsuffix: latest
           - flavor: legacy

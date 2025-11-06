@@ -1,6 +1,6 @@
 # Multi-stage unified 8mb.local container
 # Build-time args let us produce multiple variants from one Dockerfile
-ARG CUDA_VERSION=12.8.0
+ARG CUDA_VERSION=13.0.1
 ARG UBUNTU_FLAVOR=ubuntu22.04
 ARG FFMPEG_VERSION=8.0
 ARG NV_CODEC_HEADERS_REF=sdk/12.2
@@ -32,11 +32,10 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-${UBUNTU_FLAVOR} AS ffmpeg-build
 ARG FFMPEG_VERSION
 ARG NV_CODEC_HEADERS_REF
 ARG NV_CODEC_COMPAT
-ARG USE_CUDA_13
-# Default to widely-compatible architectures (Ada/Ampere/Turing/Volta)
-# For RTX 50-series builds, override with: --build-arg NVCC_ARCHS="90 89 86 80"
-# Architecture guide: 90=Hopper(H100), 89=Ada(RTX4090), 86=Ampere(RTX30xx), 80=Ampere(A100), 75=Turing(RTX20xx), 70=Volta(V100)
-ARG NVCC_ARCHS="89 86 80 75"
+ARG USE_CUDA_13=false
+# Default to RTX 50-series and recent architectures (Blackwell/Hopper/Ada/Ampere/Turing/Volta)
+# For RTX 50-series: sm_100, Hopper: sm_90, Ada: sm_89, Ampere: sm_86/80, Turing: sm_75, Volta: sm_70
+ARG NVCC_ARCHS="100 90 89 86 80 75"
 ARG ENABLE_LIBNPP=true
 
 ENV DEBIAN_FRONTEND=noninteractive

@@ -6,10 +6,10 @@
 >
 > We now publish two Docker tags to support both new and legacy NVIDIA environments from the same codebase.
 >
-> - `:latest` (Blackwell / 50‑series): CUDA 13.0.1 + FFmpeg 8.0, NVENC headers sdk/12.2. Minimum driver: 550.00
-> - `:legacy` (Turing/Ampere on 535.x): CUDA 12.2 + FFmpeg 6.1.1, NVENC headers sdk/12.0 (compat pin). Minimum driver: 535.54.03
+> - `:latest` (Blackwell / RTX 50‑series): CUDA 13.0.1 + FFmpeg 8.0, NVENC headers sdk/12.2, sm_100 support. Minimum driver: 550.00
+> - `:legacy` (Turing/Ampere on 535.x): CUDA 12.2 + FFmpeg 6.1.1, NVENC headers sdk/12.1. Minimum driver: 535.54.03
 >
-> Both images use the `cuda:*-base-*` runtime to ensure CUDA libraries are present for NVENC. The container auto-detects your NVIDIA driver at startup and prints a clear warning if the tag doesn't match your host. CPU/VAAPI still work; NVENC will be disabled if incompatible.
+> Both images use the `cuda:*-runtime-*` base to ensure CUDA libraries are present for NVENC. The container auto-detects your NVIDIA driver at startup. CPU/VAAPI still work; NVENC will be disabled if driver is incompatible.
 
 ## Table of Contents
 * [Features](#features)

@@ -57,9 +57,9 @@ docker run --rm --gpus all -v /usr/lib/wsl/drivers:/usr/lib/wsl/drivers:ro \\
 ## Technical Details
 - **Hardware**: RTX 5070 Ti Laptop GPU (Blackwell architecture)
 - **Driver**: 581.80
-- **CUDA Version**: 13.0
+- **CUDA Version**: 13.0 (Host), 13.0.1 (Container for latest builds)
 - **OS**: Windows 11 with WSL2
-- **Container Base**: nvidia/cuda:12.8.0-runtime-ubuntu22.04
+- **Container Base**: nvidia/cuda:13.0.1-runtime-ubuntu22.04 (latest), nvidia/cuda:12.2.0-runtime-ubuntu22.04 (legacy)
 - **FFmpeg**: 8.0 with NVENC support
 
 ## Files Modified
@@ -79,3 +79,31 @@ Fixed after extensive debugging that identified:
 3. Missing DXG libraries causing cuInit failures
 
 The fix enables **full NVENC/NVDEC support** for RTX 50-series GPUs in Docker containers on Windows WSL2.
+
+---
+
+## Building Locally for RTX 50-Series (Optional)
+
+The Docker Hub **latest** image now includes sm_100 (Blackwell) architecture support using CUDA 13.0.1:
+
+```bash
+# The latest build from Docker Hub already has RTX 50-series support!
+docker pull jms1717/8mblocal:latest
+```
+
+If you want to build locally:
+
+```bash
+# Build with full RTX 50-series support (CUDA 13.0.1)
+docker build -t 8mblocal:rtx50 \
+  --build-arg CUDA_VERSION="13.0.1" \
+  --build-arg NVCC_ARCHS="100 90 89 86" \
+  --build-arg FFMPEG_VERSION="8.0" \
+  .
+```
+
+**Key Points**:
+- ✅ CUDA 13.0.1 supports sm_100 (Blackwell/RTX 50-series) compilation
+- ✅ Latest Docker Hub image includes sm_100 support by default
+- ✅ WSL2 driver mount + LD_PRELOAD makes NVENC work at runtime
+- ✅ Works with Driver 550+ (581.80 tested and working)
