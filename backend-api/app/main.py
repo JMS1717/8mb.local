@@ -80,16 +80,36 @@ async def _get_hw_info_fresh(timeout: int = 10) -> dict:
 
 
 def _ffprobe(input_path: Path) -> dict:
+    """Probe media file with ffprobe and return basic info.
+
+    Raises RuntimeError on failure. Callers that want to tolerate bad inputs
+    should catch and provide a safe fallback.
+    """
     cmd = [
         "ffprobe", "-v", "error",
+        # Keep probe fast and robust; duration + stream bitrates
         "-show_entries", "format=duration:stream=index,codec_type,bit_rate",
         "-of", "json",
         str(input_path)
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=get_gpu_env())
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=get_gpu_env(),
+        )
+    except Exception as e:
+        raise RuntimeError(f"ffprobe failed: {e}")
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr)
-    data = json.loads(proc.stdout)
+        # Surface concise error; common case: 'moov atom not found' for incomplete/corrupt mp4
+        err = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+        raise RuntimeError(err or "ffprobe returned non-zero exit code")
+    try:
+        data = json.loads(proc.stdout)
+    except Exception as e:
+        raise RuntimeError(f"ffprobe parse error: {e}")
     duration = float(data.get("format", {}).get("duration", 0.0))
     v_bitrate = None
     a_bitrate = None
@@ -297,8 +317,13 @@ async def upload(file: UploadFile = File(...), target_size_mb: float = 25.0, aud
                 raise HTTPException(status_code=413, detail=f"File too large. Max size: {MAX_FILE_SIZE // (1024*1024)}MB")
             out.write(chunk)
     
-    # ffprobe
-    info = _ffprobe(dest)
+    # ffprobe (tolerate failures gracefully so bad inputs don't crash API)
+    try:
+        info = _ffprobe(dest)
+    except Exception as e:
+        logger.warning(f"ffprobe failed for {dest.name}: {e}")
+        # Provide safe fallback values; UI will show a warning and allow manual run
+        info = {"duration": 0.0, "video_bitrate_kbps": None, "audio_bitrate_kbps": None}
     total_kbps, video_kbps, warn = _calc_bitrates(target_size_mb, info["duration"], audio_bitrate_kbps)
     return UploadResponse(
         job_id=job_id,
