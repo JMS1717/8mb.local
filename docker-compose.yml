@@ -1,10 +1,9 @@
 services:
   8mblocal:
-    # Choose the image tag for your driver:
-    # - latest (driver >= 550): jms1717/8mblocal:latest
-    # - legacy (535.x drivers): jms1717/8mblocal:legacy
-    # Using locally built image with RTX 50-series NVENC fix
-    image: 8mblocal:latest
+    # RTX 50-series (Blackwell): jms1717/8mblocal:rtx50-working (CUDA 13.0.1, driver 550+)
+    # Other NVIDIA GPUs: jms1717/8mblocal:latest (CUDA 12.2, driver 535+)
+    # See RTX50-WORKING.md for RTX 50-series setup requirements
+    image: jms1717/8mblocal:rtx50-working
     container_name: 8mblocal
     ports:
       - "8001:8001"

@@ -2,14 +2,20 @@
 
 8mb.local is a self‑hosted, fire‑and‑forget video compressor. Drop a file, choose a target size (e.g., 8MB, 25MB, 50MB, 100MB), and let GPU-accelerated encoding produce compact outputs with AV1/HEVC/H.264. Supports **NVIDIA NVENC**, **Intel/AMD VAAPI** (Linux), and **CPU fallback**. The stack includes a SvelteKit UI, FastAPI backend, Celery worker, Redis broker, and real‑time progress via Server‑Sent Events (SSE).
 
-> Note (Nov 2025): CUDA/Driver compatibility updated
+> Note (Nov 2025): RTX 50-Series (Blackwell) Support
 >
-> We now publish two Docker tags to support both new and legacy NVIDIA environments from the same codebase.
+> **RTX 50-Series Users (RTX 5090/5080/5070 Ti/etc.):**  
+> Use the verified working image: **`jms1717/8mblocal:rtx50-working`**  
+> See [RTX50-WORKING.md](RTX50-WORKING.md) for complete setup instructions.
 >
-> - `:latest` (Blackwell / 50‑series): CUDA 13.0.1 + FFmpeg 8.0, NVENC headers sdk/12.2. Minimum driver: 550.00
-> - `:legacy` (Turing/Ampere on 535.x): CUDA 12.2 + FFmpeg 6.1.1, NVENC headers sdk/12.0 (compat pin). Minimum driver: 535.54.03
+> **⚠️ CRITICAL:** RTX 50-series requires mounting the WSL driver directory:  
+> `-v /usr/lib/wsl/drivers:/usr/lib/wsl/drivers:ro`
 >
-> Both images use the `cuda:*-base-*` runtime to ensure CUDA libraries are present for NVENC. The container auto-detects your NVIDIA driver at startup and prints a clear warning if the tag doesn't match your host. CPU/VAAPI still work; NVENC will be disabled if incompatible.
+> **Other NVIDIA GPUs:**
+> - `:latest` - CUDA 12.2 + FFmpeg 6.1.1, driver 535.x+ (Turing/Ampere/Ada)
+> - Use `:rtx50-working` only for RTX 50-series (Blackwell/SM_100)
+>
+> The container auto-detects your NVIDIA driver at startup. CPU/VAAPI still work if NVENC is incompatible.
 
 ## Table of Contents
 * [Features](#features)
