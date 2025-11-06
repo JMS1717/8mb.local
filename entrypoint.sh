@@ -38,7 +38,11 @@ DRIVER_MIN=${DRIVER_MIN:-0}
 
 # Ensure common NVIDIA/CUDA library paths are globally available (esp. under WSL2)
 # Do this early so every child process inherits it (ffmpeg dlopen for NVENC/NVDEC)
-WSL_DRV_DIR=$(find /usr/lib/wsl/drivers -type d -name 'nvami.inf_*' 2>/dev/null | head -1)
+WSL_DRV_DIR=""
+if [ -d "/usr/lib/wsl/drivers" ]; then
+  # Find first matching WSL driver directory if present; avoid set -e failures when none exist
+  WSL_DRV_DIR=$(find /usr/lib/wsl/drivers -type d -name 'nvami.inf_*' -print -quit 2>/dev/null || true)
+fi
 if [ -n "$WSL_DRV_DIR" ] && [ -f "$WSL_DRV_DIR/libcuda.so.1.1" ]; then
     echo "Using WSL2 CUDA driver for RTX 50-series support: $WSL_DRV_DIR"
     
