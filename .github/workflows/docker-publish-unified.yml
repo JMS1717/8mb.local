@@ -53,3 +53,6 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: ${{ steps.taglist.outputs.tags }}
+          build-args: |
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_COMMIT=${{ github.sha }}
