@@ -29,6 +29,7 @@ jobs:
             cuda: "13.0.1"
             ffmpeg: "8.0"
             nvcodec: "sdk/12.2"
+            nvcodec_compat: ""
             nvcc_archs: "100 90 89 86 80 75"
             drivermin: "550.00"
             tagsuffix: latest
@@ -36,6 +37,7 @@ jobs:
             cuda: "12.2.0"
             ffmpeg: "6.1.1"
             nvcodec: "sdk/12.1"
+            nvcodec_compat: "sdk/12.0"
             nvcc_archs: "86 80 75 70"
             drivermin: "535.54.03"
             tagsuffix: legacy
@@ -97,5 +99,6 @@ jobs:
             UBUNTU_FLAVOR=ubuntu22.04
             FFMPEG_VERSION=${{ matrix.ffmpeg }}
             NV_CODEC_HEADERS_REF=${{ matrix.nvcodec }}
+            NV_CODEC_COMPAT=${{ matrix.nvcodec_compat }}
             NVCC_ARCHS=${{ matrix.nvcc_archs }}
             DRIVER_MIN=${{ matrix.drivermin }}
