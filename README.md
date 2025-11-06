@@ -6,8 +6,8 @@
 >
 > We now publish two Docker tags to support both new and legacy NVIDIA environments from the same codebase.
 >
-> - `:latest` (Blackwell / 50‑series): CUDA 12.8 + FFmpeg 7, NVENC headers sdk/12.2. Minimum driver: 550.00
-> - `:legacy` (Turing/Ampere on 535.x): CUDA 12.2 + FFmpeg 6.1.1, NVENC headers sdk/12.2. Minimum driver: 535.54.03
+> - `:latest` (Blackwell / 50‑series): CUDA 13.0.1 + FFmpeg 8.0, NVENC headers sdk/12.2. Minimum driver: 550.00
+> - `:legacy` (Turing/Ampere on 535.x): CUDA 12.2 + FFmpeg 6.1.1, NVENC headers sdk/12.0 (compat pin). Minimum driver: 535.54.03
 >
 > Both images use the `cuda:*-base-*` runtime to ensure CUDA libraries are present for NVENC. The container auto-detects your NVIDIA driver at startup and prints a clear warning if the tag doesn't match your host. CPU/VAAPI still work; NVENC will be disabled if incompatible.
 
@@ -106,7 +106,7 @@ flowchart LR
 Components
 - Frontend (SvelteKit + Vite): drag‑and‑drop UI, size estimates, SSE progress/logs, final download.
 - Backend API (FastAPI): accepts uploads, runs ffprobe, relays SSE, and serves downloads.
-- Worker (Celery + FFmpeg 6.1.1): executes compression with auto-detected hardware acceleration (NVENC/VAAPI/CPU); parses `ffmpeg -progress` and publishes updates.
+- Worker (Celery + FFmpeg 8.0 latest / 6.1.1 legacy): executes compression with auto-detected hardware acceleration (NVENC/VAAPI/CPU); parses `ffmpeg -progress` and publishes updates.
 - Redis (broker + pub/sub): Celery broker and transport for progress/log events.
 
 Data & files
@@ -256,6 +256,9 @@ The easiest way to run 8mb.local is with the pre-built Docker image. Choose the 
 
 - Use `jms1717/8mblocal:latest` if you have a newer GPU/driver (e.g., RTX 50‑series; driver 550+).
 - Use `jms1717/8mblocal:legacy` if your system is on driver 535.x (common on Debian 12 servers) or older GPUs.
+
+Aliases:
+- `jms1717/8mblocal:cuda13` points to the same image as `:latest` (CUDA 13.0.1 + FFmpeg 8.0).
 
 Check your driver:
 
@@ -425,11 +428,12 @@ cd 8mb.local
 docker build \
   --build-arg BUILD_VERSION=134 \
   --build-arg BUILD_FLAVOR=latest \
-  --build-arg CUDA_VERSION=12.8.0 \  # or 13.0.1
+  --build-arg CUDA_VERSION=13.0.1 \  # recommended for Blackwell; 12.8.0 also works
   --build-arg UBUNTU_FLAVOR=ubuntu22.04 \
   --build-arg FFMPEG_VERSION=8.0 \
   --build-arg NV_CODEC_HEADERS_REF=sdk/12.2 \  # for Blackwell consider sdk/12.4+
   --build-arg NV_CODEC_COMPAT=sdk/12.2 \
+  --build-arg ENABLE_LIBNPP=false \  # CUDA 13: libnpp optional; disable to avoid API changes
   --build-arg DRIVER_MIN=550.00 \
   -t jms1717/8mblocal:latest .
 ```
@@ -457,11 +461,13 @@ docker build \
 - `NV_CODEC_HEADERS_REF`: NVENC headers git branch/tag from [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) (reference only, not used if NV_CODEC_COMPAT set)
 - `NV_CODEC_COMPAT`: Override headers version (sdk/12.0 for FFmpeg 6.x, omit or match REF for FFmpeg 8+)
 - `DRIVER_MIN`: Minimum NVIDIA driver version required
+ - `ENABLE_LIBNPP`: Enable FFmpeg `--enable-libnpp` (true/false). For CUDA 13, set to `false` due to NPP API changes (_Ctx variants); optional for legacy.
+ - `NVCC_ARCHS`: Space-separated SM architectures for nvcc (e.g., `"80 86 90"`). For CUDA 13 configure checks, the first SM is used as `-arch=sm_<FIRST>` to avoid nvcc multi-arch `-ptx` restriction.
 
 **Why two build variants?**
 - **FFmpeg 6.1.1 is incompatible with NVENC SDK 12.1+** due to removed API fields (`pixelBitDepthMinus8`, `NV_ENC_BUFFER_FORMAT_*_PL`)
 - Legacy builds use `NV_CODEC_COMPAT=sdk/12.0` to checkout the older SDK 12.0 headers that FFmpeg 6.x can compile against
-- Latest builds use FFmpeg 8.0 which is fully compatible with newer SDKs and adds official Blackwell support
+- Latest builds use FFmpeg 8.0 which is fully compatible with newer SDKs and adds official Blackwell support (CUDA 13.0.1). If you enable `libnpp`, ensure you also ship NPP libs in runtime.
 
 3. Run:
 ```bash
