@@ -75,7 +75,12 @@ def _redis() -> Redis:
 
 def _publish(task_id: str, event: Dict):
     event.setdefault("task_id", task_id)
-    _redis().publish(f"progress:{task_id}", json.dumps(event))
+    try:
+        _redis().publish(f"progress:{task_id}", json.dumps(event))
+    except Exception as e:
+        # Log the error but do not crash the worker task.
+        # The compression can continue; only the real-time update is lost for this event.
+        logger.warning(f"Failed to publish progress to Redis for task {task_id}: {e}")
 
 
 def _is_cancelled(task_id: str) -> bool:

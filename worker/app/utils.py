@@ -4,6 +4,11 @@ from typing import Optional
 from .gpu_env import get_gpu_env
 
 
+class FFprobeError(Exception):
+    """Custom exception for ffprobe failures."""
+    pass
+
+
 def ffprobe_info(input_path: str) -> dict:
     cmd = [
         "ffprobe", "-v", "error",
@@ -11,10 +16,24 @@ def ffprobe_info(input_path: str) -> dict:
         "-of", "json",
         input_path,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=get_gpu_env())
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr)
-    data = json.loads(proc.stdout)
+    try:
+        proc = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            env=get_gpu_env(),
+            timeout=30  # Add 30-second timeout
+        )
+        if proc.returncode != 0:
+            raise FFprobeError(f"ffprobe failed with code {proc.returncode}: {proc.stderr}")
+        data = json.loads(proc.stdout)
+    except subprocess.TimeoutExpired:
+        raise FFprobeError("ffprobe timed out after 30 seconds.")
+    except json.JSONDecodeError:
+        raise FFprobeError("ffprobe returned invalid JSON.")
+    except Exception as e:
+        raise FFprobeError(f"An unexpected error occurred during ffprobe execution: {e}")
+    
     duration = float(data.get("format", {}).get("duration", 0.0))
     v_bitrate = None
     a_bitrate = None

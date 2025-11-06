@@ -50,25 +50,27 @@ HW_INFO_CACHE: dict | None = None
 SYSTEM_CAPS_CACHE: dict | None = None
 
 
-def _get_hw_info_cached() -> dict:
+async def _get_hw_info_cached() -> dict:
     """Get hardware info from cache or compute once via worker."""
     global HW_INFO_CACHE
     if HW_INFO_CACHE is not None:
         return HW_INFO_CACHE
     try:
         result = celery_app.send_task("worker.worker.get_hardware_info")
-        HW_INFO_CACHE = result.get(timeout=5) or {"type": "cpu", "available_encoders": {}}
+        # Run blocking call in separate thread to avoid blocking event loop
+        HW_INFO_CACHE = await asyncio.to_thread(result.get, timeout=5) or {"type": "cpu", "available_encoders": {}}
     except Exception:
         HW_INFO_CACHE = {"type": "cpu", "available_encoders": {}}
     return HW_INFO_CACHE
 
 
-def _get_hw_info_fresh(timeout: int = 10) -> dict:
+async def _get_hw_info_fresh(timeout: int = 10) -> dict:
     """Force-refresh hardware info from worker, updating cache if successful."""
     global HW_INFO_CACHE
     try:
         result = celery_app.send_task("worker.worker.get_hardware_info")
-        info = result.get(timeout=timeout) or {"type": "cpu", "available_encoders": {}}
+        # Run blocking call in separate thread to avoid blocking event loop
+        info = await asyncio.to_thread(result.get, timeout=timeout) or {"type": "cpu", "available_encoders": {}}
         # Update cache with fresh info
         HW_INFO_CACHE = info
         return info
@@ -167,9 +169,24 @@ def _get_system_capabilities() -> dict:
 
 @app.on_event("startup")
 async def on_startup():
+    """Consolidated startup event handler - prevents duplicate scheduler initialization."""
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize environment variables if missing
+    settings_manager.initialize_env_if_missing()
+    
+    # Start cleanup scheduler ONCE
     start_scheduler()
+    
+    # Initialize hardware and system capabilities cache once
+    try:
+        _ = await _get_hw_info_cached()
+        # Warm system capabilities cache
+        _ = await system_capabilities()
+    except Exception:
+        pass
+    
     # Kick off background sync to apply codec visibility settings from worker startup tests
     try:
         # Record a new boot id on each API start so the UI can detect "first boot"
@@ -201,7 +218,7 @@ async def _sync_codec_settings_from_tests(timeout_s: int = 60):
         while time.time() < deadline:
             try:
                 # Force refresh to avoid stale CPU cache on early startup
-                hw_info = _get_hw_info_fresh(timeout=5) or {}
+                hw_info = await _get_hw_info_fresh(timeout=5) or {}
                 avail = hw_info.get("available_encoders", {}) or {}
                 if avail:  # Got concrete encoders like h264_nvenc, etc.
                     break
@@ -260,8 +277,15 @@ async def upload(file: UploadFile = File(...), target_size_mb: float = 25.0, aud
     # File size limit to prevent OOM (default 50GB)
     MAX_FILE_SIZE = int(os.getenv("MAX_UPLOAD_SIZE_MB", "51200")) * 1024 * 1024
     
+    # Sanitize the filename to remove any path components
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename cannot be empty.")
+    base_filename = Path(file.filename).name
+    if not base_filename:
+        raise HTTPException(status_code=400, detail="Filename cannot be empty.")
+    
     job_id = str(uuid.uuid4())
-    dest = UPLOADS_DIR / f"{job_id}_{file.filename}"
+    dest = UPLOADS_DIR / f"{job_id}_{base_filename}"
     
     # Save file with size check
     total_size = 0
@@ -314,7 +338,19 @@ async def startup_info():
 
 @app.post("/api/compress", dependencies=[Depends(basic_auth)])
 async def compress(req: CompressRequest):
-    input_path = UPLOADS_DIR / req.filename
+    # Sanitize and validate the path to prevent path traversal attacks
+    user_path = Path(req.filename)
+    if user_path.is_absolute() or ".." in user_path.parts:
+        raise HTTPException(status_code=400, detail="Invalid filename: path traversal detected.")
+    
+    input_path = (UPLOADS_DIR / user_path).resolve()
+    
+    # Ensure the resolved path is still inside UPLOADS_DIR
+    try:
+        input_path.relative_to(UPLOADS_DIR.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid filename: path traversal detected.")
+    
     if not input_path.exists():
         raise HTTPException(status_code=404, detail="Input not found")
     ext = ".mp4" if req.container == "mp4" else ".mkv"
@@ -771,7 +807,7 @@ async def api_version():
 async def get_hardware_info():
     """Get available hardware acceleration info from worker."""
     # Serve cached hardware info (computed once)
-    return _get_hw_info_cached()
+    return await _get_hw_info_cached()
 
 
 @app.get("/api/codecs/available")
@@ -779,7 +815,7 @@ async def get_available_codecs() -> AvailableCodecsResponse:
     """Get available codecs based on hardware detection, user settings, and encoder tests."""
     try:
         # Use cached hardware info
-        hw_info = _get_hw_info_cached()
+        hw_info = await _get_hw_info_cached()
 
         # Get user codec visibility settings
         codec_settings = settings_manager.get_codec_visibility_settings()
@@ -838,7 +874,7 @@ async def system_capabilities():
     global SYSTEM_CAPS_CACHE
     if SYSTEM_CAPS_CACHE is None:
         caps = _get_system_capabilities()
-        caps["hardware"] = _get_hw_info_cached()
+        caps["hardware"] = await _get_hw_info_cached()
         SYSTEM_CAPS_CACHE = caps
     return SYSTEM_CAPS_CACHE
 
@@ -850,7 +886,7 @@ async def system_encoder_tests():
     Reads cached results from Redis written by the worker at startup.
     """
     try:
-        hw_info = _get_hw_info_cached()
+        hw_info = await _get_hw_info_cached()
     except Exception:
         hw_info = {"type": "cpu", "available_encoders": {}}
 
@@ -1239,21 +1275,6 @@ async def delete_history_entry(task_id: str, _auth=Depends(basic_auth)):
         return {"status": "success"}
     else:
         raise HTTPException(status_code=404, detail="History entry not found")
-
-
-# Initialize .env file on startup if it doesn't exist
-@app.on_event("startup")
-async def startup_event():
-    settings_manager.initialize_env_if_missing()
-    # Start cleanup scheduler
-    start_scheduler()
-    # Initialize hardware and system capabilities cache once
-    try:
-        _ = _get_hw_info_cached()
-        # Warm system capabilities cache
-        _ = system_capabilities  # function ref to avoid linter warning
-    except Exception:
-        pass
 
 
 # Size buttons settings

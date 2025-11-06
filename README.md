@@ -122,6 +122,20 @@ Data & files
 - `BACKEND_PORT` - Backend port (default: 8001)
 - `PUBLIC_BACKEND_URL` - Frontend API endpoint; leave unset to use same‑origin (recommended)
 
+### File Retention & Automatic Cleanup
+The application includes an automatic cleanup service to prevent disk space from filling up with old files:
+- **`FILE_RETENTION_HOURS`**: Sets the minimum age of a file before it is eligible for deletion. Defaults to `1` hour.
+- **Affected Directories**: The cleanup task runs on both the `/app/uploads` (input files) and `/app/outputs` (compressed results) directories inside the container.
+- **Schedule**: The cleanup task runs automatically every 15 minutes.
+- **Configuration**: You can adjust the retention period via the `.env` file, environment variables, or the Settings UI (which persists to `settings.json`).
+
+Example:
+```env
+FILE_RETENTION_HOURS=24  # Keep files for 24 hours before cleanup
+```
+
+**Important**: Set this value based on your expected workflow. If you need to keep files longer for download later, increase the retention hours accordingly.
+
 ### Codec Visibility Settings
 Control which codecs appear in the UI via environment variables or the Settings page:
 - `CODEC_H264_NVENC`, `CODEC_HEVC_NVENC`, `CODEC_AV1_NVENC` - NVIDIA encoders

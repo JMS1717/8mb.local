@@ -14,15 +14,15 @@ class UploadResponse(BaseModel):
 class CompressRequest(BaseModel):
     job_id: str
     filename: str
-    target_size_mb: float
+    target_size_mb: float = Field(gt=0, description="Target size in MB must be greater than 0")
     video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1','h264_qsv','hevc_qsv','av1_qsv','h264_vaapi','hevc_vaapi','av1_vaapi'] = 'av1_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
-    audio_bitrate_kbps: int = 128
+    audio_bitrate_kbps: int = Field(default=128, gt=0, le=512, description="Audio bitrate in kbps (1-512)")
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
     container: Literal['mp4','mkv'] = 'mp4'
     tune: Literal['hq','ll','ull','lossless'] = 'hq'
-    max_width: Optional[int] = None
-    max_height: Optional[int] = None
+    max_width: Optional[int] = Field(default=None, gt=0, description="Max width must be positive if specified")
+    max_height: Optional[int] = Field(default=None, gt=0, description="Max height must be positive if specified")
     start_time: Optional[str] = None  # Format: seconds (float) or "HH:MM:SS"
     end_time: Optional[str] = None    # Format: seconds (float) or "HH:MM:SS"
     # Prefer attempting GPU decoding (when available). Worker will still fall back if unsupported.
@@ -57,7 +57,7 @@ class PasswordChange(BaseModel):
     new_password: str
 
 class DefaultPresets(BaseModel):
-    target_mb: float = 25
+    target_mb: float = Field(default=25, gt=0, description="Target size in MB must be greater than 0")
     video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1','h264_qsv','hevc_qsv','av1_qsv','h264_vaapi','hevc_vaapi','av1_vaapi'] = 'av1_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
@@ -94,7 +94,7 @@ class CodecVisibilitySettings(BaseModel):
 
 class PresetProfile(BaseModel):
     name: str
-    target_mb: float
+    target_mb: float = Field(gt=0, description="Target size in MB must be greater than 0")
     video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1','h264_qsv','hevc_qsv','av1_qsv','h264_vaapi','hevc_vaapi','av1_vaapi']
     audio_codec: Literal['libopus','aac','none']
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality']

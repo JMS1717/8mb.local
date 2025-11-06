@@ -1,11 +1,14 @@
 import asyncio
 import os
 import time
+import logging
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .config import settings
 from . import settings_manager
+
+logger = logging.getLogger(__name__)
 
 UPLOADS_DIR = "/app/uploads"
 OUTPUTS_DIR = "/app/outputs"
@@ -27,7 +30,9 @@ async def cleanup_files():
                 st = os.stat(path)
                 if st.st_mtime < cutoff_ts:
                     os.remove(path)
-            except Exception:
+            except Exception as e:
+                # Log the error with context instead of ignoring it
+                logger.error(f"Failed to clean up file '{path}': {e}")
                 continue
 
 
