@@ -17,14 +17,14 @@ jobs:
         include:
           - flavor: latest
             cuda: "12.8.0"
-            ffmpeg: "7.0"
+            ffmpeg: "8.0"
             nvcodec: "sdk/12.2"
             drivermin: "550.00"
             tagsuffix: latest
           - flavor: legacy
             cuda: "12.2.0"
             ffmpeg: "6.1.1"
-            nvcodec: "sdk/12.2"
+            nvcodec: "sdk/12.1"
             drivermin: "535.54.03"
             tagsuffix: legacy
 

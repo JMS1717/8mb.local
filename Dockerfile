@@ -98,14 +98,20 @@ RUN wget -q https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
                     || (echo "FFmpeg configure failed; dumping ffbuild/config.log:" && cat ffbuild/config.log && exit 1); \
             else \
                 echo "Using FFmpeg 6.x configuration with --enable-cuda-nvcc" && \
+                echo "NVCC_PATH=$NVCC_PATH" && \
+                echo "NVCC_FLAGS=$NVCC_FLAGS" && \
+                echo "NPP_FLAG=$NPP_FLAG" && \
                 ./configure \
                     --enable-nonfree --enable-gpl \
-                    --enable-cuda-nvcc --nvcc="$NVCC_PATH" --nvccflags="$NVCC_FLAGS" ${NPP_FLAG} \
-                    --enable-nvenc --enable-nvdec --enable-cuvid \
+                    --enable-cuda --enable-cuda-nvcc --enable-cuvid \
+                    --enable-nvenc --enable-nvdec \
                     --enable-vaapi \
                     --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus --enable-libaom --enable-libdav1d \
-                    --extra-cflags=-I/usr/local/cuda/include \
-                    --extra-ldflags=-L/usr/local/cuda/lib64 \
+                    --nvcc="$NVCC_PATH" \
+                    --nvccflags="$NVCC_FLAGS" \
+                    ${NPP_FLAG} \
+                    --extra-cflags="-I/usr/local/cuda/include" \
+                    --extra-ldflags="-L/usr/local/cuda/lib64" \
                     --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages \
                     || (echo "FFmpeg configure failed; dumping ffbuild/config.log:" && cat ffbuild/config.log && exit 1); \
             fi && \
