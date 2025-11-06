@@ -33,9 +33,10 @@ ARG FFMPEG_VERSION
 ARG NV_CODEC_HEADERS_REF
 ARG NV_CODEC_COMPAT
 ARG USE_CUDA_13
-# Default to Blackwell-first so CUDA 13 builds target SM_100 by default.
-# You can override at build time with: --build-arg NVCC_ARCHS="86 80 90 100" (for Ada/Ampere focus)
-ARG NVCC_ARCHS="100 90 86 80"
+# Default to widely-compatible architectures (Ada/Ampere/Turing/Volta)
+# For RTX 50-series builds, override with: --build-arg NVCC_ARCHS="90 89 86 80"
+# Architecture guide: 90=Hopper(H100), 89=Ada(RTX4090), 86=Ampere(RTX30xx), 80=Ampere(A100), 75=Turing(RTX20xx), 70=Volta(V100)
+ARG NVCC_ARCHS="89 86 80 75"
 ARG ENABLE_LIBNPP=true
 
 ENV DEBIAN_FRONTEND=noninteractive
