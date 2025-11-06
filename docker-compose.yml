@@ -1,9 +1,9 @@
 services:
   8mblocal:
-    # Choose the image tag for your driver:
-    # - latest (driver >= 550): jms1717/8mblocal:latest
-    # - legacy (535.x drivers): jms1717/8mblocal:legacy
-    # Using locally built image with RTX 50-series NVENC fix
+    # Primary image for Linux/Debian with driver 535.x
+    # Use jms1717/8mblocal:latest for production
+    # For Windows/WSL2 with RTX 50-series: jms1717/8mblocal:cuda13
+    # Using locally built image
     image: 8mblocal:latest
     container_name: 8mblocal
     ports:

@@ -4,10 +4,14 @@
 
 8mb.local supports hardware-accelerated video encoding across multiple GPU vendors and automatically detects the best available option at runtime:
 
-1. **NVIDIA NVENC** (CUDA-based)
+1. **NVIDIA NVENC** (CUDA-based) — Primary target: Linux/Debian with driver 535.x
 2. **Intel Quick Sync Video (QSV)**
 3. **AMD AMF** (Windows) / **VAAPI** (Linux)
 4. **CPU fallback** (software encoding)
+
+**Development Focus:** This project is optimized for **Linux/Debian production servers** with NVIDIA driver 535.x and Turing/Ampere/Ada GPUs (GTX 16xx, RTX 20/30/40 series, Quadro RTX).
+
+A one-time `cuda13` variant is available for Windows/WSL2 with RTX 50-series (Blackwell) GPUs and driver 550+, but is not actively maintained.
 
 ## Hardware Detection
 

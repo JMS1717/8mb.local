@@ -12,7 +12,7 @@ on:
         type: choice
         options:
           - latest
-          - legacy
+          - cuda13
           - both
 
 jobs:
@@ -26,21 +26,21 @@ jobs:
       matrix:
         include:
           - flavor: latest
-            cuda: "13.0.1"
-            ffmpeg: "8.0"
-            nvcodec: "sdk/12.2"
-            nvcodec_compat: ""
-            nvcc_archs: "100 90 89 86 80 75"
-            drivermin: "550.00"
-            tagsuffix: latest
-          - flavor: legacy
             cuda: "12.2.0"
             ffmpeg: "6.1.1"
             nvcodec: "sdk/12.1"
             nvcodec_compat: "sdk/12.0"
             nvcc_archs: "86 80 75 70"
             drivermin: "535.54.03"
-            tagsuffix: legacy
+            tagsuffix: latest
+          - flavor: cuda13
+            cuda: "13.0.1"
+            ffmpeg: "8.0"
+            nvcodec: "sdk/12.2"
+            nvcodec_compat: ""
+            nvcc_archs: "100 90 89 86 80 75"
+            drivermin: "550.00"
+            tagsuffix: cuda13
 
     steps:
       - name: Check if build should run

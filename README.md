@@ -2,12 +2,12 @@
 
 8mb.local is a self‑hosted, fire‑and‑forget video compressor. Drop a file, choose a target size (e.g., 8MB, 25MB, 50MB, 100MB), and let GPU-accelerated encoding produce compact outputs with AV1/HEVC/H.264. Supports **NVIDIA NVENC**, **Intel/AMD VAAPI** (Linux), and **CPU fallback**. The stack includes a SvelteKit UI, FastAPI backend, Celery worker, Redis broker, and real‑time progress via Server‑Sent Events (SSE).
 
-> Note (Nov 2025): CUDA/Driver compatibility updated
+> **Primary Target (Nov 2025): Linux/Debian with NVIDIA driver 535.x**
 >
-> We now publish two Docker tags to support both new and legacy NVIDIA environments from the same codebase.
+> We focus development on **Linux (Debian/Ubuntu) with NVIDIA driver 535.x** and provide two Docker tags:
 >
-> - `:latest` (Blackwell / RTX 50‑series): CUDA 13.0.1 + FFmpeg 8.0, NVENC headers sdk/12.2, sm_100 support. Minimum driver: 550.00
-> - `:legacy` (Turing/Ampere on 535.x): CUDA 12.2 + FFmpeg 6.1.1, NVENC headers sdk/12.1. Minimum driver: 535.54.03
+> - **`:latest`** (Primary, Linux-focused): CUDA 12.2 + FFmpeg 6.1.1, NVENC headers sdk/12.0, for Turing/Ampere/Ada GPUs. Minimum driver: 535.54.03. Optimized for Debian/Ubuntu production servers.
+> - **`:cuda13`** (One-time build, Windows/WSL2): CUDA 13.0.1 + FFmpeg 8.0, NVENC headers sdk/12.2, sm_100 support for Blackwell/RTX 50-series on Windows/WSL2. Minimum driver: 550.00. This variant is provided as-is for newer GPUs on Windows and is not actively maintained.
 >
 > Both images use the `cuda:*-runtime-*` base to ensure CUDA libraries are present for NVENC. The container auto-detects your NVIDIA driver at startup. CPU/VAAPI still work; NVENC will be disabled if driver is incompatible.
 
@@ -268,11 +268,13 @@ The easiest way to run 8mb.local is with the pre-built Docker image. Choose the 
 
 ### Which tag should I use?
 
-- Use `jms1717/8mblocal:latest` if you have a newer GPU/driver (e.g., RTX 50‑series; driver 550+).
-- Use `jms1717/8mblocal:legacy` if your system is on driver 535.x (common on Debian 12 servers) or older GPUs.
+**Primary production tag:** `jms1717/8mblocal:latest` (CUDA 12.2, FFmpeg 6.1.1, driver 535.x+)
 
-Aliases:
-- `jms1717/8mblocal:cuda13` points to the same image as `:latest` (CUDA 13.0.1 + FFmpeg 8.0).
+This is the recommended image for **Linux/Debian production servers** with NVIDIA driver 535.x or newer. It supports Turing, Ampere, and Ada GPUs (GTX 16xx, RTX 20/30/40 series, Quadro RTX, etc.).
+
+**Windows/WSL2 with RTX 50-series:** Use `jms1717/8mblocal:cuda13` (CUDA 13.0.1, FFmpeg 8.0, driver 550+)
+
+This one-time build is provided for Blackwell/RTX 50-series GPUs on Windows/WSL2 and requires driver 550.00+. It is not actively maintained and may not receive updates.
 
 Check your driver:
 
@@ -280,8 +282,8 @@ Check your driver:
 nvidia-smi | head -n1  # Look for Driver Version: X.YY
 ```
 
-- If Driver >= 550.00 → use `:latest`
-- If Driver >= 535.54.03 and < 550 → use `:legacy`
+- **Linux/Debian production (driver 535.x+)** → use `:latest`
+- **Windows/WSL2 with RTX 50-series (driver 550+)** → use `:cuda13`
 
 If you run the wrong tag, the container will warn on startup with guidance to switch tags.
 
@@ -290,13 +292,14 @@ If you run the wrong tag, the container will warn on startup with guidance to sw
 docker run -d --name 8mblocal -p 8001:8001 -v ./uploads:/app/uploads -v ./outputs:/app/outputs jms1717/8mblocal:latest
 ```
 
-#### NVIDIA GPU (NVENC) — latest (driver 550+)
+#### NVIDIA GPU (NVENC) — Linux/Debian (driver 535.x+)
 ```bash
 docker run -d --name 8mblocal --gpus all -e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility -p 8001:8001 -v ./uploads:/app/uploads -v ./outputs:/app/outputs jms1717/8mblocal:latest
 ```
-#### NVIDIA GPU (NVENC) — legacy (driver 535.x)
+
+#### NVIDIA GPU (NVENC) — Windows/WSL2 with RTX 50-series (driver 550+)
 ```bash
-docker run -d --name 8mblocal --gpus all -e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility -p 8001:8001 -v ./uploads:/app/uploads -v ./outputs:/app/outputs jms1717/8mblocal:legacy
+docker run -d --name 8mblocal --gpus all -e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility -p 8001:8001 -v ./uploads:/app/uploads -v ./outputs:/app/outputs jms1717/8mblocal:cuda13
 ```
 > **Note**: The `-e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility` environment variable is **required** to enable NVENC support. It tells the NVIDIA Container Toolkit to mount video encoding libraries into the container.
 
