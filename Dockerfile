@@ -1,12 +1,12 @@
 # Multi-stage unified 8mb.local container
 # Build-time args let us produce multiple variants from one Dockerfile
-ARG CUDA_VERSION=13.0.1
+ARG CUDA_VERSION=12.2.0
 ARG UBUNTU_FLAVOR=ubuntu22.04
-ARG FFMPEG_VERSION=8.0
-ARG NV_CODEC_HEADERS_REF=sdk/12.2
+ARG FFMPEG_VERSION=6.1.1
+ARG NV_CODEC_HEADERS_REF=sdk/12.1
 ARG BUILD_FLAVOR=latest
-ARG DRIVER_MIN=550.00
-ARG NV_CODEC_COMPAT=
+ARG DRIVER_MIN=535.54.03
+ARG NV_CODEC_COMPAT=sdk/12.0
 ARG USE_CUDA_13=false
 
 # Stage 0: CUDA 13 base (if needed) - manually install CUDA 13 toolkit
@@ -33,9 +33,9 @@ ARG FFMPEG_VERSION
 ARG NV_CODEC_HEADERS_REF
 ARG NV_CODEC_COMPAT
 ARG USE_CUDA_13=false
-# Default to RTX 50-series and recent architectures (Blackwell/Hopper/Ada/Ampere/Turing/Volta)
-# For RTX 50-series: sm_100, Hopper: sm_90, Ada: sm_89, Ampere: sm_86/80, Turing: sm_75, Volta: sm_70
-ARG NVCC_ARCHS="100 90 89 86 80 75"
+# Default to Linux production (Turing/Ampere/Ada): sm_86/80/75/70
+# Windows/WSL2 Blackwell build (cuda13) overrides via build args
+ARG NVCC_ARCHS="86 80 75 70"
 ARG ENABLE_LIBNPP=true
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -185,9 +185,12 @@ COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg-build /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 # Copy CUDA wrapper library for RTX 50-series CUDA 13 support
 COPY --from=ffmpeg-build /usr/local/lib/libcuda_stubs.so /usr/local/lib/libcuda_stubs.so
-# Install CUDA 12.8 forward compatibility package for RTX 50-series / CUDA 13 support
-# This provides libcuda.so from driver 570 which supports CUDA 13 hardware on the host
-RUN apt-get update && apt-get install -y cuda-compat-12-8 && rm -rf /var/lib/apt/lists/*
+# Install CUDA forward-compat package only for cuda13 flavor (Windows/WSL2 newer GPUs)
+RUN if [ "${BUILD_FLAVOR}" = "cuda13" ]; then \
+            apt-get update && apt-get install -y cuda-compat-12-8 && rm -rf /var/lib/apt/lists/*; \
+        else \
+            echo "Skipping cuda-compat for flavor ${BUILD_FLAVOR}"; \
+        fi
 # Copy FFmpeg libraries
 COPY --from=ffmpeg-build /usr/local/lib/libavcodec.so* /usr/local/lib/
 COPY --from=ffmpeg-build /usr/local/lib/libavformat.so* /usr/local/lib/
@@ -257,6 +260,14 @@ COPY entrypoint.sh /app/entrypoint.sh
 RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 EXPOSE 8001
+
+# Helpful labels
+LABEL org.opencontainers.image.title="8mb.local"
+LABEL org.opencontainers.image.description="Self-hosted GPU video compressor (unified container)"
+LABEL org.opencontainers.image.version=${APP_VERSION}
+LABEL org.opencontainers.image.vendor="JMS1717"
+LABEL org.opencontainers.image.url="https://github.com/JMS1717/8mb.local"
+LABEL org.opencontainers.image.ref.name=${BUILD_FLAVOR}
 
 ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
