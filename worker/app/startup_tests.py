@@ -137,6 +137,13 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
         test_duration = os.getenv("ENCODER_TEST_DURATION", "1")
         cmd.extend([
             "-f", "lavfi", "-i", f"color=black:s={test_size}:d={test_duration}",
+        ])
+        # NVENC encoders are picky about input pixel formats; enforce yuv420p
+        if encoder_name.endswith("_nvenc"):
+            cmd.extend(["-pix_fmt", "yuv420p"])  # widely supported for H.264/HEVC/AV1 NVENC
+            # Provide a reasonable default preset to avoid driver-specific defaults
+            cmd.extend(["-preset", "p4"])  # balanced
+        cmd.extend([
             "-c:v", encoder_name,
             "-t", test_duration,
             "-frames:v", "3",  # Encode a few frames to be sure
@@ -162,6 +169,11 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
         if "unknown encoder" in stderr_lower:
             return False, "Unknown encoder"
         if "could not open" in stderr_lower and encoder_name in stderr_lower:
+            # Try to surface common NVENC issues more clearly
+            if "not supported" in stderr_lower or "unsupported" in stderr_lower:
+                return False, "Driver doesn't support encoder"
+            if "pix_fmt" in stderr_lower or "pixel format" in stderr_lower:
+                return False, "Unsupported pixel format"
             return False, "Could not open encoder"
         if "no nvenc capable devices found" in stderr_lower:
             return False, "No NVENC device"
