@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -o errtrace
+
+# Diagnostic trap so silent failures surface in docker logs
+trap 'code=$?; echo "[ENTRYPOINT ERROR] Command \"$BASH_COMMAND\" failed (exit $code) at line $LINENO" >&2; exit $code' ERR
+
+echo "== 8mblocal entrypoint starting (flavor=${BUILD_FLAVOR:-unset}) =="
 
 # Simple dotted version compare: returns 0 if $1 >= $2
 ver_ge() {
@@ -99,14 +105,20 @@ else
     fi
   fi
   if [[ -n "${DRIVER_MIN}" ]]; then
-    if ! ver_ge "${DRV}" "${DRIVER_MIN}"; then
-      warn "Your NVIDIA driver (${DRV}) is below the minimum (${DRIVER_MIN}) expected for this image."
-      if [[ "${FLAVOR}" == "latest" ]]; then
-        err  "This :latest image targets newer GPUs/drivers. Please use the :legacy tag on older drivers (e.g., 535.x)."
-      else
-        warn "This :legacy image is intended for older drivers. If you're on a 50-series (Blackwell) GPU, use :latest."
+      if ! ver_ge "${DRV}" "${DRIVER_MIN}"; then
+        warn "Your NVIDIA driver (${DRV}) is below the minimum (${DRIVER_MIN}) expected for this image."
+        case "${FLAVOR}" in
+          cuda13)
+            err "This :cuda13 image targets newer GPUs/drivers (Blackwell / driver 550+). Please use :latest on 535.x drivers."
+            ;;
+          latest)
+            warn "Unexpected: :latest min driver should be 535.x. Continuing in degraded (CPU) mode."
+            ;;
+          *)
+            warn "Unknown flavor ${FLAVOR}; continuing."
+            ;;
+        esac
       fi
-    fi
   fi
 fi
 
@@ -117,11 +129,14 @@ if command -v ffmpeg >/dev/null 2>&1; then
   if ! echo "$ENC_OUT" | grep -qiE "(_nvenc)"; then
     warn "NVENC encoders not listed by ffmpeg."
     warn "If you expected NVIDIA acceleration: ensure Docker runs with --gpus all and NVIDIA_DRIVER_CAPABILITIES=compute,video,utility."
-    if [[ "${FLAVOR}" == "legacy" ]]; then
-      warn "If you are on RTX 50-series (Blackwell), this legacy image may fail NV runtime init. Use :latest instead."
-    elif [[ "${FLAVOR}" == "latest" ]]; then
-      warn "If your host driver is older (e.g., 535.x), this latest image may be incompatible. Use :legacy instead."
-    fi
+    case "${FLAVOR}" in
+      latest)
+        warn "If you're on RTX 50-series with driver 550+, consider :cuda13 for CUDA 13 / FFmpeg 8."
+        ;;
+      cuda13)
+        warn "If your host driver is 535.x, use :latest instead (this image expects 550+)."
+        ;;
+    esac
   fi
 fi
 
