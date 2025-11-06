@@ -10,29 +10,52 @@ class FFprobeError(Exception):
 
 
 def ffprobe_info(input_path: str) -> dict:
-    cmd = [
+    base_cmd = [
         "ffprobe", "-v", "error",
         "-show_entries", "format=duration:stream=index,codec_type,codec_name,bit_rate",
         "-of", "json",
-        input_path,
     ]
+
+    def _run(cmd: list[str]) -> dict:
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=get_gpu_env(),
+                timeout=30,
+            )
+            if proc.returncode != 0:
+                raise FFprobeError(proc.stderr.strip() or proc.stdout.strip() or f"ffprobe failed with code {proc.returncode}")
+            return json.loads(proc.stdout)
+        except subprocess.TimeoutExpired:
+            raise FFprobeError("ffprobe timed out after 30 seconds.")
+        except json.JSONDecodeError:
+            raise FFprobeError("ffprobe returned invalid JSON.")
+        except FFprobeError:
+            raise
+        except Exception as e:
+            raise FFprobeError(f"An unexpected error occurred during ffprobe execution: {e}")
+
+    # Attempt 1: fast probe
     try:
-        proc = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
-            env=get_gpu_env(),
-            timeout=30  # Add 30-second timeout
-        )
-        if proc.returncode != 0:
-            raise FFprobeError(f"ffprobe failed with code {proc.returncode}: {proc.stderr}")
-        data = json.loads(proc.stdout)
-    except subprocess.TimeoutExpired:
-        raise FFprobeError("ffprobe timed out after 30 seconds.")
-    except json.JSONDecodeError:
-        raise FFprobeError("ffprobe returned invalid JSON.")
-    except Exception as e:
-        raise FFprobeError(f"An unexpected error occurred during ffprobe execution: {e}")
+        data = _run([*base_cmd, input_path])
+    except FFprobeError as e1:
+        msg = str(e1).lower()
+        # Attempt 2: robust probe for fragmented/slow-to-parse files
+        robust_cmd = [
+            *base_cmd,
+            "-probesize", "100M",
+            "-analyzeduration", "100M",
+            # tolerate slow filesystems
+            "-rw_timeout", "5000000",
+            input_path,
+        ]
+        try:
+            data = _run(robust_cmd)
+        except FFprobeError as e2:
+            # Surface the second error but include that a retry was attempted
+            raise FFprobeError(f"ffprobe failed after retry: {e2}") from e2
     
     duration = float(data.get("format", {}).get("duration", 0.0))
     v_bitrate = None

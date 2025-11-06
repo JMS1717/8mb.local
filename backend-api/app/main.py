@@ -85,31 +85,44 @@ def _ffprobe(input_path: Path) -> dict:
     Raises RuntimeError on failure. Callers that want to tolerate bad inputs
     should catch and provide a safe fallback.
     """
-    cmd = [
+    base_cmd = [
         "ffprobe", "-v", "error",
-        # Keep probe fast and robust; duration + stream bitrates
         "-show_entries", "format=duration:stream=index,codec_type,bit_rate",
         "-of", "json",
-        str(input_path)
     ]
+
+    def _run(cmd: list[str], timeout_s: int) -> dict:
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                env=get_gpu_env(),
+            )
+        except Exception as e:
+            raise RuntimeError(f"ffprobe failed: {e}")
+        if proc.returncode != 0:
+            err = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+            raise RuntimeError(err or "ffprobe returned non-zero exit code")
+        try:
+            return json.loads(proc.stdout)
+        except Exception as e:
+            raise RuntimeError(f"ffprobe parse error: {e}")
+
+    # Attempt 1: fast
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=get_gpu_env(),
-        )
-    except Exception as e:
-        raise RuntimeError(f"ffprobe failed: {e}")
-    if proc.returncode != 0:
-        # Surface concise error; common case: 'moov atom not found' for incomplete/corrupt mp4
-        err = (proc.stderr or "").strip() or (proc.stdout or "").strip()
-        raise RuntimeError(err or "ffprobe returned non-zero exit code")
-    try:
-        data = json.loads(proc.stdout)
-    except Exception as e:
-        raise RuntimeError(f"ffprobe parse error: {e}")
+        data = _run([*base_cmd, str(input_path)], timeout_s=10)
+    except RuntimeError:
+        # Attempt 2: robust for fragmented/edge cases
+        robust_cmd = [
+            *base_cmd,
+            "-probesize", "100M",
+            "-analyzeduration", "100M",
+            "-rw_timeout", "5000000",
+            str(input_path),
+        ]
+        data = _run(robust_cmd, timeout_s=30)
     duration = float(data.get("format", {}).get("duration", 0.0))
     v_bitrate = None
     a_bitrate = None
