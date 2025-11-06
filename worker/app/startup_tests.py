@@ -231,6 +231,7 @@ def run_startup_tests(hw_info: Dict) -> Dict[str, bool]:
     logger.info(f"  NVIDIA_VISIBLE_DEVICES: {os.environ.get('NVIDIA_VISIBLE_DEVICES', 'NOT SET')}")
     logger.info(f"  NVIDIA_DRIVER_CAPABILITIES: {os.environ.get('NVIDIA_DRIVER_CAPABILITIES', 'NOT SET')}")
     logger.info(f"  LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', 'NOT SET')}")
+    logger.info(f"  LD_PRELOAD: {os.environ.get('LD_PRELOAD', 'NOT SET')}")
     logger.info("")
 
     # Ensure NV runtime is ready before running tests (addresses cuInit(0) fail on early start)

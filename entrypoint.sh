@@ -43,9 +43,24 @@ if [ -n "$WSL_DRV_DIR" ] && [ -f "$WSL_DRV_DIR/libcuda.so.1.1" ]; then
     STUB_SIZE=$(stat -c%s "/usr/lib/x86_64-linux-gnu/libcuda.so.1" 2>/dev/null || echo "0")
     if [ "$STUB_SIZE" -lt "1000000" ]; then  # Real driver is ~26MB, stub is ~172KB
       echo "Found stub libcuda.so.1 ($STUB_SIZE bytes), using LD_PRELOAD to force real WSL driver..."
-      # Use LD_PRELOAD to force loading the real WSL driver instead of the stub
-      export LD_PRELOAD="$WSL_DRV_DIR/libcuda.so.1.1:${LD_PRELOAD:-}"
-      echo "✓ LD_PRELOAD set to: $WSL_DRV_DIR/libcuda.so.1.1"
+      # Preload core NVIDIA driver libs from WSL driver dir to avoid picking stubs from CUDA compat
+      PRELOAD_LIST=""
+      for lib in libcuda.so.1.1 libnvcuvid.so.1 libnvidia-encode.so.1; do
+        if [ -f "$WSL_DRV_DIR/$lib" ]; then
+          PRELOAD_LIST+="$WSL_DRV_DIR/$lib "
+        fi
+      done
+      # Apply LD_PRELOAD if we found any
+      if [ -n "$PRELOAD_LIST" ]; then
+        export LD_PRELOAD="${PRELOAD_LIST}${LD_PRELOAD:-}"
+        echo "✓ LD_PRELOAD set to: $PRELOAD_LIST"
+      else
+        # Fallback: at least force libcuda if present
+        if [ -f "$WSL_DRV_DIR/libcuda.so.1.1" ]; then
+          export LD_PRELOAD="$WSL_DRV_DIR/libcuda.so.1.1 ${LD_PRELOAD:-}"
+          echo "✓ LD_PRELOAD set to: $WSL_DRV_DIR/libcuda.so.1.1"
+        fi
+      fi
     fi
   fi
     
