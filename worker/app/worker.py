@@ -125,9 +125,15 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     hw_info = get_hw_info()
     _publish(self.request.id, {"type": "log", "message": f"Hardware: {hw_info['type'].upper()} acceleration detected"})
     
-    # Probe
+    # Probe (tolerate failures gracefully)
     _publish(self.request.id, {"type": "log", "message": "Initializing: probing input file…"})
-    info = ffprobe_info(input_path)
+    try:
+        info = ffprobe_info(input_path)
+    except Exception as e:
+        _publish(self.request.id, {"type": "error", "message": f"Failed to analyze input file: {e}"})
+        _publish(self.request.id, {"type": "log", "message": "The uploaded file may be corrupt or incomplete."})
+        # Mark task as failed with a clear user message
+        raise RuntimeError(f"Input file analysis failed: {e}")
     duration = info.get("duration", 0.0)
     total_kbps, video_kbps = calc_bitrates(target_size_mb, duration, audio_bitrate_kbps)
 
