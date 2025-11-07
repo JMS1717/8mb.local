@@ -10,94 +10,11 @@
   <b>Video Demo</b>
 </p>
 
-<<<<<<< HEAD
-=======
-> Note (Nov 2025): RTX 50-Series (Blackwell) Support
->
-> **🎉 RTX 50-Series Users (RTX 5090/5080/5070 Ti/etc.):**  
-> Verified working support with full NVENC hardware acceleration!
->
-> **Docker Image:** `jms1717/8mblocal:rtx50-working`  
-> **Branch:** `rtx50-blackwell`  
-> **Complete Setup Guide:** [RTX50-WORKING.md](https://github.com/JMS1717/8mb.local/blob/rtx50-blackwell/RTX50-WORKING.md)
->
-> **⚠️ CRITICAL for RTX 50-series:** You must mount the WSL driver directory:  
-> `-v /usr/lib/wsl/drivers:/usr/lib/wsl/drivers:ro`  
-> (Already configured in docker-compose.yml on the rtx50-blackwell branch)
->
-> **Requirements:**
-> - RTX 50-series GPU (Blackwell/SM_100)
-> - NVIDIA Driver 550.x+ (tested with 581.80)
-> - Windows 11 WSL2 or Linux with CUDA 13 support
->
-> **Verified Test Results:** ✅ All 6 encoders passing (h264_nvenc, hevc_nvenc, av1_nvenc, libx264, libx265, libaom-av1)
->
-> **Other NVIDIA GPUs:**
-> - Main branch: CUDA 12.2 + FFmpeg 6.1.1, driver 535.x+ (Turing/Ampere/Ada)
-> - CPU/VAAPI still work if NVENC is incompatible
-
-### Intel Arc / Integrated Graphics (Linux)
-
-Intel Arc (e.g., A140, A380) and recent Intel iGPUs are supported via VAAPI and QSV (libmfx) on **Linux hosts**.
-
-- Requirements on the host:
-  - Linux with Intel GPU and kernel DRM i915/i915k
-  - Intel media driver installed on host (usually preinstalled)
-  - Docker with `--device /dev/dri` access
-- Container configuration (already included):
-  - FFmpeg built with `--enable-vaapi` and `--enable-libmfx` (QSV)
-  - Runtime packages: `intel-media-driver`, `libmfx1`, `libva-utils`
-  - Environment: `LIBVA_DRIVER_NAME=iHD`
-- How to run on Linux (bare metal):
-  - Uncomment the devices mapping in `docker-compose.yml`:
-    - `devices: ["/dev/dri:/dev/dri"]`
-
-Limitations:
-- **WSL2 (Windows) Intel‑only systems:** WSL2 does not expose `/dev/dri` render nodes for Intel GPUs to Linux Docker containers, so VAAPI/QSV can't initialize. You will see ffmpeg list `vaapi`/`qsv` (compile‑time) but encoders fail during init.
-- If you have only an Intel GPU on Windows, run the **CPU‑only** command below (no `--gpus all`) or install a native Linux distribution to use the Arc hardware acceleration.
-- On Windows with both NVIDIA + Intel, only NVIDIA NVENC will be usable inside the container (Intel hidden due to missing `/dev/dri`).
-
-#### Intel‑Only Quick Start (Linux host)
-```bash
-docker run -d --name 8mblocal --device /dev/dri:/dev/dri -e LIBVA_DRIVER_NAME=iHD -p 8001:8001 -v ./uploads:/app/uploads -v ./outputs:/app/outputs jms1717/8mblocal:latest
-```
-
-#### DO NOT use `--gpus all` without an NVIDIA GPU
-If you pass `--gpus all` (or keep `gpus: all` in compose) on a system with no NVIDIA adapter, the NVIDIA Container Toolkit prestart hook will fail with:
-```
-nvidia-container-cli: initialization error: WSL environment detected but no adapters were found
-```
-Remove `--gpus all` and any `NVIDIA_` environment variables for Intel‑only or CPU‑only operation.
-
-#### docker-compose (Intel‑only)
-```yaml
-services:
-  8mblocal:
-    image: jms1717/8mblocal:latest
-    container_name: 8mblocal
-    ports:
-      - "8001:8001"
-    devices:
-      - /dev/dri:/dev/dri
-    environment:
-      - LIBVA_DRIVER_NAME=iHD
-    volumes:
-      - ./uploads:/app/uploads
-      - ./outputs:/app/outputs
-    restart: unless-stopped
-```
-
-#### Validation
-```bash
-docker exec 8mblocal bash -c "ffmpeg -hide_banner -encoders | grep -E 'vaapi|qsv'"
-docker exec 8mblocal bash -c "vainfo --display drm --device /dev/dri/renderD128 | grep -i 'Driver version'" || echo 'vainfo optional'
-```
-
-If encoders fail, ensure host has latest Intel media driver and container has `/dev/dri` mapped. Arc AV1 QSV may require recent kernel & media-driver.
->>>>>>> 2edffff (feat: robust GPU autodetect & automatic CPU fallback (no-block startup); improved NVIDIA detection and Intel/WSL docs)
+<!-- Merge conflict markers removed; reorganized TOC placement -->
 
 ## Table of Contents
 * [Features](#features)
+* [Screenshots](#screenshots)
 * [Architecture](#architecture-technical-deep-dive)
 * [Installation](#installation)
 * [Usage](#using-the-app)
