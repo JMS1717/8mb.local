@@ -63,6 +63,12 @@ export async function startCompress(payload: any, auth?: {user: string, pass: st
   return res.json();
 }
 
+export type AutoResolutionOption = {
+  mode: 'auto' | 'explicit' | 'original' | 'audio-only';
+  targetHeight?: number; // for explicit
+  minAutoHeight?: number; // for auto
+};
+
 export function openProgressStream(taskId: string, auth?: {user: string, pass: string}): EventSource {
   // Build absolute URL for SSE
   let sseUrl: string;

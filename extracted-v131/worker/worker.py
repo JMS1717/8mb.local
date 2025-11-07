@@ -12,7 +12,6 @@ from redis import Redis
 
 from .celery_app import celery_app
 from .utils import ffprobe_info, calc_bitrates
-from .auto_resolution import choose_auto_resolution
 from .hw_detect import get_hw_info, map_codec_to_hw
 from .startup_tests import run_startup_tests
 from threading import Thread
@@ -135,9 +134,7 @@ def run_hardware_tests_task() -> dict:
 def compress_video(self, job_id: str, input_path: str, output_path: str, target_size_mb: float,
                    video_codec: str, audio_codec: str, audio_bitrate_kbps: int, preset: str, tune: str = "hq",
                    max_width: int = None, max_height: int = None, start_time: str = None, end_time: str = None,
-                   force_hw_decode: bool = False, fast_mp4_finalize: bool = False,
-                   auto_resolution: bool = False, min_auto_resolution: int = 240,
-                   target_resolution: int | None = None, audio_only: bool = False):
+                   force_hw_decode: bool = False, fast_mp4_finalize: bool = False):
     # Detect hardware acceleration
     _publish(self.request.id, {"type": "log", "message": "Initializing: detecting hardware…"})
     hw_info = get_hw_info()
@@ -215,46 +212,6 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     preset_val = preset.lower()
     tune_val = (tune or "hq").lower()
 
-    # Audio-only path: ignore video entirely and produce .m4a (aac) or .opus per requested audio codec
-    if audio_only:
-        _publish(self.request.id, {"type": "log", "message": "Audio-only mode enabled — extracting audio"})
-        # Decide audio codec/container by output extension; prefer AAC in .m4a for broad compatibility
-        a_codec = 'aac' if output_path.lower().endswith('.m4a') else (audio_codec if audio_codec != 'none' else 'aac')
-        a_bitrate_str = f"{int(max(64, audio_bitrate_kbps))}k"
-        # Build simple ffmpeg command to extract/transcode audio
-        cmd = [
-            "ffmpeg", "-hide_banner", "-y",
-            "-i", input_path,
-            "-vn",
-            "-c:a", a_codec, "-b:a", a_bitrate_str,
-            "-movflags", "+faststart" if output_path.lower().endswith('.m4a') else "",
-            output_path,
-        ]
-        # Remove empty flags
-        cmd = [c for c in cmd if c != ""]
-        _publish(self.request.id, {"type": "log", "message": f"FFmpeg (audio-only): {' '.join(cmd)}"})
-        rc, was_cancelled = (subprocess.run(cmd, text=True).returncode, False)
-        if rc != 0:
-            msg = f"Audio extraction failed with code {rc}"
-            _publish(self.request.id, {"type": "error", "message": msg})
-            raise RuntimeError(msg)
-        # Publish completion
-        final_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
-        stats = {
-            "input_path": input_path,
-            "output_path": output_path,
-            "duration_s": duration,
-            "target_size_mb": target_size_mb,
-            "final_size_mb": round(final_size / (1024*1024), 2),
-        }
-        _publish(self.request.id, {"type": "progress", "progress": 100.0, "phase": "done"})
-        try:
-            self.update_state(state="SUCCESS", meta={"output_path": output_path, "progress": 100.0, "detail": "done", **stats})
-        except Exception:
-            pass
-        _publish(self.request.id, {"type": "done", "stats": stats})
-        return stats
-
     # Container/audio compatibility: mp4 doesn't support libopus well, fall back to aac
     # Handle mute option
     chosen_audio_codec = audio_codec
@@ -330,15 +287,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Build video filter chain
     vf_filters = []
     
-    # Resolution scaling (explicit or auto)
-    if auto_resolution:
-        aw, ah = choose_auto_resolution(
-            info.get("width"), info.get("height"), info.get("video_bitrate_kbps"),
-            video_kbps, min_auto_resolution, target_resolution
-        )
-        if ah:
-            max_height = ah
-            _publish(self.request.id, {"type": "log", "message": f"Auto-resolution: targeting ≤{max_height}p based on bitrate budget"})
+    # Resolution scaling
     if max_width or max_height:
         # Build scale expression to maintain aspect ratio
         if max_width and max_height:

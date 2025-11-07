@@ -28,7 +28,7 @@ def get_gpu_env():
 def ffprobe_info(input_path: str) -> dict:
     cmd = [
         "ffprobe", "-v", "error",
-        "-show_entries", "format=duration:stream=index,codec_type,codec_name,bit_rate,width,height",
+        "-show_entries", "format=duration:stream=index,codec_type,codec_name,bit_rate",
         "-of", "json",
         input_path,
     ]
@@ -40,14 +40,10 @@ def ffprobe_info(input_path: str) -> dict:
     v_bitrate = None
     a_bitrate = None
     v_codec = None
-    v_width = None
-    v_height = None
     for s in data.get("streams", []):
         if s.get("codec_type") == "video" and s.get("bit_rate"):
             v_bitrate = float(s["bit_rate"]) / 1000.0
             v_codec = s.get("codec_name")
-            if s.get("width"): v_width = int(s.get("width"))
-            if s.get("height"): v_height = int(s.get("height"))
         if s.get("codec_type") == "audio" and s.get("bit_rate"):
             a_bitrate = float(s["bit_rate"]) / 1000.0
     return {
@@ -55,8 +51,6 @@ def ffprobe_info(input_path: str) -> dict:
         "video_bitrate_kbps": v_bitrate,
         "audio_bitrate_kbps": a_bitrate,
         "video_codec": v_codec,
-        "width": v_width,
-        "height": v_height,
     }
 
 

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+  <link rel="shortcut icon" href="/favicon.ico" />
+  <link rel="mask-icon" href="/favicon.svg" color="#0071c5" />
+    <script>
+      // Add PNG favicon fallbacks at runtime by rasterizing the SVG.
+      (function () {
+        const svgHref = '/favicon.svg';
+        function addIcon(href, type, sizes) {
+          const link = document.createElement('link');
+          link.rel = 'icon';
+          if (type) link.type = type;
+          if (sizes) link.sizes = sizes;
+          link.href = href;
+          document.head.appendChild(link);
+        }
+        function rasterize(size) {
+          return fetch(svgHref)
+            .then(r => r.text())
+            .then(svg => {
+              const blob = new Blob([svg], { type: 'image/svg+xml' });
+              const url = URL.createObjectURL(blob);
+              return new Promise((resolve) => {
+                const img = new Image();
+                img.onload = () => {
+                  const canvas = document.createElement('canvas');
+                  canvas.width = size; canvas.height = size;
+                  const ctx = canvas.getContext('2d');
+                  ctx.clearRect(0, 0, size, size);
+                  // draw with contain aspect ratio
+                  const w = img.width; const h = img.height;
+                  const scale = Math.min(size / w, size / h);
+                  const dw = Math.round(w * scale);
+                  const dh = Math.round(h * scale);
+                  const dx = Math.floor((size - dw) / 2);
+                  const dy = Math.floor((size - dh) / 2);
+                  ctx.drawImage(img, dx, dy, dw, dh);
+                  URL.revokeObjectURL(url);
+                  resolve(canvas.toDataURL('image/png'));
+                };
+                img.onerror = () => resolve(null);
+                img.src = url;
+              });
+            });
+        }
+        // Generate common sizes to help older browsers and pinned icons
+        Promise.all([16, 32, 180, 256].map(s => rasterize(s))).then(urls => {
+          const sizes = [16, 32, 180, 256];
+          urls.forEach((u, i) => { if (u) addIcon(u, 'image/png', sizes[i] + 'x' + sizes[i]); });
+        });
+      })();
+    </script>
+    
+		<link rel="modulepreload" href="/_app/immutable/entry/start.De8VahLR.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/EcE7eIBB.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/U2DDJ_0W.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/BPGtCBdR.js">
+		<link rel="modulepreload" href="/_app/immutable/entry/app.8Wyc8Evj.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/CY5WxPnE.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/BZqCPlBW.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/DI9HNUez.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/GEKKL5lm.js">
+		<link rel="modulepreload" href="/_app/immutable/chunks/D33e11yZ.js">
+		<link rel="modulepreload" href="/_app/env.js">
+  </head>
+  <body data-sveltekit-preload-data="hover">
+    <div style="display: contents">
+			<script>
+				{
+					__sveltekit_ogva8t = {
+						base: "",
+						env: null
+					};
+
+					const element = document.currentScript.parentElement;
+
+					import("/_app/env.js").then(({ env }) => {
+						__sveltekit_ogva8t.env = env;
+
+						Promise.all([
+							import("/_app/immutable/entry/start.De8VahLR.js"),
+							import("/_app/immutable/entry/app.8Wyc8Evj.js")
+						]).then(([kit, app]) => {
+							kit.start(app, element);
+						});
+					});
+				}
+			</script>
+		</div>
+  </body>
+</html>

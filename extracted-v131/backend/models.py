@@ -7,8 +7,6 @@ class UploadResponse(BaseModel):
     duration_s: float
     original_video_bitrate_kbps: Optional[float] = None
     original_audio_bitrate_kbps: Optional[float] = None
-    original_width: Optional[int] = None
-    original_height: Optional[int] = None
     estimate_total_kbps: float
     estimate_video_kbps: float
     warn_low_quality: bool
@@ -31,11 +29,6 @@ class CompressRequest(BaseModel):
     force_hw_decode: Optional[bool] = False
     # For MP4 outputs, use fragmented MP4 to avoid long faststart finalization.
     fast_mp4_finalize: Optional[bool] = False
-    # Automatic resolution selection based on original bitrate/size
-    auto_resolution: Optional[bool] = False
-    min_auto_resolution: Optional[int] = 240  # Do not downscale below this unless user overrides
-    target_resolution: Optional[int] = None   # Explicit target height (e.g., 1080, 720); overrides auto selection
-    audio_only: Optional[bool] = False        # Convert to audio-only output (.m4a) ignoring video settings
 
 class StatusResponse(BaseModel):
     state: str

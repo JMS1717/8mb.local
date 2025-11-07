@@ -26,6 +26,11 @@
   // New resolution and trim controls
   let maxWidth: number | null = null;
   let maxHeight: number | null = null;
+  // Auto resolution options
+  let autoResolution: boolean = true; // default ON per request
+  let minAutoHeight: 240|360|480|720 = 240; // do not go below unless user changes
+  let explicitHeight: 2160|1440|1080|720|480|360|240|null = null; // explicit override
+  let audioOnly: boolean = false; // Audio-only conversion
   let startTime: string = '';
   let endTime: string = '';
   // New UI options
@@ -72,7 +77,7 @@
     return trimmedDuration > 0 ? trimmedDuration : fullDuration;
   })();
 
-  $: containerNote = (container === 'mp4' && audioCodec === 'libopus') ? 'MP4 does not support Opus; audio will be encoded as AAC automatically.' : null;
+  $: containerNote = (container === 'mp4' && audioCodec === 'libopus' && !audioOnly) ? 'MP4 does not support Opus; audio will be encoded as AAC automatically.' : null;
   $: estimated = jobInfo ? {
     duration_s: effectiveDuration,
     total_kbps: effectiveDuration > 0 ? (targetMB * 8192.0) / effectiveDuration : 0,
@@ -468,8 +473,12 @@
         force_hw_decode: preferHwDecode,
   fast_mp4_finalize: fastMp4Finalize,
         // Optional resolution and trim parameters
-        max_width: maxWidth || undefined,
-        max_height: maxHeight || undefined,
+        max_width: (autoResolution || explicitHeight) ? undefined : (maxWidth || undefined),
+        max_height: (autoResolution && !explicitHeight) ? undefined : (explicitHeight || maxHeight || undefined),
+        auto_resolution: autoResolution,
+        min_auto_resolution: minAutoHeight,
+        target_resolution: explicitHeight || undefined,
+        audio_only: audioOnly,
         start_time: startTime.trim() || undefined,
         end_time: endTime.trim() || undefined,
       };
@@ -1028,14 +1037,36 @@
       {/if}
     </div>
     <div>
-      <label class="block mb-1 text-sm">Speed/Quality</label>
-      <select class="input w-full" bind:value={preset}>
-        <option value="p1">Fast (P1)</option>
-        <option value="p5">Balanced (P5)</option>
-        <option value="p7">Best Quality (P7)</option>
-        <option value="p6">Default (P6)</option>
-        <option value="extraquality">🌟 Extra Quality (Slowest)</option>
-      </select>
+      <label class="block mb-1 text-sm">Resolution</label>
+      <div class="flex items-center gap-2">
+        <select class="input w-full" disabled={audioOnly || autoResolution}
+          on:change={(e:any)=>{ const v = e.target.value; explicitHeight = v? parseInt(v): null; }}>
+          <option value="">Original</option>
+          <option value="2160">2160p (4K)</option>
+          <option value="1440">1440p</option>
+          <option value="1080">1080p</option>
+          <option value="720">720p</option>
+          <option value="480">480p</option>
+          <option value="360">360p</option>
+          <option value="240">240p</option>
+        </select>
+      </div>
+      <div class="mt-2 flex items-center gap-3">
+        <label class="flex items-center gap-2 text-xs cursor-pointer">
+          <input type="checkbox" bind:checked={autoResolution} disabled={audioOnly} />
+          <span>Auto (won’t go below</span>
+          <select class="input h-7 py-0 px-2 text-xs w-20" bind:value={minAutoHeight} disabled={audioOnly || !autoResolution}>
+            <option value={240}>240p</option>
+            <option value={360}>360p</option>
+            <option value={480}>480p</option>
+            <option value={720}>720p</option>
+          </select>
+          <span>)</span>
+        </label>
+      </div>
+      {#if jobInfo?.original_width && jobInfo?.original_height}
+        <p class="text-xs opacity-70 mt-1">Input: {jobInfo.original_width}×{jobInfo.original_height} → Output: {explicitHeight ? `${explicitHeight}p (max height)` : (autoResolution ? `auto (≥${minAutoHeight}p)` : (maxHeight || 'original'))}</p>
+      {/if}
     </div>
     <div>
       <label class="block mb-1 text-sm">Profile</label>
@@ -1051,6 +1082,20 @@
     <details>
       <summary class="cursor-pointer">Advanced Options</summary>
       <div class="mt-4 grid sm:grid-cols-4 gap-4">
+        <div>
+          <label class="block mb-1 text-xs">Speed/Quality</label>
+          <select class="input w-full text-xs py-1 h-8" bind:value={preset}>
+            <option value="p1">Fast (P1)</option>
+            <option value="p5">Balanced (P5)</option>
+            <option value="p7">Best Quality (P7)</option>
+            <option value="p6">Default (P6)</option>
+            <option value="extraquality">🌟 Extra Quality</option>
+          </select>
+        </div>
+        <div>
+          <label class="block mb-1 text-sm">Audio Only</label>
+          <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" bind:checked={audioOnly} /><span class="text-sm">Extract audio (.m4a)</span></label>
+        </div>
         <div>
           <label class="block mb-1 text-sm">Audio Codec</label>
           <select class="input w-full" bind:value={audioCodec}>
@@ -1098,17 +1143,17 @@
         </div>
       </div>
       
-      <!-- Resolution and Trim Controls -->
+      <!-- Resolution and Trim Controls (explicit pixel fields when auto off) -->
       <div class="mt-4 pt-4 border-t border-gray-700">
         <h4 class="text-sm font-medium mb-3">Resolution & Trimming</h4>
         <div class="grid sm:grid-cols-4 gap-4">
           <div>
             <label class="block mb-1 text-sm">Max Width (px)</label>
-            <input class="input w-full" type="number" bind:value={maxWidth} placeholder="Original" min="1" />
+            <input class="input w-full" type="number" bind:value={maxWidth} placeholder="Original" min="1" disabled={autoResolution || !!explicitHeight} />
           </div>
           <div>
             <label class="block mb-1 text-sm">Max Height (px)</label>
-            <input class="input w-full" type="number" bind:value={maxHeight} placeholder="Original" min="1" />
+            <input class="input w-full" type="number" bind:value={maxHeight} placeholder="Original" min="1" disabled={autoResolution || !!explicitHeight} />
           </div>
           <div>
             <label class="block mb-1 text-sm">Start Time</label>
@@ -1199,7 +1244,7 @@
         Analyze
       {/if}
     </button>
-    <button class="btn" on:click={doCompress} disabled={!jobInfo || isCompressing}>
+  <button class="btn" on:click={doCompress} disabled={!jobInfo || isCompressing}>
       {#if isCompressing}
         {#if hasProgress}
           Compressing… {progress}%{#if etaLabel} — ~{etaLabel} left{/if}

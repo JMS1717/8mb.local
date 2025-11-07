@@ -79,8 +79,7 @@ def _get_hw_info_fresh(timeout: int = 10) -> dict:
 def _ffprobe(input_path: Path) -> dict:
     cmd = [
         "ffprobe", "-v", "error",
-        # Collect duration and per-stream width/height/bitrate for video
-        "-show_entries", "format=duration:stream=index,codec_type,bit_rate,width,height",
+        "-show_entries", "format=duration:stream=index,codec_type,bit_rate",
         "-of", "json",
         str(input_path)
     ]
@@ -91,23 +90,12 @@ def _ffprobe(input_path: Path) -> dict:
     duration = float(data.get("format", {}).get("duration", 0.0))
     v_bitrate = None
     a_bitrate = None
-    v_width = None
-    v_height = None
     for s in data.get("streams", []):
         if s.get("codec_type") == "video" and s.get("bit_rate"):
             v_bitrate = float(s["bit_rate"]) / 1000.0
-            # width/height may be present even if bitrate missing; guard with get
-            if s.get("width"): v_width = int(s.get("width"))
-            if s.get("height"): v_height = int(s.get("height"))
         if s.get("codec_type") == "audio" and s.get("bit_rate"): 
             a_bitrate = float(s["bit_rate"]) / 1000.0
-    return {
-        "duration": duration,
-        "video_bitrate_kbps": v_bitrate,
-        "audio_bitrate_kbps": a_bitrate,
-        "width": v_width,
-        "height": v_height,
-    }
+    return {"duration": duration, "video_bitrate_kbps": v_bitrate, "audio_bitrate_kbps": a_bitrate}
 
 
 def _calc_bitrates(target_mb: float, duration_s: float, audio_kbps: int) -> tuple[float, float, bool]:
@@ -293,8 +281,6 @@ async def upload(file: UploadFile = File(...), target_size_mb: float = 25.0, aud
         duration_s=info["duration"],
         original_video_bitrate_kbps=info["video_bitrate_kbps"],
         original_audio_bitrate_kbps=info["audio_bitrate_kbps"],
-        original_width=info.get("width"),
-        original_height=info.get("height"),
         estimate_total_kbps=total_kbps,
         estimate_video_kbps=video_kbps,
         warn_low_quality=warn,
@@ -330,11 +316,7 @@ async def compress(req: CompressRequest):
     input_path = UPLOADS_DIR / req.filename
     if not input_path.exists():
         raise HTTPException(status_code=404, detail="Input not found")
-    # Audio-only output selection (.m4a) overrides container
-    if req.audio_only:
-        ext = ".m4a"
-    else:
-        ext = ".mp4" if req.container == "mp4" else ".mkv"
+    ext = ".mp4" if req.container == "mp4" else ".mkv"
     # Strip job_id prefix from filename (UUID + underscore) to get original name
     # e.g. "36f1e5e1-fe77-48ab-8e3c-f8061f670d9f_demo.mp4" -> "demo_8mblocal.mp4"
     stem = input_path.stem
@@ -370,10 +352,6 @@ async def compress(req: CompressRequest):
             end_time=req.end_time,
             force_hw_decode=bool(req.force_hw_decode or False),
             fast_mp4_finalize=bool(req.fast_mp4_finalize or False),
-            auto_resolution=bool(req.auto_resolution or False),
-            min_auto_resolution=req.min_auto_resolution,
-            target_resolution=req.target_resolution,
-            audio_only=bool(req.audio_only or False),
         ),
     )
     # Proactively publish a queued message so UI shows activity even if worker startup is delayed
