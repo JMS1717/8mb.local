@@ -1,16 +1,17 @@
 import unittest
 
-from app.auto_resolution import choose_auto_resolution
+from worker.app.auto_resolution import choose_auto_resolution
 
 
 class TestAutoResolution(unittest.TestCase):
     def test_downscale_4k_low_bitrate(self):
-        # 4K source, very low target bitrate -> should pick 1080p or 720p (depending on heuristic)
+        # 4K source, very low target bitrate -> softened heuristic should prefer a modest drop (likely 1440p)
         w, h = 3840, 2160
         target_video_kbps = 2500  # low for 4K
         mw, mh = choose_auto_resolution(w, h, orig_video_kbps=12000, target_video_kbps=target_video_kbps)
         self.assertIsNone(mw)  # width not specified directly
-        self.assertTrue(mh in (1080, 720, 480, 360, 240), f"Unexpected chosen height {mh}")
+        # Accept 1440p or further if extremely starved; ensure not original and not upscale
+        self.assertTrue(mh in (1440, 1080, 720, 480, 360, 240), f"Unexpected chosen height {mh}")
         self.assertLessEqual(mh, 2160)
 
     def test_keep_original_when_high_bitrate(self):

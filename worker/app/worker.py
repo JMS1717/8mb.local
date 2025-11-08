@@ -218,6 +218,11 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Audio-only path: ignore video entirely and produce .m4a (aac) or .opus per requested audio codec
     if audio_only:
         _publish(self.request.id, {"type": "log", "message": "Audio-only mode enabled — extracting audio"})
+        # Validate presence of an audio stream before invoking ffmpeg
+        if not info.get("has_audio"):
+            msg = "Input file contains no audio stream; cannot perform audio-only extraction"
+            _publish(self.request.id, {"type": "error", "message": msg})
+            raise RuntimeError(msg)
         # Decide audio codec/container by output extension; prefer AAC in .m4a for broad compatibility
         a_codec = 'aac' if output_path.lower().endswith('.m4a') else (audio_codec if audio_codec != 'none' else 'aac')
         a_bitrate_str = f"{int(max(64, audio_bitrate_kbps))}k"
@@ -472,6 +477,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 input_opts += ["-c:v", "av1_cuvid"]
                 # Remove -pix_fmt yuv420p since we're using CUDA frames
                 v_flags = [f for i, f in enumerate(v_flags) if not (f == "-pix_fmt" or (i > 0 and v_flags[i-1] == "-pix_fmt"))]
+                # If we are applying scaling, switch to GPU scaling filter to avoid format conversion errors
+                if vf_filters:
+                    vf_filters = [f.replace("scale=", "scale_npp=") for f in vf_filters]
                 _publish(self.request.id, {"type": "log", "message": "Decoder: forcing av1_cuvid (CUDA) for GPU-to-GPU pipeline"})
             elif can_av1_cuvid_decode(input_path):
                 # Use CUDA decode with cuda output format for GPU-to-GPU pipeline
@@ -479,6 +487,8 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 input_opts += ["-c:v", "av1_cuvid"]
                 # Remove -pix_fmt yuv420p from v_flags since we're using CUDA frames
                 v_flags = [f for i, f in enumerate(v_flags) if not (f == "-pix_fmt" or (i > 0 and v_flags[i-1] == "-pix_fmt"))]
+                if vf_filters:
+                    vf_filters = [f.replace("scale=", "scale_npp=") for f in vf_filters]
                 _publish(self.request.id, {"type": "log", "message": "Decoder: using av1_cuvid (CUDA) with GPU-to-GPU pipeline"})
             else:
                 # Software decode fallback (av1_cuvid unavailable)
@@ -492,7 +502,12 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             pass
     elif in_codec in ("h264", "hevc") and actual_encoder.endswith("_nvenc"):
         # H.264/HEVC: NVDEC widely supported; always prefer CUDA when using NVENC
-        init_hw_flags = ["-hwaccel", "cuda"] + init_hw_flags
+        init_hw_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"] + init_hw_flags
+        # Remove -pix_fmt if present (GPU surfaces)
+        v_flags = [f for i, f in enumerate(v_flags) if not (f == "-pix_fmt" or (i > 0 and v_flags[i-1] == "-pix_fmt"))]
+        # Switch scale filter to GPU variant if scaling is requested
+        if vf_filters:
+            vf_filters = [f.replace("scale=", "scale_npp=") for f in vf_filters]
         _publish(self.request.id, {"type": "log", "message": f"Decoder: using cuda ({in_codec})"})
 
     # Construct command

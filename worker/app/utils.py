@@ -42,14 +42,28 @@ def ffprobe_info(input_path: str) -> dict:
     v_codec = None
     v_width = None
     v_height = None
+    has_audio = False
+    has_video = False
     for s in data.get("streams", []):
         if s.get("codec_type") == "video" and s.get("bit_rate"):
             v_bitrate = float(s["bit_rate"]) / 1000.0
             v_codec = s.get("codec_name")
             if s.get("width"): v_width = int(s.get("width"))
             if s.get("height"): v_height = int(s.get("height"))
-        if s.get("codec_type") == "audio" and s.get("bit_rate"):
-            a_bitrate = float(s["bit_rate"]) / 1000.0
+        if s.get("codec_type") == "video":
+            has_video = True
+            # For some inputs, bit_rate may be missing on the stream; keep codec/size discovery regardless
+            if s.get("codec_name") and not v_codec:
+                v_codec = s.get("codec_name")
+            if s.get("width") and not v_width:
+                v_width = int(s.get("width"))
+            if s.get("height") and not v_height:
+                v_height = int(s.get("height"))
+        if s.get("codec_type") == "audio":
+            has_audio = True
+            # Bitrate on audio stream can be missing (VBR); only set when present
+            if s.get("bit_rate"):
+                a_bitrate = float(s["bit_rate"]) / 1000.0
     return {
         "duration": duration,
         "video_bitrate_kbps": v_bitrate,
@@ -57,6 +71,8 @@ def ffprobe_info(input_path: str) -> dict:
         "video_codec": v_codec,
         "width": v_width,
         "height": v_height,
+        "has_audio": has_audio,
+        "has_video": has_video,
     }
 
 

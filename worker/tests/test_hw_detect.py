@@ -6,7 +6,7 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'app')))
 
-import hw_detect as hd
+from worker.app.hw_detect import detect_hw_accel as hd
 
 class TestHwDetect(unittest.TestCase):
     @patch('subprocess.run')

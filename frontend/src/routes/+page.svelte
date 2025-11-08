@@ -27,7 +27,7 @@
   let maxWidth: number | null = null;
   let maxHeight: number | null = null;
   // Auto resolution options
-  let autoResolution: boolean = true; // default ON per request
+  let autoResolution: boolean = false; // default OFF; will show recommendations instead
   let minAutoHeight: 240|360|480|720 = 240; // do not go below unless user changes
   let explicitHeight: 2160|1440|1080|720|480|360|240|null = null; // explicit override
   let audioOnly: boolean = false; // Audio-only conversion
@@ -37,6 +37,8 @@
   let playSoundWhenDone = true; // default ON
   let autoDownload = true;
   let warnText: string | null = null;
+  let resolutionSuggestText: string | null = null;
+  let resolutionSuggestHeight: 2160|1440|1080|720|480|360|240|null = null;
   
   // Helper function to parse time string to seconds
   function parseTimeToSeconds(timeStr: string): number | null {
@@ -86,6 +88,56 @@
   } : null;
   // Update warning dynamically based on current estimate (no need to re-upload)
   $: warnText = estimated && estimated.video_kbps < 100 ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
+  // Resolution recommendation banner when Auto is OFF: suggest a lower height if bitrate density is low
+  $: (() => {
+    resolutionSuggestText = null;
+    resolutionSuggestHeight = null;
+    if (!jobInfo || !estimated) return;
+    if (audioOnly) return;
+    if (autoResolution) return; // Auto handles this
+    const ow = jobInfo.original_width || 0;
+    const oh = jobInfo.original_height || 0;
+    if (!ow || !oh) return;
+    const currentH = explicitHeight || oh;
+    // Compute kbps per megapixel at the current selected height
+    const mpAt = (h:number) => (ow * (h/oh) * h) / 1_000_000.0;
+    const mp = mpAt(currentH);
+    if (mp <= 0) return;
+    const kv = estimated.video_kbps || 0;
+    if (kv <= 0) return;
+    const kbpsPerMpix = kv / mp;
+    // Softer thresholds than backend to avoid aggressive prompts
+    const LADDER: Array<2160|1440|1080|720|480|360|240> = [2160,1440,1080,720,480,360,240];
+    // Only warn if density below 600 kbps/mpix
+    const MIN_OK = 600;
+    const MIN_FALLBACK = 380; // if really starved, accept this floor
+    if (kbpsPerMpix >= MIN_OK) return; // no suggestion
+    // Find first height meeting MIN_OK; else MIN_FALLBACK; else min rung
+    const cappedOrigH = LADDER.find(h => h <= oh) ?? oh;
+    let rec: any = null;
+    for (const h of LADDER) {
+      if (h > oh) continue;
+      const d = kv / mpAt(h);
+      if (d >= MIN_OK) { rec = h; break; }
+    }
+    if (!rec) {
+      for (const h of LADDER) {
+        if (h > oh) continue;
+        const d = kv / mpAt(h);
+        if (d >= MIN_FALLBACK) { rec = h; break; }
+      }
+    }
+    if (!rec) rec = LADDER[LADDER.length-1];
+    // If currently already at or below recommendation, no suggestion
+    if (currentH <= rec) return;
+    // Prefer 1080p when original >= 1440 and 1080p meets MIN_FALLBACK
+    if (oh >= 1440 && kv / mpAt(1080) >= MIN_FALLBACK) {
+      rec = 1080;
+    }
+    resolutionSuggestHeight = rec;
+    const label = rec === 2160 ? '2160p (4K)' : rec === 1440 ? '1440p' : rec === 1080 ? '1080p' : `${rec}p`;
+    resolutionSuggestText = `Recommended: lower resolution to ${label} for better quality at this size.`;
+  })();
   
   // Removed auto-reupload on settings changes. Analysis is now separate from upload.
   // Changing target size or audio bitrate only updates client-side estimates.
@@ -571,13 +623,36 @@
             }
             
             // Detect hardware methods
-            if (data.message.includes('hwaccel:')) {
-              const m = data.message.match(/hwaccel:\s*(\w+)/);
-              if (m) decodeMethod = m[1];
+            // Decoder detection: handle variations like "Decoder: using cuda" or "Decoder: forcing av1_cuvid"
+            {
+              const msg = data.message as string;
+              const lower = msg.toLowerCase();
+              if (lower.startsWith('decoder:')) {
+                // Try to capture token after 'using' or 'forcing'
+                const m1 = msg.match(/Decoder:\s*(?:using|forcing)\s*([\w_]+)/i);
+                if (m1) {
+                  decodeMethod = m1[1];
+                } else {
+                  // Fallback: capture first word after 'Decoder:'
+                  const m2 = msg.match(/Decoder:\s*([\w_]+)/i);
+                  if (m2) decodeMethod = m2[1];
+                }
+              }
             }
-            if (data.message.includes('encoder:')) {
-              const m = data.message.match(/encoder:\s*([\w_]+)/);
-              if (m) encodeMethod = m[1];
+            // Encoder detection: handle "Using encoder: h264_nvenc" and "Encoder: CPU (libx264)"
+            {
+              const msg = data.message as string;
+              const mUse = msg.match(/Using\s+encoder:\s*([\w_-]+)/i);
+              if (mUse) {
+                encodeMethod = mUse[1];
+              }
+              const mEnc = msg.match(/Encoder:\s*([\w_-]+)/i);
+              if (mEnc) {
+                // May be "CPU (libx264)"; extract inner encoder if present
+                const val = mEnc[1];
+                const inner = msg.match(/Encoder:\s*CPU\s*\(([^)]+)\)/i);
+                encodeMethod = inner ? inner[1] : val;
+              }
             }
           }
           
@@ -1035,6 +1110,10 @@
           CPU encoding (no GPU detected)
         </p>
       {/if}
+      <!-- Audio-only toggle moved here (out of Advanced) -->
+      <div class="mt-2">
+        <label class="flex items-center gap-2 cursor-pointer text-sm"><input type="checkbox" bind:checked={audioOnly} /><span>Extract audio only (.m4a)</span></label>
+      </div>
     </div>
     <div>
       <label class="block mb-1 text-sm">Resolution</label>
@@ -1051,6 +1130,7 @@
           <option value="240">240p</option>
         </select>
       </div>
+      
       <div class="mt-2 flex items-center gap-3">
         <label class="flex items-center gap-2 text-xs cursor-pointer">
           <input type="checkbox" bind:checked={autoResolution} disabled={audioOnly} />
@@ -1069,11 +1149,13 @@
       {/if}
     </div>
     <div>
-      <label class="block mb-1 text-sm">Profile</label>
-      <select class="input w-full" bind:value={selectedPreset} on:change={(e:any)=>applyPreset(e.target.value)}>
-        {#each presetProfiles as p}
-          <option value={p.name}>{p.name}</option>
-        {/each}
+      <label class="block mb-1 text-sm">Quality preset</label>
+      <select class="input w-full" bind:value={preset}>
+        <option value="p1">Fast (P1)</option>
+        <option value="p5">Balanced (P5)</option>
+        <option value="p6">Default (P6)</option>
+        <option value="p7">Best Quality (P7)</option>
+        <option value="extraquality">🌟 Extra Quality</option>
       </select>
     </div>
   </div>
@@ -1082,20 +1164,8 @@
     <details>
       <summary class="cursor-pointer">Advanced Options</summary>
       <div class="mt-4 grid sm:grid-cols-4 gap-4">
-        <div>
-          <label class="block mb-1 text-xs">Speed/Quality</label>
-          <select class="input w-full text-xs py-1 h-8" bind:value={preset}>
-            <option value="p1">Fast (P1)</option>
-            <option value="p5">Balanced (P5)</option>
-            <option value="p7">Best Quality (P7)</option>
-            <option value="p6">Default (P6)</option>
-            <option value="extraquality">🌟 Extra Quality</option>
-          </select>
-        </div>
-        <div>
-          <label class="block mb-1 text-sm">Audio Only</label>
-          <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" bind:checked={audioOnly} /><span class="text-sm">Extract audio (.m4a)</span></label>
-        </div>
+        <!-- Moved Speed/Quality to primary controls; remove here -->
+        <!-- Audio Only moved to primary controls -->
         <div>
           <label class="block mb-1 text-sm">Audio Codec</label>
           <select class="input w-full" bind:value={audioCodec}>
@@ -1142,6 +1212,21 @@
           <p class="mt-1 text-xs opacity-70">Quality = best visuals. Low/Ultra‑low latency = faster encodes (good for screen/streams). Lossless = huge files.</p>
         </div>
       </div>
+      <!-- Preset Profiles moved here (smaller) -->
+      {#if presetProfiles?.length}
+        <div class="mt-4 pt-4 border-t border-gray-700">
+          <h4 class="text-sm font-medium mb-2">Profiles</h4>
+          <div class="max-w-sm">
+            <label class="block mb-1 text-xs">Select profile</label>
+            <select class="input w-full text-xs py-1 h-8" bind:value={selectedPreset} on:change={(e:any)=>applyPreset(e.target.value)}>
+              {#each presetProfiles as p}
+                <option value={p.name}>{p.name}</option>
+              {/each}
+            </select>
+            <p class="mt-1 text-xs opacity-70">Profiles adjust size, audio, and container. Codec and quality preset remain as chosen above.</p>
+          </div>
+        </div>
+      {/if}
       
       <!-- Resolution and Trim Controls (explicit pixel fields when auto off) -->
       <div class="mt-4 pt-4 border-t border-gray-700">
@@ -1221,6 +1306,16 @@
         <p class="text-xs opacity-80">Estimated final size: ~{estimated.final_mb.toFixed(2)} MB</p>
       {/if}
       {#if warnText}<p class="text-amber-400 text-sm mt-1">{warnText}</p>{/if}
+      {#if resolutionSuggestText}
+        <div class="mt-2 p-3 border border-amber-700/40 bg-amber-900/20 rounded">
+          <div class="text-sm text-amber-200">{resolutionSuggestText}</div>
+          {#if resolutionSuggestHeight}
+            <button class="btn mt-2 text-xs" on:click={() => { explicitHeight = resolutionSuggestHeight; }}>
+              Apply {resolutionSuggestHeight}p
+            </button>
+          {/if}
+        </div>
+      {/if}
     </div>
   {/if}
 

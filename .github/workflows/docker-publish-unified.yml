@@ -25,8 +25,8 @@ jobs:
       - name: Compute tags
         id: vars
         run: |
-          # Force stable application version v132; also keep sha tag for traceability
-          APP_VERSION=132
+          # Force stable application version v133; also keep sha tag for traceability
+          APP_VERSION=133
           echo "app_version=${APP_VERSION}" >> $GITHUB_OUTPUT
           SHA_TAG=sha-${GITHUB_SHA::7}
           echo "sha_tag=${SHA_TAG}" >> $GITHUB_OUTPUT
