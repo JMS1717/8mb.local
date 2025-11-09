@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <title>8mb.local</title>
-  <!-- High contrast background circle for visibility -->
-  <circle cx="50" cy="50" r="48" fill="#0071c5"/>
-  <!-- Bold "8" that's visible at small sizes -->
-  <text x="50" y="72" font-family="Arial, sans-serif" font-size="70" font-weight="900" fill="white" text-anchor="middle">8</text>
-  <!-- Small "mb" in corner -->
-  <text x="72" y="28" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="white" text-anchor="middle">mb</text>
-</svg>

@@ -1,1 +1,0 @@
-import{h as l}from"./U2DDJ_0W.js";function c(t,s,n){var e=t==null?"":""+t;return e===""?null:e}function u(t,s){return t==null?null:String(t)}function f(t,s,n,e){var i=t.__style;if(l||i!==s){var r=u(s);(!l||r!==t.getAttribute("style"))&&(r==null?t.removeAttribute("style"):t.style.cssText=r),t.__style=s}return e}export{f as s,c as t};

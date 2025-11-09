@@ -1,1 +1,0 @@
-export const env={"PUBLIC_BACKEND_URL":""}
