@@ -124,6 +124,8 @@ def _check_intel_qsv() -> bool:
     - Requires access to /dev/dri on Linux hosts. Under WSL2, /dev/dri is not exposed
       to Linux containers, so QSV should be considered unavailable to avoid confusing
       initialization errors (e.g., "Function not implemented").
+    - FFmpeg can list QSV encoders even on non-Intel systems, so we must verify
+      Intel hardware is actually present before returning True.
     """
     # Require a DRI render node to be present
     try:
@@ -135,6 +137,12 @@ def _check_intel_qsv() -> bool:
     except Exception:
         # If we can't check, proceed with ffmpeg probes below
         pass
+    
+    # Verify Intel hardware is actually present before checking QSV
+    # FFmpeg can list QSV encoders on AMD/other systems where they won't work
+    if not _is_intel_gpu_present():
+        return False
+    
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-hwaccels"],
@@ -153,6 +161,62 @@ def _check_intel_qsv() -> bool:
             if "h264_qsv" in encoders.stdout:
                 return True
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    
+    return False
+
+
+def _is_intel_gpu_present() -> bool:
+    """Check if Intel GPU hardware is actually present in the system."""
+    import glob
+    
+    # Try vainfo first (most reliable for VAAPI/QSV systems)
+    render_nodes = glob.glob("/dev/dri/renderD*")
+    for device in render_nodes:
+        try:
+            vainfo = subprocess.run(
+                ["vainfo", "--display", "drm", "--device", device],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            output = (vainfo.stdout + vainfo.stderr).lower()
+            if "intel" in output:
+                return True
+            # If we find AMD/Radeon, this device is not Intel
+            if "amd" in output or "radeon" in output:
+                continue
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            break  # vainfo not available, try other methods
+    
+    # Fallback: check lspci for Intel VGA/Display controller
+    try:
+        lspci = subprocess.run(
+            ["lspci"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        for line in lspci.stdout.lower().split('\n'):
+            # Look for VGA or Display controller lines with Intel
+            if ('vga' in line or 'display' in line or '3d controller' in line) and 'intel' in line:
+                return True
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    
+    # Fallback: check /sys/class/drm for Intel driver
+    try:
+        import os
+        for card in glob.glob("/sys/class/drm/card*/device/vendor"):
+            try:
+                with open(card, 'r') as f:
+                    vendor_id = f.read().strip()
+                    # Intel vendor ID is 0x8086
+                    if vendor_id == "0x8086":
+                        return True
+            except (IOError, OSError):
+                continue
+    except Exception:
         pass
     
     return False
