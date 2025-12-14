@@ -166,8 +166,7 @@ def _check_intel_qsv() -> bool:
                 timeout=2,
             )
             if "h264_qsv" in encoders.stdout:
-                # Actually test QSV initialization to avoid false positives on AMD systems
-                # FFmpeg may report QSV as available even when no Intel GPU is present
+                # Test QSV initialization
                 try:
                     test_result = subprocess.run(
                         [

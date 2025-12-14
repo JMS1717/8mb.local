@@ -119,7 +119,6 @@ RUN mkdir -p /app/uploads /app/outputs /var/log/supervisor /var/lib/redis /var/l
 # Set NVIDIA driver capabilities for NVENC/NVDEC support
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 ENV NVIDIA_VISIBLE_DEVICES=all
-# ENV LIBVA_DRIVER_NAME=iHD Don't hardcode LIBVA_DRIVER_NAME - let VAAPI auto-detect (iHD for Intel, radeonsi for AMD)
 
 # Configure supervisord
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
