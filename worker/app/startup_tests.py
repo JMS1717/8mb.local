@@ -259,11 +259,15 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
             return False, "Could not open encoder"
         if "no nvenc capable devices found" in stderr_lower:
             return False, "No NVENC device"
-        if "driver does not support" in stderr_lower:
-            return False, "Driver doesn't support encoder"
+        # Note: Don't check "driver does not support" alone - it matches warnings like
+        # "Driver does not support some wanted packed headers" which are non-fatal
+        if "driver does not support" in stderr_lower and "profile" in stderr_lower:
+            return False, "Driver doesn't support encoder profile"
         if "no device found" in stderr_lower:
             return False, "No device found"
-        if "failed to" in stderr_lower and "encoder" in stderr_lower:
+        if "failed to" in stderr_lower and (
+            "initialize" in stderr_lower or "create" in stderr_lower
+        ):
             return False, "Encoder init failed"
         if "cannot load" in stderr_lower and ".so" in stderr_lower:
             lib = (
