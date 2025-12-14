@@ -187,7 +187,8 @@ def _check_intel_qsv() -> bool:
                             "h264_qsv",
                             "-f",
                             "null",
-                            "-",                        ],
+                            "-",
+                        ],
                         capture_output=True,
                         text=True,
                         timeout=5,
@@ -252,21 +253,56 @@ def _check_vaapi() -> Dict[str, Any]:
         if render_nodes:
             result["device"] = render_nodes[0]
 
-        # Attempt to identify vendor via vainfo or lspci
+        # Attempt to identify vendor via multiple methods
+        # Method 1: Check DRM device uevent files
         try:
-            vainfo = subprocess.run(
-                ["vainfo", "--display", "drm", "--device", result["device"]],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            output = vainfo.stdout.lower() + vainfo.stderr.lower()
-            if "intel" in output:
-                result["vendor"] = "intel"
-            elif "amd" in output or "radeon" in output:
-                result["vendor"] = "amd"
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            # Fallback: check lspci
+            for render_node in render_nodes:
+                # Extract card number from renderD128 -> card0
+                device_name = os.path.basename(render_node)
+                # Try to find the corresponding card path
+                card_paths = [
+                    f"/sys/class/drm/{device_name}/device/uevent",
+                    "/sys/class/drm/card0/device/uevent",
+                    "/sys/class/drm/card1/device/uevent",
+                ]
+                for card_path in card_paths:
+                    if os.path.exists(card_path):
+                        with open(card_path, "r") as f:
+                            content = f.read().lower()
+                            if "pci:v00008086" in content or "intel" in content:
+                                result["vendor"] = "intel"
+                                break
+                            elif (
+                                "pci:v00001002" in content
+                                or "amd" in content
+                                or "radeon" in content
+                            ):
+                                result["vendor"] = "amd"
+                                break
+                if result["vendor"] != "unknown":
+                    break
+        except Exception:
+            pass
+
+        # Method 2: Try vainfo if available
+        if result["vendor"] == "unknown":
+            try:
+                vainfo = subprocess.run(
+                    ["vainfo", "--display", "drm", "--device", result["device"]],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                output = vainfo.stdout.lower() + vainfo.stderr.lower()
+                if "intel" in output:
+                    result["vendor"] = "intel"
+                elif "amd" in output or "radeon" in output:
+                    result["vendor"] = "amd"
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+        # Method 3: Fallback to lspci
+        if result["vendor"] == "unknown":
             try:
                 lspci = subprocess.run(
                     ["lspci"], capture_output=True, text=True, timeout=2
