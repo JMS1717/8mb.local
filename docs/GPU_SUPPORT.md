@@ -7,7 +7,8 @@
 1. **NVIDIA NVENC** (CUDA-based)
 2. **Intel Quick Sync Video (QSV)**
 3. **AMD AMF** (Windows) / **VAAPI** (Linux)
-4. **CPU fallback** (software encoding)
+4. **Apple VideoToolbox** (macOS/Apple Silicon)
+5. **CPU fallback** (software encoding)
 
 ## Hardware Detection
 
@@ -16,7 +17,8 @@ The worker automatically detects available hardware acceleration when it starts 
 1. Checks for NVIDIA GPU via `nvidia-smi` and CUDA availability
 2. Checks for Intel QSV via FFmpeg `hwaccels` and encoder availability
 3. Checks for AMD AMF (Windows) or VAAPI (Linux) support
-4. Falls back to CPU software encoding if no GPU is detected
+4. Checks for Apple VideoToolbox on macOS (requires native worker)
+5. Falls back to CPU software encoding if no GPU is detected
 
 Detection results are logged at the start of each compression job: "Hardware: NVIDIA acceleration detected" (or INTEL/AMD/CPU).
 
@@ -24,11 +26,13 @@ Detection results are logged at the start of each compression job: "Hardware: NV
 
 Based on detected hardware, user codec requests are automatically mapped:
 
-| User Request | NVIDIA | Intel QSV | AMD AMF/VAAPI | CPU Fallback |
-|--------------|--------|-----------|---------------|--------------|
-| H.264 | h264_nvenc | h264_qsv | h264_amf/h264_vaapi | libx264 |
-| HEVC (H.265) | hevc_nvenc | hevc_qsv | hevc_amf/hevc_vaapi | libx265 |
-| AV1 | av1_nvenc | av1_qsv | av1_amf/av1_vaapi | libsvtav1 |
+| User Request | NVIDIA | Intel QSV | AMD AMF/VAAPI | VideoToolbox | CPU Fallback |
+|--------------|--------|-----------|---------------|--------------|--------------|
+| H.264 | h264_nvenc | h264_qsv | h264_amf/h264_vaapi | h264_videotoolbox | libx264 |
+| HEVC (H.265) | hevc_nvenc | hevc_qsv | hevc_amf/hevc_vaapi | hevc_videotoolbox | libx265 |
+| AV1 | av1_nvenc | av1_qsv | av1_amf/av1_vaapi | N/A* | libsvtav1 |
+
+*VideoToolbox does not support AV1 encoding. AV1 requests on macOS fall back to CPU encoding.
 
 ### AV1 Support Notes
 
@@ -117,6 +121,64 @@ devices:
 
 No special configuration needed. Works out of the box with software encoders.
 
+### macOS with Apple Silicon (VideoToolbox)
+
+Apple Silicon Macs (M1/M2/M3/M4) require a hybrid setup because Docker Desktop on macOS runs in a Linux VM without GPU access:
+
+```
+┌─────────────────────────────────────────────────────┐
+│              Docker (Linux containers)               │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐ │
+│  │   Redis     │  │  Frontend   │  │ Backend API │ │
+│  │   :6379     │  │   :5173     │  │   :8001     │ │
+│  └──────┬──────┘  └─────────────┘  └──────┬──────┘ │
+└─────────┼──────────────────────────────────┼───────┘
+          │ REDIS_URL                        │
+          ▼                                  ▼
+┌─────────────────────────────────────────────────────┐
+│            Native macOS (Apple Silicon)              │
+│  ┌──────────────────────────────────────────────┐   │
+│  │           Celery Worker (native)             │   │
+│  │  • FFmpeg with VideoToolbox                  │   │
+│  │  • h264_videotoolbox, hevc_videotoolbox      │   │
+│  └──────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────┘
+```
+
+**Setup:**
+
+1. Run the Docker containers using the macOS-specific compose file:
+   ```bash
+   docker-compose -f docker-compose.macos.yml up -d
+   ```
+
+2. Run the setup script to install dependencies and configure the native worker:
+   ```bash
+   ./scripts/macos-setup.sh
+   ```
+
+3. Start the native worker:
+   ```bash
+   source venv/bin/activate
+   export REDIS_URL=redis://localhost:6380/0
+   export UPLOAD_DIR=./uploads
+   export OUTPUT_DIR=./outputs
+   export PYTHONPATH=.:./backend-api:./worker
+   celery -A worker.celery_app worker --loglevel=info
+   ```
+
+**Requirements:**
+- macOS 11+ (Big Sur or newer)
+- Apple Silicon (M1/M2/M3/M4) or Intel Mac with T2 chip
+- Homebrew
+- FFmpeg with VideoToolbox support (`brew install ffmpeg`)
+- Python 3.10+
+
+**Notes:**
+- VideoToolbox supports H.264 and HEVC encoding only
+- AV1 encoding falls back to CPU (libaom-av1)
+- Redis is exposed on port 6380 to avoid conflicts with native Redis
+
 ## Performance Comparison
 
 Approximate encoding speeds (1080p video, medium quality):
@@ -203,7 +265,7 @@ This ensures maximum compatibility across different hardware configurations.
 
 Potential improvements for hardware acceleration support:
 
-- [ ] Apple VideoToolbox support (macOS)
+- [x] Apple VideoToolbox support (macOS) - Added in v1.x
 - [ ] Vulkan video encoding (cross-platform)
 - [ ] Raspberry Pi V4L2 M2M support
 - [ ] Dynamic hardware switching based on load

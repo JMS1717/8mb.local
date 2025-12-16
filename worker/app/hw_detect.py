@@ -1,6 +1,7 @@
 """Hardware acceleration detection and codec mapping."""
 
 import os
+import platform
 import subprocess
 from typing import Any, Dict, Optional
 
@@ -70,6 +71,21 @@ def detect_hw_accel() -> Dict[str, Any]:
         )
         if vaapi_info.get("av1_supported"):
             result["available_encoders"]["av1"] = "av1_vaapi"
+        return result
+
+    # Check for VideoToolbox (macOS/Apple Silicon)
+    if _check_videotoolbox():
+        result.update(
+            {
+                "type": "videotoolbox",
+                "decode_method": "videotoolbox",
+                "available_encoders": {
+                    "h264": "h264_videotoolbox",
+                    "hevc": "hevc_videotoolbox",
+                    # AV1 not supported by VideoToolbox - will use CPU fallback
+                },
+            }
+        )
         return result
 
     # CPU fallback encoders
@@ -322,6 +338,49 @@ def _check_vaapi() -> Dict[str, Any]:
     return result
 
 
+def _check_videotoolbox() -> bool:
+    """Check if VideoToolbox (macOS) is available for hardware encoding."""
+    if platform.system() != "Darwin":
+        return False
+
+    try:
+        # Check ffmpeg supports videotoolbox encoders
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if "h264_videotoolbox" not in result.stdout:
+            return False
+
+        # Test actual encoding works
+        test = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "nullsrc=s=64x64:d=0.1",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "h264_videotoolbox",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+        return test.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, list]:
     """
     Map user-requested codec to appropriate hardware encoder.
@@ -340,7 +399,7 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
         return encoder, flags, init_flags
 
     # If user explicitly requested a specific hardware encoder, honor it
-    # (e.g., h264_nvenc, hevc_amf, av1_vaapi, etc.)
+    # (e.g., h264_nvenc, hevc_amf, av1_vaapi, h264_videotoolbox, etc.)
     if requested_codec in (
         "h264_nvenc",
         "hevc_nvenc",
@@ -351,6 +410,8 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
         "h264_vaapi",
         "hevc_vaapi",
         "av1_vaapi",
+        "h264_videotoolbox",
+        "hevc_videotoolbox",
     ):
         encoder = requested_codec
         flags = []
@@ -389,6 +450,13 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
                 "va",
             ]
             flags = ["-vf", "format=nv12|vaapi,hwupload"]
+        elif encoder.endswith("_videotoolbox"):
+            # VideoToolbox doesn't need init_hw_device
+            flags = ["-pix_fmt", "nv12"]
+            if "h264" in encoder:
+                flags += ["-profile:v", "high"]
+            elif "hevc" in encoder:
+                flags += ["-profile:v", "main"]
 
         return encoder, flags, init_flags
 
@@ -439,6 +507,12 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
             "va",
         ]
         flags = ["-vf", "format=nv12|vaapi,hwupload"]
+    elif encoder.endswith("_videotoolbox"):
+        flags = ["-pix_fmt", "nv12"]
+        if base == "h264":
+            flags += ["-profile:v", "high"]
+        elif base == "hevc":
+            flags += ["-profile:v", "main"]
     elif encoder == "libx264":
         flags = ["-pix_fmt", "yuv420p", "-profile:v", "high"]
     elif encoder == "libx265":

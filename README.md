@@ -543,10 +543,36 @@ If progress still doesn't update until completion, check your proxy logs and ver
 5. Use the appropriate docker command for your GPU
 
 #### macOS
+
+**Option 1: CPU-only (Docker)**
 1. Install Docker Desktop
-2. Note: No GPU acceleration available on macOS (Docker runs in Linux VM without GPU passthrough)
-3. Use CPU-only docker command
-4. Performance will be slower but functional
+2. Use the standard docker command
+3. Note: Docker on macOS runs in a Linux VM without GPU passthrough, so encoding uses CPU
+
+**Option 2: Hardware acceleration with Apple Silicon (Hybrid Setup)**
+
+For hardware-accelerated encoding on M1/M2/M3/M4 Macs, use a hybrid setup with Docker for services and a native worker:
+
+1. Install Docker Desktop
+2. Start containers with macOS-specific compose:
+   ```bash
+   docker-compose -f docker-compose.macos.yml up -d
+   ```
+3. Run the setup script:
+   ```bash
+   ./scripts/macos-setup.sh
+   ```
+4. Start the native worker (in a new terminal):
+   ```bash
+   source venv/bin/activate
+   export REDIS_URL=redis://localhost:6380/0
+   export UPLOAD_DIR=./uploads
+   export OUTPUT_DIR=./outputs
+   export PYTHONPATH=.:./backend-api:./worker
+   celery -A worker.celery_app worker --loglevel=info
+   ```
+
+This enables VideoToolbox hardware encoding (H.264, HEVC) using Apple Silicon GPU. See [docs/GPU_SUPPORT.md](docs/GPU_SUPPORT.md) for details.
 
 ### Verify Installation
 

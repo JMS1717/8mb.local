@@ -415,6 +415,13 @@ def run_startup_tests(hw_info: Dict) -> Dict[str, bool]:
                 ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi"],
             ),
         }
+    elif hw_type_lower == "videotoolbox":
+        # VideoToolbox (macOS/Apple Silicon)
+        test_codecs = ["h264_videotoolbox", "hevc_videotoolbox"]
+        hw_decoders = {
+            "h264_videotoolbox": ("h264", ["-hwaccel", "videotoolbox"]),
+            "hevc_videotoolbox": ("hevc", ["-hwaccel", "videotoolbox"]),
+        }
 
     # Always test CPU fallbacks
     test_codecs.extend(["libx264", "libx265", "libaom-av1"])
