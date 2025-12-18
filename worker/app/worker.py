@@ -163,12 +163,10 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     bufsize = int(video_kbps * 2)
 
     # Map requested codec to actual encoder and flags
-    actual_encoder, v_flags, init_hw_flags = map_codec_to_hw(video_codec, hw_info)
     
     # Fallback to CPU only if startup tests explicitly marked encoder as unavailable.
     # If cache is empty (tests still running in background), attempt hardware and rely on runtime fallback below.
-    original_encoder = actual_encoder
-    if actual_encoder not in ("libx264", "libx265", "libaom-av1"):
+    original_encoder = actual_encoder    if actual_encoder not in ("libx264", "libx265", "libaom-av1"):
         global ENCODER_TEST_CACHE
         cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
         if cache_key in ENCODER_TEST_CACHE and not ENCODER_TEST_CACHE[cache_key]:
@@ -525,6 +523,27 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             vf_filters = [f.replace("scale=", "scale_npp=") for f in vf_filters]
         _publish(self.request.id, {"type": "log", "message": f"Decoder: using cuda ({in_codec})"})
 
+    # Handle VAAPI filter chain specially when video filters are present
+    # For VAAPI: upload to hardware first, then use scale_vaapi for GPU-based scaling
+    vaapi_with_filters = actual_encoder.endswith("_vaapi") and vf_filters
+    if vaapi_with_filters:
+        # Convert CPU scale filters to VAAPI scale filters (scale -> scale_vaapi)
+        vaapi_filters = [f.replace("scale=", "scale_vaapi=") for f in vf_filters]
+        
+        # Find the -vf flag and append scale_vaapi AFTER the hwupload
+        # Correct order: format=nv12|vaapi,hwupload,scale_vaapi=...
+        modified_v_flags = []
+        for i, flag in enumerate(v_flags):
+            if flag == "-vf" and i + 1 < len(v_flags):
+                # Append the VAAPI scale filter after the upload chain
+                vaapi_scale = ",".join(vaapi_filters)
+                modified_v_flags.append(flag)
+                modified_v_flags.append(f"{v_flags[i+1]},{vaapi_scale}")
+            elif flag != "-vf" and (i == 0 or v_flags[i-1] != "-vf"):
+                # Add other flags (skip the original -vf value since we already modified it)
+                modified_v_flags.append(flag)
+        v_flags = modified_v_flags
+    
     # Construct command
     cmd = [
         "ffmpeg", "-hide_banner", "-y",
@@ -536,22 +555,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         *v_flags,
     ]
     
-    # Add video filter if needed
-    # Special handling for VAAPI: filter already in v_flags
-    if vf_filters and not actual_encoder.endswith("_vaapi"):
+    # Add video filter if needed (for non-VAAPI encoders)
+    if vf_filters and not vaapi_with_filters:
         cmd += ["-vf", ",".join(vf_filters)]
-    elif vf_filters and actual_encoder.endswith("_vaapi"):
-        # For VAAPI, we need to inject scale before format=nv12|vaapi,hwupload
-        # Parse existing -vf from v_flags
-        scale_filter = ",".join(vf_filters)
-        # Replace the -vf in v_flags if present
-        for i, flag in enumerate(v_flags):
-            if flag == "-vf":
-                v_flags[i+1] = f"{scale_filter},{v_flags[i+1]}"
-                break
-        cmd += v_flags[:]
-        v_flags = []  # Already added
-    # Note: v_flags were already added earlier; avoid duplicating them for non-VAAPI paths
     
     cmd += [
         "-b:v", f"{int(video_kbps)}k",
