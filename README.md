@@ -149,6 +149,23 @@ Intel Arc (e.g., A140, A380) and recent Intel iGPUs are supported via VAAPI and 
   - Uncomment the devices mapping in `docker-compose.yml`:
     - `devices: ["/dev/dri:/dev/dri"]`
 
+#### Synology NAS Support
+
+Intel-based Synology NAS devices (e.g., DS1019+ with Intel Celeron J3455) support hardware transcoding via Intel Quick Sync Video (QSV). To enable:
+
+1. Mount the DRI devices in your docker-compose.yml:
+   ```yaml
+   devices:
+     - /dev/dri/renderD128:/dev/dri/renderD128
+     - /dev/dri/card0:/dev/dri/card0
+   ```
+
+2. Ensure the container has access to video group permissions (may require `group_add` or `privileged: true` on some Synology DSM versions)
+
+3. After starting the container, check the System panel in the UI to verify QSV encoders are detected and passing tests
+
+**Note**: QSV on Linux requires VAAPI as a backend. The container automatically initializes VAAPI first, then derives QSV from it, which is necessary for proper hardware access on most Intel systems.
+
 Limitations:
 - WSL2 (Windows) does not currently expose Intel VAAPI/QSV devices to Linux containers. On Windows, NVIDIA (CUDA/NVENC) is supported; Intel VAAPI/QSV is supported on Linux hosts.
 
@@ -651,8 +668,16 @@ Fix: remove `--gpus all` and any `NVIDIA_*` environment variables. The app will 
 - **Intel QSV not working**: 
   - Ensure `/dev/dri` exists: `ls -l /dev/dri`
   - Check device permissions: `groups` should show `video` or `render`
-  - Verify `--device=/dev/dri:/dev/dri` flag is used
+  - Verify `--device=/dev/dri:/dev/dri` flag is used (or specific devices like `/dev/dri/renderD128:/dev/dri/renderD128`)
   - Install Intel GPU drivers if needed
+  - **Synology NAS specific**: 
+    - Some Synology DSM versions may require `privileged: true` or `group_add: [video]` in docker-compose
+    - Check that DSM's Package Center hasn't disabled transcoding hardware
+    - Verify container can access devices: `docker exec 8mblocal ls -l /dev/dri`
+  - **"Error while opening enc" with QSV**: 
+    - This fix has been implemented - QSV now properly initializes VAAPI as backend
+    - Run the encoder tests from Settings → System → Run encoder tests
+    - If still failing, check `dmesg | grep i915` for kernel-level GPU issues
   
 - **AMD VAAPI issues**: 
   - Ensure Mesa drivers installed: `glxinfo | grep -i mesa` (install `mesa-utils`)
