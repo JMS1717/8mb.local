@@ -221,8 +221,28 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
                     "-",
                 ]
             )
+        elif encoder_name.endswith("_qsv") and hw_flags:
+            # QSV encoders need hardware init flags for proper device initialization
+            cmd.extend(hw_flags)
+            cmd.extend(
+                [
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=black:s=256x256:d=0.1",
+                    "-c:v",
+                    encoder_name,
+                    "-t",
+                    "0.1",
+                    "-frames:v",
+                    "3",
+                    "-f",
+                    "null",
+                    "-",
+                ]
+            )
         else:
-            # For other encoders (NVENC, QSV, CPU), test without hw_flags
+            # For other encoders (NVENC, CPU-only), test without hw_flags
             cmd.extend(
                 [
                     "-f",
