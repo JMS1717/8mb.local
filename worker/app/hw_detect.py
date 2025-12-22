@@ -156,7 +156,7 @@ def _check_intel_qsv(vaapi_device: Optional[str] = None) -> tuple[bool, Optional
     except Exception:
         # If we can't check, proceed with ffmpeg probes below
         device = "/dev/dri/renderD128"  # Default fallback
-    
+
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-hwaccels"],
@@ -205,10 +205,6 @@ def _check_intel_qsv(vaapi_device: Optional[str] = None) -> tuple[bool, Optional
                     # QSV initialization succeeded only if return code is 0
                     if test_result.returncode == 0:
                         return (True, device)
-                    # If that failed, log the error for debugging
-                    if test_result.stderr:
-                        # Don't fail completely, but log for investigation
-                        pass
                 except (FileNotFoundError, subprocess.TimeoutExpired):
                     pass
                 return (False, None)

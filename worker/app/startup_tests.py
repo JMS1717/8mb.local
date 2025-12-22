@@ -242,7 +242,7 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
                 ]
             )
         else:
-            # For other encoders (NVENC, CPU), test without hw_flags
+            # For other encoders (NVENC, CPU-only), test without hw_flags
             cmd.extend(
                 [
                     "-f",
