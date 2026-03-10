@@ -38,15 +38,16 @@ def detect_hw_accel() -> Dict[str, Any]:
         return result
 
     # Intel Quick Sync Video
-    qsv_available = _check_intel_qsv()
-    # VAAPI (Intel/AMD)
+    # Check VAAPI first - QSV requires VAAPI as backend on Linux
     vaapi_info = _check_vaapi()
+    qsv_available, qsv_device = _check_intel_qsv(vaapi_info.get("device"))
 
     if qsv_available:
         result.update(
             {
                 "type": "intel",
                 "decode_method": "qsv",
+                "vaapi_device": qsv_device,  # Store VAAPI device for QSV initialization
                 "available_encoders": {
                     "h264": "h264_qsv",
                     "hevc": "hevc_qsv",
@@ -131,8 +132,11 @@ def _check_nvidia() -> bool:
     return False
 
 
-def _check_intel_qsv() -> bool:
+def _check_intel_qsv(vaapi_device: Optional[str] = None) -> tuple[bool, Optional[str]]:
     """Check if Intel QSV is available.
+
+    QSV on Linux requires VAAPI as a backend, so we initialize VAAPI first then derive QSV.
+    Returns (available: bool, device_path: str | None).
 
     Notes:
     - Requires access to /dev/dri on Linux hosts. Under WSL2, /dev/dri is not exposed
@@ -146,10 +150,13 @@ def _check_intel_qsv() -> bool:
         render_nodes = glob.glob("/dev/dri/renderD*")
         if not render_nodes:
             # If this is WSL (or any env) without /dev/dri, QSV cannot work
-            return False
+            return (False, None)
+        # Use first render node or provided VAAPI device
+        device = vaapi_device or render_nodes[0]
     except Exception:
         # If we can't check, proceed with ffmpeg probes below
-        pass
+        device = "/dev/dri/renderD128"  # Default fallback
+
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-hwaccels"],
@@ -166,7 +173,8 @@ def _check_intel_qsv() -> bool:
                 timeout=2,
             )
             if "h264_qsv" in encoders.stdout:
-                # Test QSV initialization
+                # Test QSV initialization with VAAPI backend
+                # QSV on Linux needs VAAPI initialized first, then derive QSV from it
                 try:
                     test_result = subprocess.run(
                         [
@@ -175,7 +183,9 @@ def _check_intel_qsv() -> bool:
                             "-loglevel",
                             "error",
                             "-init_hw_device",
-                            "qsv=hw",
+                            f"vaapi=va:{device}",
+                            "-init_hw_device",
+                            "qsv=hw@va",
                             "-f",
                             "lavfi",
                             "-i",
@@ -194,14 +204,14 @@ def _check_intel_qsv() -> bool:
                     )
                     # QSV initialization succeeded only if return code is 0
                     if test_result.returncode == 0:
-                        return True
+                        return (True, device)
                 except (FileNotFoundError, subprocess.TimeoutExpired):
                     pass
-                return False
+                return (False, None)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    return False
+    return (False, None)
 
 
 def _check_vaapi() -> Dict[str, Any]:
@@ -365,9 +375,14 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
             elif "hevc" in encoder:
                 flags += ["-profile:v", "main"]
         elif encoder.endswith("_qsv"):
+            # QSV on Linux requires VAAPI as backend
+            # Initialize VAAPI device first, then derive QSV from it
+            vaapi_device = hw_info.get("vaapi_device") or "/dev/dri/renderD128"
             init_flags = [
                 "-init_hw_device",
-                "qsv=hw",
+                f"vaapi=va:{vaapi_device}",
+                "-init_hw_device",
+                "qsv=hw@va",
                 "-hwaccel",
                 "qsv",
                 "-hwaccel_output_format",
@@ -415,9 +430,14 @@ def map_codec_to_hw(requested_codec: str, hw_info: Dict) -> tuple[str, list, lis
         elif base == "hevc":
             flags += ["-profile:v", "main"]
     elif encoder.endswith("_qsv"):
+        # QSV on Linux requires VAAPI as backend
+        # Initialize VAAPI device first, then derive QSV from it
+        vaapi_device = hw_info.get("vaapi_device") or "/dev/dri/renderD128"
         init_flags = [
             "-init_hw_device",
-            "qsv=hw",
+            f"vaapi=va:{vaapi_device}",
+            "-init_hw_device",
+            "qsv=hw@va",
             "-hwaccel",
             "qsv",
             "-hwaccel_output_format",
