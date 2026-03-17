@@ -57,7 +57,7 @@ RUN npm run build && \
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
 # Build-time version (can be overridden)
-ARG BUILD_VERSION=123
+ARG BUILD_VERSION=134
 ENV APP_VERSION=${BUILD_VERSION}
 ARG BUILD_COMMIT=unknown
 ENV BUILD_COMMIT=${BUILD_COMMIT}
