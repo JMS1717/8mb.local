@@ -398,6 +398,9 @@ def get_codec_visibility_settings() -> dict:
         'h264_amf': get_bool('CODEC_H264_AMF'),
         'hevc_amf': get_bool('CODEC_HEVC_AMF'),
         'av1_amf': get_bool('CODEC_AV1_AMF'),
+        # VideoToolbox (macOS/Apple Silicon)
+        'h264_videotoolbox': get_bool('CODEC_H264_VIDEOTOOLBOX'),
+        'hevc_videotoolbox': get_bool('CODEC_HEVC_VIDEOTOOLBOX'),
         # CPU
         'libx264': get_bool('CODEC_LIBX264'),
         'libx265': get_bool('CODEC_LIBX265'),
@@ -422,6 +425,8 @@ def update_codec_visibility_settings(settings: dict):
         'h264_amf': 'CODEC_H264_AMF',
         'hevc_amf': 'CODEC_HEVC_AMF',
         'av1_amf': 'CODEC_AV1_AMF',
+        'h264_videotoolbox': 'CODEC_H264_VIDEOTOOLBOX',
+        'hevc_videotoolbox': 'CODEC_HEVC_VIDEOTOOLBOX',
         'libx264': 'CODEC_LIBX264',
         'libx265': 'CODEC_LIBX265',
         'libaom_av1': 'CODEC_LIBAOM_AV1',

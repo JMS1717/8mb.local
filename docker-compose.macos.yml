@@ -1,0 +1,26 @@
+# Docker Compose for macOS with Apple Silicon
+#
+# This configuration runs Redis, frontend, and backend API in Docker while
+# exposing Redis on port 6380 for a native macOS worker to connect.
+#
+# Usage:
+#   1. Start containers: docker-compose -f docker-compose.macos.yml up -d
+#   2. Run native worker: see scripts/macos-setup.sh
+#
+# Note: No GPU passthrough since Docker Desktop on macOS runs in a Linux VM.
+# Hardware acceleration is provided by the native macOS worker using VideoToolbox.
+
+services:
+  8mblocal:
+    image: jms1717/8mblocal:latest
+    container_name: 8mblocal
+    ports:
+      - "8001:8001"
+      - "6380:6379"  # Expose Redis on 6380 to avoid conflict with native Redis
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./.env:/app/.env  # optional custom settings
+    environment:
+      - REDIS_URL=redis://127.0.0.1:6379/0
+    restart: unless-stopped

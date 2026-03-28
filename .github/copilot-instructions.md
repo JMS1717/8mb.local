@@ -12,6 +12,7 @@ Help AI coding agents be immediately productive in this repository by summarizin
 - `README.md` — high-level architecture, supported GPU workflows, and Docker examples.
 - `supervisord.conf` — exact commands used in container images for `uvicorn` and Celery worker (very useful for reproducing environment variables for GPU support).
 - `docker-compose.yml` — examples for CPU vs NVIDIA vs VAAPI setups.
+- `docker-compose.macos.yml` — macOS hybrid setup (Docker for services, native worker for VideoToolbox).
 - `backend-api/app/main.py` — request flow, SSE/Redis interactions, job metadata keys (e.g. `job:{task.id}`, `progress:{task_id}`), and how uploads are saved.
 - `backend-api/app/config.py` — canonical environment variables and `.env` usage.
 - `worker/app/worker.py` — encode pipeline, hardware detection, encoder test cache, and progress publish format (messages use `type` keys: `log`, `progress`, `done`, `error`).
@@ -25,12 +26,13 @@ Help AI coding agents be immediately productive in this repository by summarizin
 - Worker dev: start Celery similar to supervisord:
   - `celery -A worker.celery_app worker --loglevel=info -n 8mblocal@%h --concurrency=4` (set `REDIS_URL` env). Worker code triggers startup encoder tests automatically — they run in a background thread.
 - Frontend dev: `cd frontend && npm install && npm run dev` (uses Vite); `npm run build` for production bundles.
+- macOS with Apple Silicon: Use `docker-compose.macos.yml` for services, then run `./scripts/macos-setup.sh` and start a native worker for VideoToolbox hardware acceleration. See `docs/GPU_SUPPORT.md` for details.
 
 ## Important conventions and patterns
 - Job/task IDs: backend generates `job_id` and worker uses Celery `task_id`. Redis keys: `job:{task.id}`, `progress:{task_id}` and `cancel:{task_id}`. Use these exact keys when integrating or debugging.
 - File naming: uploads saved to `/app/uploads` with `jobid_filename`; outputs to `/app/outputs` with `_8mblocal_{taskid}` suffix to avoid collisions.
-- Hardware detection vs tests: hardware is detected (`worker/app/hw_detect.py`) and then validated by background startup tests. Encoders may be listed by ffmpeg but fail initialization — the startup cache (`ENCODER_TEST_CACHE`) and `DISABLE_STARTUP_TESTS` env control behavior.
-- Encoder mapping: requested codec → mapped encoder happens in `worker/app/hw_detect.py` and `map_codec_to_hw`. When a startup test marks an encoder unavailable, worker falls back to CPU encoders (e.g. `libx264`).
+- Hardware detection vs tests: hardware is detected (`worker/app/hw_detect.py`) and then validated by background startup tests. Encoders may be listed by ffmpeg but fail initialization — the startup cache (`ENCODER_TEST_CACHE`) and `DISABLE_STARTUP_TESTS` env control behavior. Supported hardware: NVIDIA NVENC, Intel QSV, AMD VAAPI, Apple VideoToolbox (macOS native worker only).
+- Encoder mapping: requested codec → mapped encoder happens in `worker/app/hw_detect.py` and `map_codec_to_hw`. When a startup test marks an encoder unavailable, worker falls back to CPU encoders (e.g. `libx264`). VideoToolbox encoders (`h264_videotoolbox`, `hevc_videotoolbox`) are only available on macOS.
 - Progress messages: worker publishes JSON events on Redis pub/sub. Messages include `type` (`log`/`progress`/`done`/`error`) and often `task_id` and `progress` fields. The frontend expects these shapes.
 
 ## Tests and validation
