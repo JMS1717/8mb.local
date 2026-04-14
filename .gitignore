@@ -2,6 +2,7 @@
 .DS_Store
 Thumbs.db
 .vscode/
+.cursor/
 
 # Python
 __pycache__/
@@ -21,6 +22,10 @@ uploads/*
 !uploads/.gitkeep
 outputs/*
 !outputs/.gitkeep
+
+# Test media files (binary)
+test.mp4
+host-vid.mp4
 
 # Docker
 *.env.local

@@ -1,4 +1,11 @@
 import { env } from '$env/dynamic/public';
+import type { BatchUploadPayload } from './types';
+
+export type { BatchUploadPayload };
+
+// Re-export SSE helpers so existing imports from '$lib/api' keep working.
+export { openProgressStream } from './sse';
+
 // Prefer same-origin when PUBLIC_BACKEND_URL is empty or unset (for baked SPA inside the container)
 const RAW = (env.PUBLIC_BACKEND_URL as string | undefined) || '';
 const BACKEND = RAW && RAW.trim() !== '' ? RAW.replace(/\/$/, '') : '';
@@ -55,25 +62,6 @@ export function uploadWithProgress(
   });
 }
 
-export type BatchUploadPayload = {
-  target_size_mb: number;
-  video_codec: string;
-  audio_codec: string;
-  audio_bitrate_kbps: number;
-  preset: string;
-  container: 'mp4' | 'mkv';
-  tune: string;
-  max_width?: number | null;
-  max_height?: number | null;
-  start_time?: string | null;
-  end_time?: string | null;
-  force_hw_decode?: boolean;
-  fast_mp4_finalize?: boolean;
-  auto_resolution?: boolean;
-  min_auto_resolution?: number;
-  target_resolution?: number | null;
-  audio_only?: boolean;
-};
 
 export function uploadBatchWithProgress(
   files: File[],
@@ -151,32 +139,9 @@ export async function startCompress(payload: any, auth?: {user: string, pass: st
 
 export type AutoResolutionOption = {
   mode: 'auto' | 'explicit' | 'original' | 'audio-only';
-  targetHeight?: number; // for explicit
-  minAutoHeight?: number; // for auto
+  targetHeight?: number;
+  minAutoHeight?: number;
 };
-
-export function openProgressStream(taskId: string, auth?: {user: string, pass: string}): EventSource {
-  // Build absolute URL for SSE
-  let sseUrl: string;
-  if (BACKEND) {
-    // External backend specified
-    sseUrl = `${BACKEND}/api/stream/${taskId}`;
-  } else {
-    // Same-origin: use relative path
-    sseUrl = `/api/stream/${taskId}`;
-  }
-  
-  // EventSource doesn't support custom headers, so if auth is needed,
-  // append credentials as query params (backend must support this)
-  if (auth) {
-    const authParam = btoa(`${auth.user}:${auth.pass}`);
-    sseUrl += `?auth=${encodeURIComponent(authParam)}`;
-  }
-  
-  console.log('Opening SSE connection to:', sseUrl);
-  const es = new EventSource(sseUrl);
-  return es;
-}
 
 export function downloadUrl(taskId: string) {
   return `${BACKEND}/api/jobs/${taskId}/download`;

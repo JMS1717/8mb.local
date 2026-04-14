@@ -17,7 +17,7 @@ class CompressRequest(BaseModel):
     job_id: str
     filename: str
     target_size_mb: float
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1','h264_qsv','hevc_qsv','av1_qsv','h264_vaapi','hevc_vaapi','av1_vaapi'] = 'av1_nvenc'
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
     audio_bitrate_kbps: int = 128
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
@@ -65,7 +65,7 @@ class PasswordChange(BaseModel):
 
 class DefaultPresets(BaseModel):
     target_mb: float = 25
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1','h264_qsv','hevc_qsv','av1_qsv','h264_vaapi','hevc_vaapi','av1_vaapi'] = 'av1_nvenc'
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
     audio_kbps: Literal[64,96,128,160,192,256] = 128
@@ -75,7 +75,7 @@ class DefaultPresets(BaseModel):
 
 class AvailableCodecsResponse(BaseModel):
     """Response containing hardware-detected codecs and user-enabled codecs."""
-    hardware_type: str  # nvidia, intel, amd, cpu
+    hardware_type: str  # nvidia, cpu
     available_encoders: dict  # {h264: "h264_nvenc", ...}
     enabled_codecs: list[str]  # ["h264_nvenc", "hevc_nvenc", ...]
     
@@ -85,24 +85,16 @@ class CodecVisibilitySettings(BaseModel):
     h264_nvenc: bool = True
     hevc_nvenc: bool = True
     av1_nvenc: bool = True
-    # Intel QSV
-    h264_qsv: bool = True
-    hevc_qsv: bool = True
-    av1_qsv: bool = True
-    # Intel/AMD VAAPI (Linux)
-    h264_vaapi: bool = True
-    hevc_vaapi: bool = True
-    av1_vaapi: bool = True
     # CPU
     libx264: bool = True
     libx265: bool = True
-    libaom_av1: bool = True  # Note: using underscore because dash is invalid in Python identifiers
+    libaom_av1: bool = True
 
 
 class PresetProfile(BaseModel):
     name: str
     target_mb: float
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1','h264_qsv','hevc_qsv','av1_qsv','h264_vaapi','hevc_vaapi','av1_vaapi']
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1']
     audio_codec: Literal['libopus','aac','none']
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality']
     audio_kbps: Literal[64,96,128,160,192,256]

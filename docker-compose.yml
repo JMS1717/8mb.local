@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "134"
+        BUILD_VERSION: "135"
     image: jms1717/8mblocal:latest
     container_name: 8mblocal
     ports:
@@ -14,16 +14,11 @@ services:
       - ./outputs:/app/outputs
       - ./.env:/app/.env  # optional custom settings
     
-    # GPU configuration: enable NVIDIA GPUs by default. Ensure your host has
-    # the NVIDIA Container Toolkit / drivers available. On Linux, mounting
-    # /dev/dri may be required for VAAPI; on WSL2 ensure GPU support is
-    # enabled in Docker Desktop.
+    # NVIDIA GPU acceleration: requires NVIDIA Container Toolkit
+    # Install: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
     gpus: all
-    # NVIDIA runtime / GPU environment (keep REDIS_URL above)
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
-      # Optional: enable VAAPI driver name for Intel/AMD when /dev/dri is mounted
-      - LIBVA_DRIVER_NAME=iHD
     restart: unless-stopped

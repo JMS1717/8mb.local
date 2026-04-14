@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import json
 import os
 import subprocess
 from typing import Optional
 
 
-def get_gpu_env():
+def get_gpu_env() -> dict[str, str]:
     """
     Get environment with NVIDIA GPU variables and library paths for subprocess calls.
     """
@@ -26,6 +28,7 @@ def get_gpu_env():
 
 
 def ffprobe_info(input_path: str) -> dict:
+    """Return duration, stream bitrates, codec, dimensions, and audio/video presence from ffprobe."""
     cmd = [
         "ffprobe", "-v", "error",
         "-show_entries", "format=duration:stream=index,codec_type,codec_name,bit_rate,width,height",
@@ -76,7 +79,8 @@ def ffprobe_info(input_path: str) -> dict:
     }
 
 
-def calc_bitrates(target_mb: float, duration_s: float, audio_kbps: int):
+def calc_bitrates(target_mb: float, duration_s: float, audio_kbps: int) -> tuple[float, float]:
+    """Compute total and video bitrates (kbps) to fit target size given duration and fixed audio bitrate."""
     if duration_s <= 0:
         return 0.0, 0.0
     total_kbps = (target_mb * 8192.0) / duration_s

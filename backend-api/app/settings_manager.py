@@ -2,13 +2,15 @@
 Settings manager for 8mb.local
 Handles reading and writing configuration at runtime
 """
+from __future__ import annotations
+
+import json
+import logging
 import os
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-import json
-import urllib.request
-import urllib.error
-from .celery_app import celery_app
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 ENV_FILE = Path("/app/.env")
@@ -46,64 +48,46 @@ def _ensure_defaults() -> Dict[str, Any]:
         changed = True
     if 'preset_profiles' not in data:
         data['preset_profiles'] = [
-            {"name":"H265 9.7MB (NVENC)", "target_mb":9.7, "video_codec":"hevc_nvenc", "audio_codec":"libopus", "preset":"p6", "audio_kbps":128, "container":"mp4", "tune":"hq"},
-            {"name":"H264 8MB (NVENC)", "target_mb":8, "video_codec":"h264_nvenc", "audio_codec":"libopus", "preset":"p6", "audio_kbps":128, "container":"mp4", "tune":"hq"},
-            {"name":"AV1 8MB (CPU)", "target_mb":8, "video_codec":"libaom-av1", "audio_codec":"libopus", "preset":"p6", "audio_kbps":128, "container":"mkv", "tune":"hq"},
-            {"name":"H265 50MB HQ", "target_mb":50, "video_codec":"hevc_nvenc", "audio_codec":"aac", "preset":"p7", "audio_kbps":192, "container":"mp4", "tune":"hq"},
-            {"name":"H264 25MB Fast", "target_mb":25, "video_codec":"h264_nvenc", "audio_codec":"aac", "preset":"p3", "audio_kbps":128, "container":"mp4", "tune":"ll"}
+            {"name": "AV1 9.7MB (NVENC)", "target_mb": 9.7, "video_codec": "av1_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+            {"name": "HEVC 9.7MB (NVENC)", "target_mb": 9.7, "video_codec": "hevc_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+            {"name": "H264 8MB (NVENC)", "target_mb": 8, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+            {"name": "HEVC 50MB HQ (NVENC)", "target_mb": 50, "video_codec": "hevc_nvenc", "audio_codec": "aac", "preset": "p7", "audio_kbps": 192, "container": "mp4", "tune": "hq"},
+            {"name": "H264 25MB Fast (NVENC)", "target_mb": 25, "video_codec": "h264_nvenc", "audio_codec": "aac", "preset": "p3", "audio_kbps": 128, "container": "mp4", "tune": "ll"},
+            {"name": "AV1 8MB (CPU)", "target_mb": 8, "video_codec": "libaom-av1", "audio_codec": "libopus", "preset": "4", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
         ]
         changed = True
-    # Ensure an AV1 NVENC profile exists even if preset_profiles already seeded earlier
     try:
         profiles = data.get('preset_profiles', [])
         has_av1_nvenc = any(p.get('video_codec') == 'av1_nvenc' for p in profiles)
         if not has_av1_nvenc:
-            # Add a sensible default AV1 NVENC profile
-            profiles.append({
+            profiles.insert(0, {
                 "name": "AV1 9.7MB (NVENC)",
                 "target_mb": 9.7,
                 "video_codec": "av1_nvenc",
-                "audio_codec": "aac",
+                "audio_codec": "libopus",
                 "preset": "p6",
                 "audio_kbps": 128,
                 "container": "mp4",
-                "tune": "hq"
+                "tune": "hq",
             })
             data['preset_profiles'] = profiles
             changed = True
     except Exception:
         pass
     if 'default_preset' not in data:
-        # Try to pick a sensible default preset based on worker-reported preferred
-        # codec (AV1>HEVC>H264). If worker info isn't available, fall back to the
-        # first preset in the list to avoid hardcoding a codec.
-        preferred_encoder = None
-        try:
-            # Give the worker a bit more time to respond (startup tests can
-            # take a moment); 5s is still fast for a UI request but avoids
-            # spurious fallbacks to the persistent default preset.
-            res = celery_app.send_task('worker.worker.get_hardware_info')
-            hw = res.get(timeout=5) or {}
-            # worker may include a 'preferred' dict
-            if isinstance(hw, dict) and 'preferred' in hw:
-                preferred_encoder = hw['preferred'].get('encoder')
-        except Exception:
-            preferred_encoder = None
-
-        chosen_name = None
-        if preferred_encoder:
-            for p in data.get('preset_profiles', []):
-                if p.get('video_codec') == preferred_encoder:
-                    chosen_name = p.get('name')
-                    break
-        # If no match found, use first profile name
-        if not chosen_name and data.get('preset_profiles'):
-            chosen_name = data['preset_profiles'][0].get('name')
-
-        data['default_preset'] = chosen_name or 'Default'
+        data['default_preset'] = _pick_initial_default(data.get('preset_profiles', []))
+        changed = True
+    if 'codec_visibility' not in data:
+        data['codec_visibility'] = {
+            'h264_nvenc': True,
+            'hevc_nvenc': True,
+            'av1_nvenc': True,
+            'libx264': True,
+            'libx265': True,
+            'libaom_av1': True,
+        }
         changed = True
     if 'retention_hours' not in data:
-        # fallback to env if present
         env_vars = read_env_file()
         try:
             data['retention_hours'] = int(os.getenv('FILE_RETENTION_HOURS', env_vars.get('FILE_RETENTION_HOURS', '1')))
@@ -115,6 +99,22 @@ def _ensure_defaults() -> Dict[str, Any]:
     return data
 
 
+def _pick_initial_default(profiles: List[Dict[str, Any]]) -> str:
+    """Pick the best initial default preset name from available profiles.
+
+    Priority: AV1 NVENC > HEVC NVENC > H264 NVENC > any CPU codec > first profile.
+    """
+    codec_priority = ['av1_nvenc', 'hevc_nvenc', 'h264_nvenc',
+                       'libsvtav1', 'libaom-av1', 'libx265', 'libx264']
+    for codec in codec_priority:
+        for p in profiles:
+            if p.get('video_codec') == codec:
+                return p.get('name', 'Default')
+    if profiles:
+        return profiles[0].get('name', 'Default')
+    return 'Default'
+
+
 def read_env_file() -> dict:
     """Read current .env file and return as dict"""
     if not ENV_FILE.exists():
@@ -122,8 +122,8 @@ def read_env_file() -> dict:
     
     # Check if it's a directory (common Docker mount issue)
     if ENV_FILE.is_dir():
-        print(f"WARNING: {ENV_FILE} is a directory, not a file. Falling back to environment variables only.")
-        print("To fix: Remove the directory and mount a proper .env file, or don't mount .env at all.")
+        logger.warning(f"WARNING: {ENV_FILE} is a directory, not a file. Falling back to environment variables only.")
+        logger.warning("To fix: Remove the directory and mount a proper .env file, or don't mount .env at all.")
         return {}
     
     env_vars = {}
@@ -135,7 +135,7 @@ def read_env_file() -> dict:
                     key, value = line.split('=', 1)
                     env_vars[key.strip()] = value.strip()
     except Exception as e:
-        print(f"WARNING: Failed to read {ENV_FILE}: {e}")
+        logger.warning(f"WARNING: Failed to read {ENV_FILE}: {e}")
         return {}
     
     return env_vars
@@ -160,7 +160,7 @@ def write_env_file(env_vars: dict):
         msg = str(e)
         if isinstance(e, PermissionError) or 'Read-only file system' in msg or 'EROFS' in msg:
             # Don't fail the request – settings that are JSON-backed will still persist
-            print(f"WARNING: Failed to write {ENV_FILE}: {e}. The file may be mounted read-only. Skipping .env write.")
+            logger.warning(f"WARNING: Failed to write {ENV_FILE}: {e}. The file may be mounted read-only. Skipping .env write.")
             return
         raise RuntimeError(f"Failed to write {ENV_FILE}: {e}")
 
@@ -234,109 +234,56 @@ def initialize_env_if_missing():
         try:
             write_env_file(default_env)
         except Exception as e:
-            print(f"WARNING: Could not initialize {ENV_FILE}: {e}")
+            logger.warning(f"WARNING: Could not initialize {ENV_FILE}: {e}")
+
+
+def _profile_to_dict(p: Dict[str, Any]) -> dict:
+    """Extract the API-facing fields from a preset profile."""
+    return {
+        'target_mb': float(p.get('target_mb', 9.7)),
+        'video_codec': p.get('video_codec', 'av1_nvenc'),
+        'audio_codec': p.get('audio_codec', 'libopus'),
+        'preset': p.get('preset', 'p6'),
+        'audio_kbps': int(p.get('audio_kbps', 128)),
+        'container': p.get('container', 'mp4'),
+        'tune': p.get('tune', 'hq'),
+    }
 
 
 def get_default_presets() -> dict:
-    """Get default preset values
+    """Return the user's saved default preset from settings.json.
 
-    Strategy:
-    1. Try to ask the worker for its 'preferred' encoder via Celery (5s timeout).
-    2. If that fails, try the local HTTP endpoint /api/hardware (3s) which
-       exposes the cached hw info from the API process.
-    3. If a preferred encoder is found, return the matching preset profile.
-    4. Otherwise fall back to the persistent default preset in settings.json
-       or legacy .env values.
+    The saved ``default_preset`` (profile name) is the single source of truth.
+    Hardware detection only influences the *initial* seed (first boot) via
+    ``_pick_initial_default`` inside ``_ensure_defaults``.
     """
     data = _ensure_defaults()
-    preferred_encoder = None
-
-    # 1) Prefer the API's cached hw info (no Celery/HTTP). Importing main
-    # here avoids circular import at module load time because this is a
-    # runtime-only operation invoked per-request.
-    try:
-        from .main import _get_hw_info_cached
-        hw = _get_hw_info_cached() or {}
-        if isinstance(hw, dict) and 'preferred' in hw:
-            preferred_encoder = hw['preferred'].get('encoder')
-    except Exception:
-        preferred_encoder = None
-
-    # 2) Fallback: try Celery (short wait) if cached info didn't have preferred
-    if not preferred_encoder:
-        try:
-            res = celery_app.send_task('worker.worker.get_hardware_info')
-            hw = res.get(timeout=10) or {}
-            if isinstance(hw, dict) and 'preferred' in hw:
-                preferred_encoder = hw['preferred'].get('encoder')
-        except Exception:
-            preferred_encoder = None
-
-    # 3) If worker has a preferred encoder, prefer a preset that matches it
-    if preferred_encoder:
-        for p in data.get('preset_profiles', []):
-            if p.get('video_codec') == preferred_encoder:
-                return {
-                    'target_mb': float(p.get('target_mb', 9.7)),
-                    'video_codec': p.get('video_codec'),
-                    'audio_codec': p.get('audio_codec', 'libopus'),
-                    'preset': p.get('preset', 'p6'),
-                    'audio_kbps': int(p.get('audio_kbps', 128)),
-                    'container': p.get('container', 'mp4'),
-                    'tune': p.get('tune', 'hq')
-                }
-
-    # 3a) If we still don't have a preferred, use the current codec visibility
-    # settings (set during startup sync) and pick the highest-priority codec
-    # that is enabled. This avoids relying on Celery/HTTP timing and keeps
-    # behavior deterministic based on persisted visibility flags.
-    if not preferred_encoder:
-        try:
-            vis = get_codec_visibility_settings()
-            # Priority: HW AV1 > HW HEVC > HW H264 > CPU AV1 > CPU HEVC > CPU H264
-            priority = ['av1_nvenc', 'hevc_nvenc', 'h264_nvenc', 'libaom_av1', 'libx265', 'libx264']
-            for enc in priority:
-                # env keys in visibility map use underscores for libaom_av1
-                if vis.get(enc):
-                    for p in data.get('preset_profiles', []):
-                        if p.get('video_codec') == enc:
-                            return {
-                                'target_mb': float(p.get('target_mb', 9.7)),
-                                'video_codec': p.get('video_codec'),
-                                'audio_codec': p.get('audio_codec', 'libopus'),
-                                'preset': p.get('preset', 'p6'),
-                                'audio_kbps': int(p.get('audio_kbps', 128)),
-                                'container': p.get('container', 'mp4'),
-                                'tune': p.get('tune', 'hq')
-                            }
-        except Exception:
-            # If anything fails, continue to persistent default fallback
-            pass
-
-    # 4) Fallback: use the persistent default preset from settings.json
     default_name = data.get('default_preset')
-    for p in data.get('preset_profiles', []):
-        if p.get('name') == default_name:
-            return {
-                'target_mb': float(p.get('target_mb', 9.7)),
-                'video_codec': p.get('video_codec', 'hevc_nvenc'),
-                'audio_codec': p.get('audio_codec', 'libopus'),
-                'preset': p.get('preset', 'p6'),
-                'audio_kbps': int(p.get('audio_kbps', 128)),
-                'container': p.get('container', 'mp4'),
-                'tune': p.get('tune', 'hq')
-            }
+    profiles = data.get('preset_profiles', [])
 
-    # Fallback to legacy .env
-    env_vars = read_env_file()
+    # 1) Match by saved default_preset name
+    if default_name:
+        for p in profiles:
+            if p.get('name') == default_name:
+                return _profile_to_dict(p)
+
+    # 2) Fallback: pick best available profile (NVENC priority)
+    if profiles:
+        best = _pick_initial_default(profiles)
+        for p in profiles:
+            if p.get('name') == best:
+                return _profile_to_dict(p)
+        return _profile_to_dict(profiles[0])
+
+    # 3) Absolute fallback
     return {
-        'target_mb': float(os.getenv('DEFAULT_TARGET_MB', env_vars.get('DEFAULT_TARGET_MB', '9.7'))),
-        'video_codec': os.getenv('DEFAULT_VIDEO_CODEC', env_vars.get('DEFAULT_VIDEO_CODEC', 'hevc_nvenc')),
-        'audio_codec': os.getenv('DEFAULT_AUDIO_CODEC', env_vars.get('DEFAULT_AUDIO_CODEC', 'libopus')),
-        'preset': os.getenv('DEFAULT_PRESET', env_vars.get('DEFAULT_PRESET', 'p6')),
-        'audio_kbps': int(os.getenv('DEFAULT_AUDIO_KBPS', env_vars.get('DEFAULT_AUDIO_KBPS', '128'))),
-        'container': os.getenv('DEFAULT_CONTAINER', env_vars.get('DEFAULT_CONTAINER', 'mp4')),
-        'tune': os.getenv('DEFAULT_TUNE', env_vars.get('DEFAULT_TUNE', 'hq'))
+        'target_mb': 9.7,
+        'video_codec': 'av1_nvenc',
+        'audio_codec': 'libopus',
+        'preset': 'p6',
+        'audio_kbps': 128,
+        'container': 'mp4',
+        'tune': 'hq',
     }
 
 
@@ -347,12 +294,13 @@ def update_default_presets(
     preset: str,
     audio_kbps: int,
     container: str,
-    tune: str
+    tune: str,
 ):
-    """Update default preset values by updating the default_preset profile or creating one."""
+    """Update the current default preset profile's values in settings.json."""
     data = _ensure_defaults()
-    new_profile = {
-        'name': data.get('default_preset', 'Custom Default'),
+    default_name = data.get('default_preset', 'Custom Default')
+    new_values = {
+        'name': default_name,
         'target_mb': float(target_mb),
         'video_codec': video_codec,
         'audio_codec': audio_codec,
@@ -361,79 +309,42 @@ def update_default_presets(
         'container': container,
         'tune': tune,
     }
-    # Replace if exists by name; else append and set as default
     replaced = False
     for i, p in enumerate(data['preset_profiles']):
-        if p.get('name') == data['default_preset']:
-            data['preset_profiles'][i] = new_profile
+        if p.get('name') == default_name:
+            data['preset_profiles'][i] = new_values
             replaced = True
             break
     if not replaced:
-        data['preset_profiles'].append(new_profile)
-        data['default_preset'] = new_profile['name']
+        data['preset_profiles'].append(new_values)
+        data['default_preset'] = default_name
     _write_settings(data)
 
 
 def get_codec_visibility_settings() -> dict:
-    """Get individual codec visibility settings"""
-    env_vars = read_env_file()
-    
-    def get_bool(key: str, default: str = 'true') -> bool:
-        return os.getenv(key, env_vars.get(key, default)).lower() == 'true'
-    
+    """Get codec visibility from settings.json (persists reliably)."""
+    data = _ensure_defaults()
+    vis = data.get('codec_visibility', {})
     return {
-        # NVIDIA
-        'h264_nvenc': get_bool('CODEC_H264_NVENC'),
-        'hevc_nvenc': get_bool('CODEC_HEVC_NVENC'),
-        'av1_nvenc': get_bool('CODEC_AV1_NVENC'),
-        # Intel QSV
-        'h264_qsv': get_bool('CODEC_H264_QSV'),
-        'hevc_qsv': get_bool('CODEC_HEVC_QSV'),
-        'av1_qsv': get_bool('CODEC_AV1_QSV'),
-        # AMD VAAPI
-        'h264_vaapi': get_bool('CODEC_H264_VAAPI'),
-        'hevc_vaapi': get_bool('CODEC_HEVC_VAAPI'),
-        'av1_vaapi': get_bool('CODEC_AV1_VAAPI'),
-        # AMD AMF
-        'h264_amf': get_bool('CODEC_H264_AMF'),
-        'hevc_amf': get_bool('CODEC_HEVC_AMF'),
-        'av1_amf': get_bool('CODEC_AV1_AMF'),
-        # CPU
-        'libx264': get_bool('CODEC_LIBX264'),
-        'libx265': get_bool('CODEC_LIBX265'),
-        'libaom_av1': get_bool('CODEC_LIBAOM_AV1'),
+        'h264_nvenc': vis.get('h264_nvenc', True),
+        'hevc_nvenc': vis.get('hevc_nvenc', True),
+        'av1_nvenc': vis.get('av1_nvenc', True),
+        'libx264': vis.get('libx264', True),
+        'libx265': vis.get('libx265', True),
+        'libaom_av1': vis.get('libaom_av1', True),
     }
 
 
 def update_codec_visibility_settings(settings: dict):
-    """Update individual codec visibility settings in .env file"""
-    env_vars = read_env_file()
-    
-    codec_keys = {
-        'h264_nvenc': 'CODEC_H264_NVENC',
-        'hevc_nvenc': 'CODEC_HEVC_NVENC',
-        'av1_nvenc': 'CODEC_AV1_NVENC',
-        'h264_qsv': 'CODEC_H264_QSV',
-        'hevc_qsv': 'CODEC_HEVC_QSV',
-        'av1_qsv': 'CODEC_AV1_QSV',
-        'h264_vaapi': 'CODEC_H264_VAAPI',
-        'hevc_vaapi': 'CODEC_HEVC_VAAPI',
-        'av1_vaapi': 'CODEC_AV1_VAAPI',
-        'h264_amf': 'CODEC_H264_AMF',
-        'hevc_amf': 'CODEC_HEVC_AMF',
-        'av1_amf': 'CODEC_AV1_AMF',
-        'libx264': 'CODEC_LIBX264',
-        'libx265': 'CODEC_LIBX265',
-        'libaom_av1': 'CODEC_LIBAOM_AV1',
-    }
-    
-    for codec_name, env_key in codec_keys.items():
-        if codec_name in settings:
-            value = 'true' if settings[codec_name] else 'false'
-            env_vars[env_key] = value
-            os.environ[env_key] = value
-    
-    write_env_file(env_vars)
+    """Update codec visibility in settings.json."""
+    data = _ensure_defaults()
+    vis = data.get('codec_visibility', {})
+    valid_keys = {'h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'libx264', 'libx265', 'libaom_av1'}
+    for k in valid_keys:
+        if k in settings:
+            vis[k] = bool(settings[k])
+    data['codec_visibility'] = vis
+    _write_settings(data)
 
 
 def get_history_enabled() -> bool:

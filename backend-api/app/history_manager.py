@@ -2,21 +2,23 @@
 Compression history manager for 8mb.local
 Tracks compression jobs (metadata only, not files)
 """
+from __future__ import annotations
+
 import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 HISTORY_FILE = Path("/app/history.json")
 
 
-def _read_history() -> List[Dict]:
+def _read_history() -> List[Dict[str, Any]]:
     """Read history from JSON file"""
     if not HISTORY_FILE.exists():
         return []
-    
+
     try:
         with open(HISTORY_FILE, 'r') as f:
             return json.load(f)
@@ -24,7 +26,7 @@ def _read_history() -> List[Dict]:
         return []
 
 
-def _write_history(history: List[Dict]):
+def _write_history(history: List[Dict[str, Any]]) -> None:
     """Write history to JSON file"""
     try:
         with open(HISTORY_FILE, 'w') as f:
@@ -53,7 +55,7 @@ def add_history_entry(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
     encoder: Optional[str] = None,
-) -> Dict:
+) -> Dict[str, Any]:
     """Add a compression history entry"""
     entry = {
         'timestamp': datetime.utcnow().isoformat() + 'Z',
@@ -86,29 +88,29 @@ def add_history_entry(
         entry['end_time'] = end_time
     if encoder is not None:
         entry['encoder'] = encoder
-    
+
     history = _read_history()
     history.insert(0, entry)  # Add to beginning (newest first)
-    
+
     # Keep only last 100 entries
     if len(history) > 100:
         history = history[:100]
-    
+
     _write_history(history)
     return entry
 
 
-def get_history(limit: Optional[int] = None) -> List[Dict]:
+def get_history(limit: Optional[int] = None) -> List[Dict[str, Any]]:
     """Get compression history"""
     history = _read_history()
-    
+
     if limit and limit > 0:
         return history[:limit]
-    
+
     return history
 
 
-def get_history_entry(task_id: str) -> Optional[Dict]:
+def get_history_entry(task_id: str) -> Optional[Dict[str, Any]]:
     """Get a specific history entry by task_id, or None if not found."""
     try:
         history = _read_history()
@@ -120,7 +122,7 @@ def get_history_entry(task_id: str) -> Optional[Dict]:
     return None
 
 
-def clear_history():
+def clear_history() -> None:
     """Clear all history"""
     _write_history([])
 
@@ -129,11 +131,11 @@ def delete_history_entry(task_id: str) -> bool:
     """Delete a specific history entry by task_id"""
     history = _read_history()
     original_len = len(history)
-    
+
     history = [entry for entry in history if entry.get('task_id') != task_id]
-    
+
     if len(history) < original_len:
         _write_history(history)
         return True
-    
+
     return False

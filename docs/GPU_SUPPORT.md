@@ -1,210 +1,66 @@
-# Multi-Vendor GPU Support
+# GPU support (NVIDIA + CPU)
 
-## Overview
+## Why only NVIDIA and CPU?
 
-8mb.local supports hardware-accelerated video encoding across multiple GPU vendors and automatically detects the best available option at runtime:
+8mb.local targets **strict output sizes** (approximate total bitrate / MB budget). In real testing, **Intel QSV, VAAPI, and AMD AMF** paths did not behave reliably in that pipeline: encoders often failed to honor the constraints we need, broke in common container/driver setups, or simply **did not work well enough** to ship. Rather than maintain half-working vendor branches, the codebase was simplified to:
 
-1. **NVIDIA NVENC** (CUDA-based)
-2. **Intel Quick Sync Video (QSV)**
-3. **AMD AMF** (Windows) / **VAAPI** (Linux)
-4. **CPU fallback** (software encoding)
+1. **NVIDIA NVENC** (when an NVIDIA GPU is available and passes startup checks)
+2. **CPU** (libx264, libx265, libaom-av1 / SVT-AV1 as configured)
 
-## Hardware Detection
+Legacy multi-vendor documentation and compose overrides were removed. **Use an NVIDIA GPU with the official container toolkit, or CPU encoding.**
 
-The worker automatically detects available hardware acceleration when it starts processing a video. The detection logic:
+## Hardware detection
 
-1. Checks for NVIDIA GPU via `nvidia-smi` and CUDA availability
-2. Checks for Intel QSV via FFmpeg `hwaccels` and encoder availability
-3. Checks for AMD AMF (Windows) or VAAPI (Linux) support
-4. Falls back to CPU software encoding if no GPU is detected
+The worker detects NVIDIA via `nvidia-smi` / CUDA and validates NVENC with startup tests. If hardware encoding is unavailable or fails, it falls back to CPU encoders. Logs show which path is in use for each job.
 
-Detection results are logged at the start of each compression job: "Hardware: NVIDIA acceleration detected" (or INTEL/AMD/CPU).
+## Encoder mapping (simplified)
 
-## Encoder Mapping
+| User-facing choice | Typical encoder |
+|--------------------|-----------------|
+| H.264 | `h264_nvenc` or `libx264` |
+| HEVC (H.265) | `hevc_nvenc` or `libx265` |
+| AV1 | `av1_nvenc` or CPU AV1 (e.g. libaom-av1) |
 
-Based on detected hardware, user codec requests are automatically mapped:
+**AV1 input note:** When decoding AV1 before NVENC encode, the worker probes `av1_cuvid`. If the GPU/driver cannot decode AV1, encoding uses **software decode (`libdav1d`)** so the job still completes.
 
-| User Request | NVIDIA | Intel QSV | AMD AMF/VAAPI | CPU Fallback |
-|--------------|--------|-----------|---------------|--------------|
-| H.264 | h264_nvenc | h264_qsv | h264_amf/h264_vaapi | libx264 |
-| HEVC (H.265) | hevc_nvenc | hevc_qsv | hevc_amf/hevc_vaapi | libx265 |
-| AV1 | av1_nvenc | av1_qsv | av1_amf/av1_vaapi | libsvtav1 |
+## Preset / tune (NVENC)
 
-### AV1 Support Notes
+- Presets: **p1–p7** (mapped for CPU encoders when on software fallback)
+- Tune: **hq**, **ll**, **ull**, **lossless** (NVENC-oriented; CPU paths use sensible defaults)
 
-- **NVIDIA**: RTX 40-series and newer (Ada Lovelace architecture)
-- **Intel**: Arc GPUs (Alchemist and newer)
-- **AMD**: RDNA 3 architecture and newer (RX 7000 series)
-- **CPU**: Always available via libsvtav1 or libaom-av1
+## Docker (NVIDIA)
 
-## Preset/Tune Mapping
+See `docker-compose.yml` and `README.md`. Typical requirements:
 
-Different encoders support different preset and tune parameters. The worker automatically translates them:
+- NVIDIA drivers on the host
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+- `gpus: all` (or equivalent) and `NVIDIA_VISIBLE_DEVICES` / `NVIDIA_DRIVER_CAPABILITIES` as in the compose file
 
-### NVIDIA NVENC
-- Presets: p1-p7 (native support)
-- Tune: hq, ll, ull, lossless (native support)
+### CPU-only
 
-### Intel QSV
-- Presets: Mapped from p1-p7 → veryfast/faster/fast/medium/slow/slower/veryslow
-- Tune: Not supported (ignored)
+No GPU flags required. The same image runs; encoding uses CPU codecs (slower).
 
-### AMD AMF
-- Presets: Mapped from p1-p7 → speed/balanced/quality
-- Tune: Not supported (ignored)
+## Performance (rough reference)
 
-### VAAPI (Linux AMD/Intel)
-- Presets: Fixed compression_level=7
-- Tune: Not supported (ignored)
+Approximate relative speeds depend on resolution, preset, and content. NVIDIA NVENC is far faster than CPU for comparable presets; see `README.md` for updated hardware guidance (e.g. RTX 40/50 series).
 
-### CPU (libx264/libx265)
-- Presets: Mapped from p1-p7 → ultrafast/superfast/veryfast/faster/fast/medium/slow
-- Tune: film (libx264), grain (libx265)
+## Troubleshooting (NVIDIA)
 
-## Docker Configuration
+**“CPU” or software encoder when you expect NVENC**
 
-### NVIDIA GPUs
+1. `nvidia-smi` on the host shows the GPU.
+2. Container was started with GPU access (`docker run --gpus all` or compose `gpus: all`).
+3. Check worker logs for startup encoder tests and any NVENC initialization errors.
+4. From inside the container: `ffmpeg -hide_banner -encoders | grep nvenc`
 
-```yaml
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: all
-          capabilities: [gpu]
-environment:
-  - NVIDIA_VISIBLE_DEVICES=all
-  - NVIDIA_DRIVER_CAPABILITIES=all
-```
+**AV1 decode errors (`av1_cuvid` not supported)**
 
-**Requirements:**
-- NVIDIA drivers installed on host
-- NVIDIA Container Toolkit installed
-- Docker configured with GPU support
+The worker should fall back to `libdav1d` automatically after a failed probe. If a job still fails, capture full FFmpeg stderr from the job log.
 
-### Intel GPUs
+## FFmpeg in the image
 
-```yaml
-devices:
-  - /dev/dri:/dev/dri
-```
+The unified `Dockerfile` builds FFmpeg with **CUDA/NVENC/NPP** and CPU libraries (x264, x265, dav1d, aom, etc.). Intel/AMD-specific FFmpeg configure flags and runtime packages are **not** included.
 
-**Requirements:**
-- Intel GPU with QSV support (6th gen Core or newer, Arc GPUs)
-- Intel compute runtime / media drivers installed
-- `/dev/dri` device accessible
+## Historical note
 
-### AMD GPUs
-
-#### Linux (VAAPI)
-```yaml
-devices:
-  - /dev/dri:/dev/dri
-```
-
-**Requirements:**
-- AMD GPU with VAAPI support
-- Mesa drivers with VAAPI support
-- `/dev/dri` device accessible
-
-#### Windows (AMF)
-- AMD drivers installed
-- Docker Desktop with GPU support
-- No special configuration needed
-
-### CPU-Only Systems
-
-No special configuration needed. Works out of the box with software encoders.
-
-## Performance Comparison
-
-Approximate encoding speeds (1080p video, medium quality):
-
-| Hardware | H.264 | HEVC | AV1 |
-|----------|-------|------|-----|
-| NVIDIA RTX 4090 | ~500 fps | ~400 fps | ~300 fps |
-| NVIDIA RTX 3080 | ~450 fps | ~350 fps | N/A |
-| Intel Arc A770 | ~250 fps | ~200 fps | ~150 fps |
-| AMD RX 7900 XT | ~200 fps | ~150 fps | ~100 fps |
-| CPU (Ryzen 9 5900X) | ~50 fps | ~20 fps | ~5 fps |
-
-*Note: Actual performance varies based on video resolution, complexity, and preset settings.*
-
-## Quality Comparison
-
-Hardware encoders typically produce slightly lower quality than software encoders at the same bitrate, but the difference is minimal for most use cases:
-
-- **NVIDIA NVENC**: Excellent quality, especially with HQ tune
-- **Intel QSV**: Good quality, comparable to NVENC
-- **AMD AMF/VAAPI**: Good quality, slightly behind NVENC/QSV
-- **CPU (libx264/libx265)**: Best quality, but much slower
-
-For maximum quality at the expense of speed, use CPU encoding with slow presets.
-
-## Troubleshooting
-
-### NVIDIA Issues
-
-**Problem**: "Hardware: CPU acceleration detected" but NVIDIA GPU is present
-
-**Solutions**:
-1. Check NVIDIA drivers: `nvidia-smi` should show your GPU
-2. Verify Container Toolkit: `docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi`
-3. Restart Docker daemon: `sudo systemctl restart docker`
-4. Check docker-compose GPU configuration
-
-### Intel QSV Issues
-
-**Problem**: QSV not detected on Intel system
-
-**Solutions**:
-1. Verify QSV support: `docker exec 8mblocal-worker ffmpeg -hide_banner -hwaccels | grep qsv`
-2. Check `/dev/dri` permissions: `ls -la /dev/dri`
-3. Install Intel media drivers: `sudo apt-get install intel-media-va-driver-non-free`
-4. Ensure device is mounted in container
-
-### AMD Issues
-
-**Problem**: AMD GPU not being used
-
-**Solutions**:
-1. **Linux**: Check VAAPI: `docker exec 8mblocal-worker ffmpeg -hide_banner -hwaccels | grep vaapi`
-2. **Linux**: Install Mesa drivers: `sudo apt-get install mesa-va-drivers`
-3. **Windows**: Update AMD drivers to latest version
-4. Check `/dev/dri` mount (Linux) or GPU access (Windows)
-
-### Performance Issues
-
-**Problem**: Encoding is slower than expected
-
-**Solutions**:
-1. Check which encoder is being used in logs
-2. Verify GPU is actually being used: `nvidia-smi` / `intel_gpu_top` / `radeontop`
-3. Try faster preset (P1-P4)
-4. Reduce resolution if possible
-5. Check for CPU/GPU thermal throttling
-
-## FFmpeg Build
-
-The unified Dockerfile builds FFmpeg 7.0 with support for all hardware acceleration methods:
-
-```bash
-./configure \
-  --enable-nonfree --enable-gpl \
-  --enable-cuda-nvcc --enable-libnpp --enable-nvenc \
-  --enable-libmfx --enable-vaapi \
-  --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus
-```
-
-This ensures maximum compatibility across different hardware configurations.
-
-## Future Enhancements
-
-Potential improvements for hardware acceleration support:
-
-- [ ] Apple VideoToolbox support (macOS)
-- [ ] Vulkan video encoding (cross-platform)
-- [ ] Raspberry Pi V4L2 M2M support
-- [ ] Dynamic hardware switching based on load
-- [ ] Per-codec quality/speed profiles
+Older changelogs and branches may mention QSV/VAAPI/AMF. That support was **removed intentionally** after it proved **unsuitable for this product’s rate-control model and did not work reliably** in practice—not because NVIDIA is the only theoretically viable vendor.

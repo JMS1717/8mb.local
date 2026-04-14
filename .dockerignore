@@ -41,6 +41,7 @@ outputs/
 settings.json
 history.json
 .env
+*.mp4
 
 # Docs
 README.md

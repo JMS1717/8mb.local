@@ -15,12 +15,6 @@
 	h264_nvenc: boolean;
 	hevc_nvenc: boolean;
 	av1_nvenc: boolean;
-	h264_qsv: boolean;
-	hevc_qsv: boolean;
-	av1_qsv: boolean;
-	h264_vaapi: boolean;
-	hevc_vaapi: boolean;
-	av1_vaapi: boolean;
 	libx264: boolean;
 	libx265: boolean;
 	libaom_av1: boolean;
@@ -54,12 +48,6 @@
 	h264_nvenc: true,
 	hevc_nvenc: true,
 	av1_nvenc: true,
-	h264_qsv: true,
-	hevc_qsv: true,
-	av1_qsv: true,
-	h264_vaapi: true,
-	hevc_vaapi: true,
-	av1_vaapi: true,
 	libx264: true,
 	libx265: true,
 	libaom_av1: true,
@@ -102,8 +90,15 @@
 		tune = p.tune;
 	  }
 	  if (codecsRes.ok) {
-		const c: CodecVisibilitySettings = await codecsRes.json();
-		codecSettings = c;
+		const c = await codecsRes.json();
+		codecSettings = {
+			h264_nvenc: !!c.h264_nvenc,
+			hevc_nvenc: !!c.hevc_nvenc,
+			av1_nvenc: !!c.av1_nvenc,
+			libx264: !!c.libx264,
+			libx265: !!c.libx265,
+			libaom_av1: !!c.libaom_av1,
+		};
 	  }
 	  if (historyRes.ok) {
 		const h = await historyRes.json();
@@ -440,8 +435,8 @@
   <div class="card">
 	<div class="title">Available Codecs</div>
 	<p class="label" style="margin-bottom:16px; color:#9ca3af">
-	  Select which codecs appear in the compression page dropdown. Enable codecs that your hardware supports.
-	  <a href="/gpu-support" style="color:#3b82f6; text-decoration:underline">View GPU encoding support →</a>
+	  Select which codecs appear in the compression page dropdown. GPU options use NVIDIA NVENC; software options use the CPU.
+	  <a href="/gpu-support" style="color:#3b82f6; text-decoration:underline">View NVIDIA encoding support →</a>
 	</p>
 
 	<!-- NVIDIA Section -->
@@ -459,44 +454,6 @@
 		<div class="switch">
 		  <input id="h264_nvenc" type="checkbox" bind:checked={codecSettings.h264_nvenc} />
 		  <label class="label" for="h264_nvenc" style="margin:0">H.264</label>
-		</div>
-	  </div>
-	</div>
-
-	<!-- Intel Section -->
-	<div style="margin-bottom:20px">
-	  <h3 style="color:#3b82f6; font-weight:600; font-size:15px; margin-bottom:8px">Intel (Quick Sync / QSV)</h3>
-	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
-		<div class="switch">
-		  <input id="av1_qsv" type="checkbox" bind:checked={codecSettings.av1_qsv} />
-		  <label class="label" for="av1_qsv" style="margin:0">AV1 (Arc GPUs)</label>
-		</div>
-		<div class="switch">
-		  <input id="hevc_qsv" type="checkbox" bind:checked={codecSettings.hevc_qsv} />
-		  <label class="label" for="hevc_qsv" style="margin:0">HEVC (H.265)</label>
-		</div>
-		<div class="switch">
-		  <input id="h264_qsv" type="checkbox" bind:checked={codecSettings.h264_qsv} />
-		  <label class="label" for="h264_qsv" style="margin:0">H.264</label>
-		</div>
-	  </div>
-	</div>
-
-	<!-- AMD/Intel Section (VAAPI - Linux only) -->
-	<div style="margin-bottom:20px">
-	  <h3 style="color:#ef4444; font-weight:600; font-size:15px; margin-bottom:8px">AMD/Intel (VAAPI - Linux only)</h3>
-	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
-		<div class="switch">
-		  <input id="av1_vaapi" type="checkbox" bind:checked={codecSettings.av1_vaapi} />
-		  <label class="label" for="av1_vaapi" style="margin:0">AV1 VAAPI</label>
-		</div>
-		<div class="switch">
-		  <input id="hevc_vaapi" type="checkbox" bind:checked={codecSettings.hevc_vaapi} />
-		  <label class="label" for="hevc_vaapi" style="margin:0">HEVC VAAPI</label>
-		</div>
-		<div class="switch">
-		  <input id="h264_vaapi" type="checkbox" bind:checked={codecSettings.h264_vaapi} />
-		  <label class="label" for="h264_vaapi" style="margin:0">H.264 VAAPI</label>
 		</div>
 	  </div>
 	</div>
@@ -686,7 +643,6 @@
 					<li><strong>GTX 1660 / RTX 2060:</strong> 3-5 concurrent jobs (good NVENC performance)</li>
 					<li><strong>GTX 1050 Ti / Entry-level:</strong> 2-3 concurrent jobs (basic NVENC)</li>
 					<li><strong>CPU-only encoding:</strong> 1-2 jobs per 4 CPU cores (very slow, high CPU usage)</li>
-					<li><strong>Intel/AMD VAAPI:</strong> 4-8 concurrent jobs (depends on iGPU/dGPU)</li>
 				</ul>
 				
 				<p style="margin-bottom: 8px;"><strong>Performance considerations:</strong></p>
@@ -715,6 +671,9 @@
   <!-- Defaults -->
   <div class="card">
 	<div class="title">Default presets</div>
+	<p class="label" style="margin-bottom:12px; color:#9ca3af">
+	  These values are loaded when the main page opens. Changes update the current default profile.
+	</p>
 	<div>
 	  <label class="label" for="targetmb">Default target size (MB)</label>
 	  <input id="targetmb" class="input" type="number" min="1" bind:value={targetMB} />
@@ -724,12 +683,16 @@
 	  <div>
 		<label class="label" for="vcodec">Video codec</label>
 		<select id="vcodec" class="select" bind:value={videoCodec}>
-		  <option value="av1_nvenc">AV1 (NVENC)</option>
-		  <option value="hevc_nvenc">HEVC (NVENC)</option>
-		  <option value="h264_nvenc">H.264 (NVENC)</option>
-		  <option value="libaom-av1">AV1 (CPU)</option>
-		  <option value="libx265">HEVC (CPU)</option>
-		  <option value="libx264">H.264 (CPU)</option>
+		  <optgroup label="NVIDIA NVENC (Hardware)">
+			<option value="av1_nvenc">AV1 (NVENC - RTX 40/50)</option>
+			<option value="hevc_nvenc">HEVC / H.265 (NVENC)</option>
+			<option value="h264_nvenc">H.264 (NVENC)</option>
+		  </optgroup>
+		  <optgroup label="CPU (Software)">
+			<option value="libaom-av1">AV1 (CPU)</option>
+			<option value="libx265">HEVC / H.265 (CPU)</option>
+			<option value="libx264">H.264 (CPU)</option>
+		  </optgroup>
 		</select>
 	  </div>
 	  <div>
@@ -737,18 +700,19 @@
 		<select id="acodec" class="select" bind:value={audioCodec}>
 		  <option value="libopus">Opus</option>
 		  <option value="aac">AAC</option>
+		  <option value="none">No audio</option>
 		</select>
 	  </div>
 	</div>
 
 	<div class="row" style="margin-top:12px">
 	  <div>
-		<label class="label" for="preset">Speed/quality preset</label>
+		<label class="label" for="preset">Speed / quality</label>
 		<select id="preset" class="select" bind:value={preset}>
 		  <option value="p1">P1 (Fastest)</option>
 		  <option value="p2">P2</option>
 		  <option value="p3">P3</option>
-		  <option value="p4">P4</option>
+		  <option value="p4">P4 (Fast)</option>
 		  <option value="p5">P5</option>
 		  <option value="p6">P6 (Balanced)</option>
 		  <option value="p7">P7 (Best quality)</option>
@@ -776,7 +740,7 @@
 		</select>
 	  </div>
 	  <div>
-		<label class="label" for="tune">Tune</label>
+		<label class="label" for="tune">Tune <span style="color:#6b7280; font-size:12px">(NVENC only)</span></label>
 		<select id="tune" class="select" bind:value={tune}>
 		  <option value="hq">High Quality</option>
 		  <option value="ll">Low Latency</option>

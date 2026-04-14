@@ -1,5 +1,5 @@
 # Multi-stage unified 8mb.local container
-# Stage 1: Build FFmpeg with multi-vendor GPU support (NVIDIA NVENC, Intel QSV, AMD AMF/VAAPI)
+# Stage 1: Build FFmpeg with NVIDIA NVENC GPU support + CPU encoders
 # Use CUDA 12.2 devel image: supports RTX 50-series and is compatible with NVIDIA driver 535+
 FROM nvidia/cuda:12.2.0-devel-ubuntu22.04 AS ffmpeg-build
 
@@ -9,8 +9,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     build-essential yasm cmake pkg-config git wget ca-certificates \
     libnuma-dev libx264-dev libx265-dev libvpx-dev libopus-dev \
-    libaom-dev libdav1d-dev \
-    libva-dev libdrm-dev libmfx-dev
+    libaom-dev libdav1d-dev
 
 WORKDIR /build
 
@@ -19,13 +18,12 @@ WORKDIR /build
 RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
     cd nv-codec-headers && git checkout sdk/12.1 && make install && cd ..
 
-# Build FFmpeg with all hardware acceleration support
+# Build FFmpeg with NVIDIA NVENC + CPU encoders
 RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
         tar xf ffmpeg-6.1.1.tar.xz && cd ffmpeg-6.1.1 && \
                 ./configure \
       --enable-nonfree --enable-gpl \
       --enable-cuda-nvcc --enable-libnpp --enable-nvenc \
-            --enable-vaapi --enable-libmfx \
       --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus --enable-libaom --enable-libdav1d \
       --extra-cflags=-I/usr/local/cuda/include \
       --extra-ldflags=-L/usr/local/cuda/lib64 \
@@ -57,7 +55,7 @@ RUN npm run build && \
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
 # Build-time version (can be overridden)
-ARG BUILD_VERSION=134
+ARG BUILD_VERSION=135
 ENV APP_VERSION=${BUILD_VERSION}
 ARG BUILD_COMMIT=unknown
 ENV BUILD_COMMIT=${BUILD_COMMIT}
@@ -71,8 +69,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     python3.10 python3-pip supervisor redis-server \
     libopus0 libx264-163 libx265-199 libvpx7 libnuma1 \
-    libva2 libva-drm2 libaom3 libdav1d5 \
-    intel-media-va-driver libmfx1 mesa-va-drivers \
+    libaom3 libdav1d5 \
     && apt-get clean && rm -rf /tmp/*
 
 # Copy FFmpeg from build stage (only what we need)
@@ -123,6 +120,10 @@ ENV NVIDIA_VISIBLE_DEVICES=all
 # Configure supervisord
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
+# Container entrypoint sets up NVIDIA library paths
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 EXPOSE 8001
 
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+ENTRYPOINT ["/app/entrypoint.sh"]

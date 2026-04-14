@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from starlette.status import HTTP_401_UNAUTHORIZED
@@ -7,7 +9,8 @@ from . import settings_manager
 
 security = HTTPBasic(auto_error=False)
 
-def basic_auth(credentials: Optional[HTTPBasicCredentials] = Depends(security)):
+
+def basic_auth(credentials: Optional[HTTPBasicCredentials] = Depends(security)) -> None:
     """Runtime-aware Basic auth that respects Settings UI without restart."""
     # Prefer live environment first (updated by settings_manager), then .env
     env_enabled = os.getenv('AUTH_ENABLED')

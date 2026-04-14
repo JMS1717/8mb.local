@@ -91,6 +91,8 @@
   let audioOnly = false;
 
   let availableCodecs: CodecOption[] = [];
+  $: nvidiaCodecs = availableCodecs.filter((c) => c.group === 'nvidia');
+  $: cpuCodecs = availableCodecs.filter((c) => c.group === 'cpu');
   let presetProfiles: PresetProfile[] = [];
   let selectedPreset: string | null = null;
   let sizeButtons: number[] = [4, 5, 8, 9.7, 25, 50, 100];
@@ -168,9 +170,6 @@
 
   function getCodecIcon(group: string): string {
     if (group === 'nvidia') return '🟢';
-    if (group === 'intel') return '🔵';
-    if (group === 'amd') return '🟠';
-    if (group === 'vaapi') return '🟣';
     return '⚪';
   }
 
@@ -182,16 +181,8 @@
       { value: 'av1_nvenc', label: 'AV1 (NVIDIA)', group: 'nvidia' },
       { value: 'hevc_nvenc', label: 'HEVC (H.265, NVIDIA)', group: 'nvidia' },
       { value: 'h264_nvenc', label: 'H.264 (NVIDIA)', group: 'nvidia' },
-      { value: 'av1_qsv', label: 'AV1 (Intel QSV)', group: 'intel' },
-      { value: 'hevc_qsv', label: 'HEVC (H.265, Intel QSV)', group: 'intel' },
-      { value: 'h264_qsv', label: 'H.264 (Intel QSV)', group: 'intel' },
-      { value: 'av1_vaapi', label: 'AV1 (VAAPI)', group: 'vaapi' },
-      { value: 'hevc_vaapi', label: 'HEVC (H.265, VAAPI)', group: 'vaapi' },
-      { value: 'h264_vaapi', label: 'H.264 (VAAPI)', group: 'vaapi' },
-      { value: 'av1_amf', label: 'AV1 (AMD AMF)', group: 'amd' },
-      { value: 'hevc_amf', label: 'HEVC (H.265, AMD AMF)', group: 'amd' },
-      { value: 'h264_amf', label: 'H.264 (AMD AMF)', group: 'amd' },
       { value: 'libaom-av1', label: 'AV1 (CPU)', group: 'cpu' },
+      { value: 'libsvtav1', label: 'AV1 (SVT-AV1, CPU)', group: 'cpu' },
       { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
       { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
     ];
@@ -214,6 +205,7 @@
     if (!p) return;
     selectedPreset = name;
     targetMB = Number(p.target_mb);
+    videoCodec = p.video_codec;
     audioCodec = p.audio_codec;
     preset = p.preset;
     audioKbps = Number(p.audio_kbps);
@@ -597,6 +589,7 @@
         { value: 'hevc_nvenc', label: 'HEVC (H.265, NVIDIA)', group: 'nvidia' },
         { value: 'h264_nvenc', label: 'H.264 (NVIDIA)', group: 'nvidia' },
         { value: 'libaom-av1', label: 'AV1 (CPU)', group: 'cpu' },
+        { value: 'libsvtav1', label: 'AV1 (SVT-AV1, CPU)', group: 'cpu' },
         { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
         { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
       ];
@@ -745,9 +738,16 @@
           {#if availableCodecs.length === 0}
             <option value={videoCodec}>{videoCodec}</option>
           {:else}
-            {#each availableCodecs as codec}
-              <option value={codec.value}>{getCodecIcon(codec.group)} {codec.label}</option>
-            {/each}
+            <optgroup label="NVIDIA NVENC">
+              {#each nvidiaCodecs as codec}
+                <option value={codec.value}>{getCodecIcon(codec.group)} {codec.label}</option>
+              {/each}
+            </optgroup>
+            <optgroup label="CPU / Software">
+              {#each cpuCodecs as codec}
+                <option value={codec.value}>{getCodecIcon(codec.group)} {codec.label}</option>
+              {/each}
+            </optgroup>
           {/if}
         </select>
       </label>

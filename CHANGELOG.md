@@ -1,5 +1,15 @@
 # Changelog
 
+## [v135] - 2026-04-14
+
+### Architecture: NVIDIA + CPU only
+
+- **Removed Intel QSV, VAAPI, and AMD AMF** from the worker, API models, UI, and Docker image. In practice those paths **did not work reliably** in this app (container/driver friction, inconsistent behavior) and were **a poor fit for strict target-size / rate-control** encoding. The product now standardizes on **NVENC when available** and **CPU encoders** otherwise.
+- **Worker** split into modules (`tasks.py`, `encoder.py`, `hw_detect.py`, `progress.py`, …); non-NVIDIA hardware branches deleted.
+- **API** split into FastAPI routers under `backend-api/app/routers/`; shared helpers in `deps.py`.
+- **Frontend** updated to match (no Intel/AMD UI); preset/codec and settings fixes as shipped in this branch.
+- **Docs:** `docs/GPU_SUPPORT.md` rewritten for the NVENC+CPU model; see also `README.md`.
+
 ## [v134] - 2025-03-17
 
 ### ✨ Major Features

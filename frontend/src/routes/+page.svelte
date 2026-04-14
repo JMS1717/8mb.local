@@ -260,6 +260,7 @@
         { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
         { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
         { value: 'libaom-av1', label: 'AV1 (CPU)', group: 'cpu' },
+        { value: 'libsvtav1', label: 'AV1 (CPU - SVT-AV1)', group: 'cpu' },
       ];
     }
 
@@ -323,7 +324,7 @@
     if (!p) return;
     selectedPreset = name;
     targetMB = p.target_mb;
-    // Do NOT override codec; keep codec selection independent
+    videoCodec = p.video_codec;
     audioCodec = p.audio_codec;
     preset = p.preset;
     audioKbps = p.audio_kbps;
@@ -349,24 +350,13 @@
     
     // Build list of all possible codecs with labels
     const codecDefinitions = [
-      // NVIDIA
+      // NVIDIA NVENC
       { value: 'av1_nvenc', label: 'AV1 (NVIDIA - RTX 40/50 series)', group: 'nvidia' },
       { value: 'hevc_nvenc', label: 'HEVC (H.265, NVIDIA)', group: 'nvidia' },
       { value: 'h264_nvenc', label: 'H.264 (NVIDIA)', group: 'nvidia' },
-      // Intel QSV
-      { value: 'av1_qsv', label: 'AV1 (Intel Arc/QSV)', group: 'intel' },
-      { value: 'hevc_qsv', label: 'HEVC (H.265, Intel QSV)', group: 'intel' },
-      { value: 'h264_qsv', label: 'H.264 (Intel QSV)', group: 'intel' },
-      // Intel/AMD VAAPI (Linux)
-      { value: 'av1_vaapi', label: 'AV1 (VAAPI)', group: 'vaapi' },
-      { value: 'hevc_vaapi', label: 'HEVC (H.265, VAAPI)', group: 'vaapi' },
-      { value: 'h264_vaapi', label: 'H.264 (VAAPI)', group: 'vaapi' },
-      // AMD AMF
-      { value: 'av1_amf', label: 'AV1 (AMD AMF)', group: 'amd' },
-      { value: 'hevc_amf', label: 'HEVC (H.265, AMD AMF)', group: 'amd' },
-      { value: 'h264_amf', label: 'H.264 (AMD AMF)', group: 'amd' },
-      // CPU
+      // CPU / software
       { value: 'libaom-av1', label: 'AV1 (CPU - Highest Quality)', group: 'cpu' },
+      { value: 'libsvtav1', label: 'AV1 (CPU - SVT-AV1)', group: 'cpu' },
       { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
       { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
     ];
@@ -430,9 +420,6 @@
   function getCodecColor(group: string): string {
     switch(group) {
       case 'nvidia': return '#22c55e'; // green
-      case 'intel': return '#3b82f6';  // blue
-      case 'amd': return '#f97316';    // orange
-      case 'vaapi': return '#8b5cf6';  // purple (for generic VAAPI)
       case 'cpu': return '#6b7280';    // gray
       default: return '#6b7280';
     }
@@ -441,9 +428,6 @@
   function getCodecIcon(group: string): string {
     switch(group) {
       case 'nvidia': return '🟢';
-      case 'intel': return '🔵';
-      case 'amd': return '🟠';
-      case 'vaapi': return '🟣';
       case 'cpu': return '⚪';
       default: return '⚪';
     }
@@ -1509,12 +1493,6 @@
         {#if encodeMethod}
           {#if /_nvenc$/.test(encodeMethod)}
             <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: NVIDIA NVENC</span>
-          {:else if /_qsv$/.test(encodeMethod)}
-            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: Intel QSV</span>
-          {:else if /_amf$/.test(encodeMethod)}
-            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: AMD AMF</span>
-          {:else if /_vaapi$/.test(encodeMethod)}
-            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: VAAPI</span>
           {:else}
             <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-200 border border-slate-600/40">Encoder: CPU ({encodeMethod})</span>
           {/if}
@@ -1668,18 +1646,6 @@
   /* Color-code codec options based on hardware type */
   .codec-select option[data-group="nvidia"] {
     color: #22c55e;
-    font-weight: 500;
-  }
-  .codec-select option[data-group="intel"] {
-    color: #3b82f6;
-    font-weight: 500;
-  }
-  .codec-select option[data-group="amd"] {
-    color: #f97316;
-    font-weight: 500;
-  }
-  .codec-select option[data-group="vaapi"] {
-    color: #8b5cf6;
     font-weight: 500;
   }
   .codec-select option[data-group="cpu"] {

@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import asyncio
 import os
+import time
 import time
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -10,7 +13,9 @@ from . import settings_manager
 UPLOADS_DIR = "/app/uploads"
 OUTPUTS_DIR = "/app/outputs"
 
-async def cleanup_files():
+
+async def cleanup_files() -> None:
+    """Delete upload and output files older than the configured retention period."""
     # Use dynamic retention from settings.json if present
     try:
         retention = settings_manager.get_retention_hours()
@@ -31,7 +36,8 @@ async def cleanup_files():
                 continue
 
 
-def start_scheduler():
+def start_scheduler() -> None:
+    """Run the periodic cleanup job on a fixed interval."""
     scheduler = AsyncIOScheduler()
     # run every 15 minutes
     scheduler.add_job(lambda: asyncio.create_task(cleanup_files()), 'interval', minutes=15)

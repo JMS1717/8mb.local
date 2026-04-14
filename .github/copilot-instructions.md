@@ -3,19 +3,21 @@ Help AI coding agents be immediately productive in this repository by summarizin
 
 ## Big picture (quick)
 - Frontend: `frontend/` — SvelteKit app (Vite). UI uses SSE for live progress and calls backend APIs.
-- Backend API: `backend-api/app/` — FastAPI (`backend.main`) that accepts uploads, runs `ffprobe`, enqueues Celery tasks, and serves downloads.
-- Worker: `worker/app/` — Celery worker that runs `ffmpeg` encodes. Key logic in `worker/app/worker.py`.
+- Backend API: `backend-api/app/` — FastAPI (`main.py` mounts routers). Uploads, `ffprobe`, Celery enqueue, downloads live under `routers/`.
+- Worker: `worker/app/` — Celery worker that runs `ffmpeg` encodes. Core encode flow: `tasks.py`; helpers: `encoder.py`, `hw_detect.py`, `progress.py`, `startup_tests.py`. **NVIDIA NVENC + CPU only** — Intel QSV / VAAPI / AMD AMF were removed; they did not work reliably with strict target-bitrate control in testing.
 - Broker / runtime: Redis (broker + pub/sub). Files stored under `uploads/` and `outputs/`.
-- Orchestration: `docker-compose.yml` and `supervisord.conf` show production/CI start commands and ENV patterns.
+- Orchestration: `docker-compose.yml` (NVIDIA GPU passthrough) and `supervisord.conf` show start commands and ENV patterns.
 
 ## Where to look first (files that reveal behavior)
-- `README.md` — high-level architecture, supported GPU workflows, and Docker examples.
+- `README.md` — high-level architecture, NVIDIA + CPU workflows, and Docker examples.
+- `docs/GPU_SUPPORT.md` — why only NVENC/CPU (legacy Intel/AMD paths removed; they did not work reliably for strict rate control).
 - `supervisord.conf` — exact commands used in container images for `uvicorn` and Celery worker (very useful for reproducing environment variables for GPU support).
-- `docker-compose.yml` — examples for CPU vs NVIDIA vs VAAPI setups.
-- `backend-api/app/main.py` — request flow, SSE/Redis interactions, job metadata keys (e.g. `job:{task.id}`, `progress:{task_id}`), and how uploads are saved.
+- `docker-compose.yml` — NVIDIA-focused service definition (`docker-compose.gpu.yml` optional override).
+- `backend-api/app/main.py` — app creation, static SPA, router mounts; per-route logic in `backend-api/app/routers/`.
+- `backend-api/app/deps.py` — shared paths, Redis helpers, batch/job utilities.
 - `backend-api/app/config.py` — canonical environment variables and `.env` usage.
-- `worker/app/worker.py` — encode pipeline, hardware detection, encoder test cache, and progress publish format (messages use `type` keys: `log`, `progress`, `done`, `error`).
-- `worker/app/utils.py`, `worker/app/hw_detect.py` and `worker/app/startup_tests.py` — hardware mapping and startup test behavior.
+- `worker/app/tasks.py` — Celery `compress_video` task, FFmpeg invocation, progress publish format (`type`: `log`, `progress`, `done`, `error`).
+- `worker/app/utils.py`, `worker/app/hw_detect.py`, `worker/app/startup_tests.py` — NVIDIA-oriented detection and startup tests.
 - `frontend/` — SvelteKit source and `package.json` scripts (`dev`, `build`, `preview`).
 
 ## Developer workflows (practical commands & tips)
@@ -38,13 +40,13 @@ Help AI coding agents be immediately productive in this repository by summarizin
 - Quick validation: run `ffmpeg -hide_banner -encoders | grep -i nvenc` inside container to check available encoders; `docker exec` into running container or run locally in image built for CI.
 
 ## Common pitfalls & how agents should handle them
-- Do not assume a listed hardware encoder will initialize successfully; prefer reading the startup test cache or respecting `ENCODER_TEST_CACHE` logic in `worker/app/worker.py`.
+- Do not assume a listed NVENC encoder will initialize successfully; prefer reading the startup test cache or respecting `ENCODER_TEST_CACHE` logic in `worker/app/tasks.py` / startup tests.
 - When editing worker or backend code, ensure you preserve Redis key names and published event formats.
 - Changing `WORKER_CONCURRENCY` or GPU flags requires container/service restart — documented in README and used by `supervisord.conf`.
 
 ## Quick examples agents can use
-- Read the API flow: `backend-api/app/main.py` → look for `celery_app.send_task('worker.worker.compress_video', ...)` to see task kwargs and output naming.
-- To simulate a publish event when writing tests or new features, publish JSON to channel `progress:<task_id>` and use `type` keys consistent with `worker/app/worker.py` (e.g. `{"type":"log","message":"..."}`).
+- Read the API flow: `backend-api/app/routers/compress.py` (and `upload.py`) → `celery_app.send_task('worker.worker.compress_video', ...)` for task kwargs and output naming.
+- To simulate a publish event when writing tests or new features, publish JSON to channel `progress:<task_id>` and use `type` keys consistent with `worker/app/tasks.py` (e.g. `{"type":"log","message":"..."}`).
 
 If anything here is unclear or you'd like more examples (SSE message shapes, ffmpeg command snippets, or a small local dev script), tell me which area to expand and I'll iterate.
 
