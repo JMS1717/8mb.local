@@ -6,13 +6,13 @@ Help AI coding agents be immediately productive in this repository by summarizin
 - Backend API: `backend-api/app/` — FastAPI (`main.py` mounts routers). Uploads, `ffprobe`, Celery enqueue, downloads live under `routers/`.
 - Worker: `worker/app/` — Celery worker that runs `ffmpeg` encodes. Core encode flow: `tasks.py`; helpers: `encoder.py`, `hw_detect.py`, `progress.py`, `startup_tests.py`. **NVIDIA NVENC + CPU only** — Intel QSV / VAAPI / AMD AMF were removed; they did not work reliably with strict target-bitrate control in testing.
 - Broker / runtime: Redis (broker + pub/sub). Files stored under `uploads/` and `outputs/`.
-- Orchestration: `docker-compose.yml` (NVIDIA GPU passthrough) and `supervisord.conf` show start commands and ENV patterns.
+- Orchestration: `docker-compose.yml` (GPU by default), `docker-compose.cpu.yml` (CPU-only fallback), and `supervisord.conf` show start commands and ENV patterns.
 
 ## Where to look first (files that reveal behavior)
 - `README.md` — high-level architecture, NVIDIA + CPU workflows, and Docker examples.
 - `docs/GPU_SUPPORT.md` — why only NVENC/CPU (legacy Intel/AMD paths removed; they did not work reliably for strict rate control).
 - `supervisord.conf` — exact commands used in container images for `uvicorn` and Celery worker (very useful for reproducing environment variables for GPU support).
-- `docker-compose.yml` — NVIDIA-focused service definition (`docker-compose.gpu.yml` optional override).
+- `docker-compose.yml` — GPU by default (`gpus: all`); `docker-compose.cpu.yml` when NVIDIA passthrough is unavailable.
 - `backend-api/app/main.py` — app creation, static SPA, router mounts; per-route logic in `backend-api/app/routers/`.
 - `backend-api/app/deps.py` — shared paths, Redis helpers, batch/job utilities.
 - `backend-api/app/config.py` — canonical environment variables and `.env` usage.
@@ -21,7 +21,7 @@ Help AI coding agents be immediately productive in this repository by summarizin
 - `frontend/` — SvelteKit source and `package.json` scripts (`dev`, `build`, `preview`).
 
 ## Developer workflows (practical commands & tips)
-- Local quick run (Docker Compose): `docker-compose up` (see `docker-compose.yml` sections for GPU flags). Use `--build` if you changed Python code in images.
+- Local quick run (Docker Compose): `docker compose up` (GPU by default; use `docker compose -f docker-compose.cpu.yml up` without NVIDIA). Use `--build` if you changed Python code in images.
 - Backend dev (without Docker): from project root run the same command seen in `supervisord.conf` for parity:
   - `uvicorn backend.main:app --host 0.0.0.0 --port 8001` (ensure `PYTHONPATH=/path/to/backend-api/app` or run from `backend-api` with `PYTHONPATH=/app`).
 - Worker dev: start Celery similar to supervisord:

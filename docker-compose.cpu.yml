@@ -1,5 +1,5 @@
-# GPU is enabled by default (`gpus: all`). Requires NVIDIA Container Toolkit on the host.
-# If `docker compose up` fails because no GPU is available, use `docker-compose.cpu.yml` instead.
+# CPU-only stack (no GPU request) — macOS, hosts without NVIDIA Container Toolkit, or when the default compose fails.
+#   docker compose -f docker-compose.cpu.yml up -d --build
 services:
   8mblocal:
     build:
@@ -15,9 +15,6 @@ services:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
       - ./.env:/app/.env  # optional custom settings
-    gpus: all
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
     restart: unless-stopped

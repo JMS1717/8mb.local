@@ -190,16 +190,18 @@ docker compose up -d
 
 ### Building from Source
 
+**Default (NVIDIA GPU):** requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) and a working `docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi` on the host.
+
 ```bash
 git clone https://github.com/JMS1717/8mb.local.git
 cd 8mb.local
 docker compose up -d --build
 ```
 
-With **NVIDIA GPU** (after `docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi` works on your host):
+**CPU only** (no GPU passthrough — e.g. macOS or machine without NVIDIA toolkit):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+docker compose -f docker-compose.cpu.yml up -d --build
 ```
 
 ### Platform Notes

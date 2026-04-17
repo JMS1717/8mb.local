@@ -12,9 +12,9 @@
 
 - Optional **`target_video_bitrate_kbps`**: compress to a fixed video bitrate (API, batch upload, and UI) instead of deriving rate only from target file size.
 
-### Docker / ops
+### Docker
 
-- **Default `docker-compose.yml`** does not request `gpus:` so **`docker compose up`** works without GPU passthrough; use **`docker-compose.gpu.yml`** as an overlay for NVIDIA (documented in **README**).
+- Default **`docker-compose.yml`** requests **`gpus: all`** (NVIDIA). Hosts without GPU passthrough can use **`docker-compose.cpu.yml`** (`docker compose -f docker-compose.cpu.yml up -d --build`).
 
 ---
 
