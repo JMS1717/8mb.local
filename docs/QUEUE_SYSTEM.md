@@ -123,7 +123,7 @@ Submits a new compression job. Job is automatically queued.
 Edit `supervisord.conf`:
 ```ini
 [program:worker]
-command=celery -A worker.celery_app worker --loglevel=info -n 8mblocal@%%h --concurrency=4
+command=celery -A worker.celery_app worker --loglevel=info -n 8mb.local@%%h --concurrency=4
 ```
 
 Change `--concurrency=4` to desired parallel job count.

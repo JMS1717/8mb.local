@@ -94,6 +94,7 @@ async def update_default_presets(
             audio_kbps=presets.audio_kbps,
             container=presets.container,
             tune=presets.tune,
+            max_output_fps=presets.max_output_fps,
         )
         return {"status": "success", "message": "Default presets updated successfully"}
     except Exception as e:
@@ -267,5 +268,47 @@ async def update_worker_concurrency_endpoint(req: dict, _auth=Depends(basic_auth
             "message": "Concurrency updated. Restart container for changes to take effect.",
             "concurrency": concurrency,
         }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/api/settings/daemon-port")
+async def get_daemon_port_endpoint(_auth=Depends(basic_auth)):
+    """Get daemon port setting"""
+    return {"port": settings_manager.get_daemon_port()}
+
+
+@router.put("/api/settings/daemon-port")
+async def update_daemon_port_endpoint(req: dict, _auth=Depends(basic_auth)):
+    """Update daemon port"""
+    try:
+        address = str(req.get("port", "8000")).strip()
+        settings_manager.update_daemon_port(address)
+        return {
+            "status": "success",
+            "message": "Daemon connection configuration updated.",
+            "port": address,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/api/settings/filename-format")
+async def get_filename_settings(_auth=Depends(basic_auth)):
+    """Get output filename format settings"""
+    try:
+        return settings_manager.get_filename_settings()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/settings/filename-format")
+async def update_filename_settings(req: dict, _auth=Depends(basic_auth)):
+    """Update output filename format settings"""
+    try:
+        tag = req.get("tag")
+        include_id = req.get("include_id")
+        settings_manager.update_filename_settings(tag=tag, include_id=include_id)
+        return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -1,20 +1,25 @@
-# CPU-only stack (no GPU request) — macOS, hosts without NVIDIA Container Toolkit, or when the default compose fails.
+# CPU-only stack (no GPU request) — macOS (Apple Silicon native), hosts without NVIDIA Container Toolkit, or when the default compose fails.
 #   docker compose -f docker-compose.cpu.yml up -d --build
 services:
-  8mblocal:
+  8mb.local:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.cpu
       args:
-        BUILD_VERSION: "136"
-    image: jms1717/8mblocal:latest
-    container_name: 8mblocal
+        BUILD_VERSION: "200"
+    image: xesurient/8mb.local:cpu
+    container_name: 8mb.local
     ports:
       - "8001:8001"
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
+      - ./data:/app/data
       - ./.env:/app/.env  # optional custom settings
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
+      # Optional host daemon URL for native macOS VideoToolbox HW encoding
+      - DAEMON_URL=${DAEMON_URL:-http://host.docker.internal:7998}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped

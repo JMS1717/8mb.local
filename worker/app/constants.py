@@ -28,7 +28,7 @@ LIBAOM_AV1 = "libaom-av1"
 # ---------------------------------------------------------------------------
 H264_PRIORITY: list[str] = [H264_NVENC, LIBX264]
 HEVC_PRIORITY: list[str] = [HEVC_NVENC, LIBX265]
-AV1_PRIORITY: list[str] = [AV1_NVENC, LIBAOM_AV1]
+AV1_PRIORITY: list[str] = [AV1_NVENC, LIBSVTAV1, LIBAOM_AV1]
 
 CODEC_PRIORITY: dict[str, list[str]] = {
     "h264": H264_PRIORITY,
@@ -42,7 +42,7 @@ CODEC_PRIORITY: dict[str, list[str]] = {
 CPU_FALLBACK: dict[str, str] = {
     H264_NVENC: LIBX264,
     HEVC_NVENC: LIBX265,
-    AV1_NVENC: LIBAOM_AV1,
+    AV1_NVENC: LIBSVTAV1,
 }
 
 # All known hardware encoder names (for quick membership checks)
@@ -54,6 +54,7 @@ CPU_ENCODERS: frozenset[str] = frozenset({LIBX264, LIBX265, LIBAOM_AV1, LIBSVTAV
 # ---------------------------------------------------------------------------
 # Preset mapping
 # ---------------------------------------------------------------------------
+# x264 / x265: NVENC p-level → named CPU preset
 CPU_PRESET_MAP: dict[str, str] = {
     "p1": "ultrafast", "p2": "superfast", "p3": "veryfast",
     "p4": "faster", "p5": "fast", "p6": "medium", "p7": "slow",
@@ -61,6 +62,24 @@ CPU_PRESET_MAP: dict[str, str] = {
     "veryfast": "veryfast", "faster": "faster", "fast": "fast",
     "medium": "medium", "slow": "slow", "slower": "slower",
     "veryslow": "veryslow",
+}
+
+# SVT-AV1: numeric preset 0-13 (lower = slower / better quality)
+SVT_PRESET_MAP: dict[str, str] = {
+    "p1": "12", "p2": "10", "p3": "8", "p4": "6",
+    "p5": "5", "p6": "4", "p7": "2",
+    "ultrafast": "12", "superfast": "10", "veryfast": "8",
+    "faster": "6", "fast": "5", "medium": "4",
+    "slow": "2", "slower": "1", "veryslow": "0",
+}
+
+# libaom-av1: -cpu-used 0-8 (lower = slower / better quality, 0 = reference)
+LIBAOM_PRESET_MAP: dict[str, str] = {
+    "p1": "8", "p2": "6", "p3": "5", "p4": "4",
+    "p5": "3", "p6": "2", "p7": "1",
+    "ultrafast": "8", "superfast": "6", "veryfast": "5",
+    "faster": "4", "fast": "3", "medium": "2",
+    "slow": "1", "slower": "0", "veryslow": "0",
 }
 
 # ---------------------------------------------------------------------------

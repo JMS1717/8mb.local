@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { getSystemCapabilities } from '$lib/api';
   import { FPS_CAP_VALUES, type FpsCap } from '$lib/fpsCap';
 
   type AuthSettings = { auth_enabled: boolean; auth_user: string | null };
@@ -18,6 +19,7 @@
 	av1_nvenc: boolean;
 	libx264: boolean;
 	libx265: boolean;
+	libsvtav1: boolean;
 	libaom_av1: boolean;
   };
 
@@ -26,8 +28,15 @@
   let error = '';
 	// History toggle
 	let historyEnabled = false;
-	// Startup banner
 	let showCodecSyncBanner = false;
+	let settingsLoaded = false;
+
+  // System & UI 
+  let playSoundWhenDone = true;
+  let autoDownload = false;
+  let autoAudioBitrate = true;
+  let fastMp4Finalize = true;
+  let preferHwDecode = true;
 
   // Auth
   let authEnabled = false;
@@ -53,6 +62,7 @@
 	av1_nvenc: true,
 	libx264: true,
 	libx265: true,
+	libsvtav1: true,
 	libaom_av1: true,
   };
 
@@ -64,18 +74,30 @@
 	let newPresetName: string = '';
 	let retentionHours: number = 1;
 	let workerConcurrency: number = 4;
+	let filenameTag: string = '8mb.local';
+	let filenameIncludeId: boolean = true;
 	  // Hardware tests state
 	  let hwTests: Array<any> = [];
 	  let hwTestsLoading: boolean = false;
 	  let hwTestsError: string = '';
+	  // Daemon connection state
+	  let daemonStatus: any = null;
+	  let daemonTesting = false;
+	  let daemonTestingMessage = '';
+	  let daemonPort: string = '8000';
+	  let daemonIp: string = '';
+	  // System caps
+	  let sysCaps: any = null;
+	  let sysCapsError: string = '';
 
 	  onMount(async () => {
 	try {
-			  const [authRes, presetsRes, codecsRes, historyRes] = await Promise.all([
+			  const [authRes, presetsRes, codecsRes, historyRes, filenameRes] = await Promise.all([
 		fetch('/api/settings/auth'),
 		fetch('/api/settings/presets'),
 		fetch('/api/settings/codecs'),
-		fetch('/api/settings/history')
+		fetch('/api/settings/history'),
+		fetch('/api/settings/filename-format')
 	  ]);
 	  if (authRes.ok) {
 		const a: AuthSettings = await authRes.json();
@@ -83,7 +105,7 @@
 		username = a.auth_user || 'admin';
 	  }
 	  if (presetsRes.ok) {
-		const p: DefaultPresets = await presetsRes.json();
+		const p: DefaultPresets & { max_output_fps?: number } = await presetsRes.json();
 		targetMB = p.target_mb;
 		videoCodec = p.video_codec;
 		audioCodec = p.audio_codec;
@@ -91,6 +113,7 @@
 		audioKbps = p.audio_kbps;
 		container = p.container;
 		tune = p.tune;
+		profileMaxFpsCap = p.max_output_fps ? String(p.max_output_fps) as any : '';
 	  }
 	  if (codecsRes.ok) {
 		const c = await codecsRes.json();
@@ -100,12 +123,18 @@
 			av1_nvenc: !!c.av1_nvenc,
 			libx264: !!c.libx264,
 			libx265: !!c.libx265,
+			libsvtav1: !!c.libsvtav1,
 			libaom_av1: !!c.libaom_av1,
 		};
 	  }
 	  if (historyRes.ok) {
 		const h = await historyRes.json();
 		historyEnabled = h.enabled || false;
+	  }
+	  if (filenameRes.ok) {
+		const f = await filenameRes.json();
+		filenameTag = f.tag || '';
+		filenameIncludeId = f.include_id !== false;
 	  }
 	  // Load JSON-backed size buttons and presets list and retention hours
 	  try {
@@ -134,6 +163,41 @@
 				}
 			} catch {}
 
+			// Check daemon status (best-effort)
+			try {
+				const ds = await fetch('/api/system/daemon-status');
+				if (ds.ok) daemonStatus = await ds.json();
+			} catch {}
+
+			// Fetch daemon port/address
+			try {
+				const dp = await fetch('/api/settings/daemon-port');
+				if (dp.ok) {
+					const js = await dp.json();
+					const addr = js.port ? String(js.port) : '8000';
+					if (addr.includes(':')) {
+						const parts = addr.split(':');
+						daemonIp = parts[0];
+						daemonPort = parts[1];
+					} else {
+						if (addr.includes('.')) {
+							daemonIp = addr;
+							daemonPort = '8000';
+						} else {
+							daemonIp = '';
+							daemonPort = addr;
+						}
+					}
+				}
+			} catch {}
+
+			// Fetch host system capabilities
+			try {
+			  sysCaps = await getSystemCapabilities();
+			} catch (e:any) {
+			  sysCapsError = e?.message || 'Failed to fetch system capabilities';
+			}
+
       // Startup info for first-boot banner
       try {
         const si = await fetch('/api/startup/info');
@@ -141,17 +205,46 @@
           const js = await si.json();
           const bootId = js.boot_id as string | null;
           const synced = !!js.codec_visibility_synced;
-          const key = '8mblocal:lastSeenBootId';
+          const key = '8mb.local:lastSeenBootId';
           const lastSeen = window.localStorage.getItem(key);
           if (synced && bootId && bootId !== lastSeen) {
             showCodecSyncBanner = true;
           }
         }
       } catch {}
+
+      // Load System & UI LocalStorage bound configurations
+      try {
+        const ps = localStorage.getItem('playSoundWhenDone');
+        if (ps !== null) playSoundWhenDone = (ps === 'true');
+        
+        const ad = localStorage.getItem('autoDownload');
+        if (ad !== null) autoDownload = (ad === 'true');
+        else { autoDownload = true; localStorage.setItem('autoDownload', 'true'); }
+        
+        const aab = localStorage.getItem('autoAudioBitrate');
+        if (aab !== null) autoAudioBitrate = (aab === 'true');
+        else { autoAudioBitrate = true; localStorage.setItem('autoAudioBitrate', 'true'); }
+        
+        const fmf = localStorage.getItem('fastMp4Finalize');
+        if (fmf !== null) fastMp4Finalize = (fmf === 'true');
+        
+        const phd = localStorage.getItem('preferHwDecode');
+        if (phd !== null) preferHwDecode = (phd === 'true');
+      } catch {}
 	} catch (e) {
 	  error = 'Failed to load settings';
 	}
+	settingsLoaded = true;
   });
+
+  $: if (settingsLoaded) {
+    try { localStorage.setItem('playSoundWhenDone', String(playSoundWhenDone)); } catch {}
+    try { localStorage.setItem('autoDownload', String(autoDownload)); } catch {}
+    try { localStorage.setItem('autoAudioBitrate', String(autoAudioBitrate)); } catch {}
+    try { localStorage.setItem('fastMp4Finalize', String(fastMp4Finalize)); } catch {}
+    try { localStorage.setItem('preferHwDecode', String(preferHwDecode)); } catch {}
+  }
 
 	async function rerunHardwareTests(){
 		hwTestsError = '';
@@ -170,6 +263,50 @@
 			hwTestsError = 'Failed to re-run hardware tests';
 		} finally {
 			hwTestsLoading = false;
+		}
+	}
+
+	async function testDaemon() {
+		daemonTesting = true;
+		daemonTestingMessage = '';
+		try {
+			const res = await fetch('/api/system/daemon-status');
+			if (res.ok) {
+				daemonStatus = await res.json();
+				if (daemonStatus.connected) {
+					daemonTestingMessage = `✅ Connected — ${daemonStatus.codecs?.join(', ') || 'no codecs reported'}`;
+				} else {
+					daemonTestingMessage = `❌ Unreachable: ${daemonStatus.error || 'Connection failed'}`;
+				}
+			} else {
+				daemonTestingMessage = '❌ Failed to check daemon status';
+			}
+		} catch {
+			daemonTestingMessage = '❌ Failed to check daemon status';
+		} finally {
+			daemonTesting = false;
+		}
+	}
+
+	async function saveDaemonPort() {
+		saving = true; error = ''; message = '';
+		try {
+			const finalAddr = daemonIp.trim() ? `${daemonIp.trim()}:${daemonPort.trim()}` : daemonPort.trim();
+			const res = await fetch('/api/settings/daemon-port', {
+				method: 'PUT',
+				headers: {'Content-Type': 'application/json'},
+				body: JSON.stringify({ port: finalAddr })
+			});
+			if (res.ok) {
+				message = 'Saved daemon port';
+			} else {
+				const d = await res.json().catch(()=>({}));
+				error = d.detail || 'Failed to save daemon port';
+			}
+		} catch {
+			error = 'Failed to save daemon port';
+		} finally {
+			saving = false;
 		}
 	}
 
@@ -228,7 +365,8 @@
 		  preset,
 		  audio_kbps: audioKbps,
 		  container,
-		  tune
+		  tune,
+		  max_output_fps: parseFloat(profileMaxFpsCap as string) > 0 ? parseFloat(profileMaxFpsCap as string) : null
 		})
 	  });
 	  if (res.ok) {
@@ -354,438 +492,599 @@
 			} else { const d = await res.json(); error = d.detail || 'Failed to save concurrency'; }
 		} catch { error='Failed to save concurrency'; } finally { saving=false; }
 	}
+	// Filename settings
+	async function saveFilenameSettings() {
+		saving=true; error=''; message='';
+		try {
+			const res = await fetch('/api/settings/filename-format', {
+				method: 'PUT',
+				headers: {'Content-Type': 'application/json'},
+				body: JSON.stringify({ tag: filenameTag, include_id: filenameIncludeId })
+			});
+			if (res.ok) {
+				message = 'Saved filename format settings';
+			} else {
+				const d = await res.json();
+				error = d.detail || 'Failed to save filename settings';
+			}
+		} catch { error = 'Failed to save filename settings'; } finally { saving = false; }
+	}
+
+	let activeTab = 'system';
 </script>
 
 <style>
-  /* Keep the page dead-simple and avoid any overlays that might block <select> popovers */
-  .container { max-width: 760px; margin: 0 auto; padding: 24px; }
-  .card { background: #111827; border: 1px solid #374151; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
-  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .label { display: block; color: #d1d5db; margin-bottom: 6px; font-size: 14px; }
-  .input, .select { width: 100%; padding: 8px 10px; color: #e5e7eb; background: #1f2937; border: 1px solid #374151; border-radius: 8px; }
-  .btn { padding: 10px 12px; color: white; background: #2563eb; border: none; border-radius: 8px; cursor: pointer; }
-  .btn:disabled { background: #4b5563; cursor: not-allowed; }
-  .btn.alt { background: #059669; }
-  .title { color: white; font-size: 20px; font-weight: 600; margin-bottom: 10px; }
-  .hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-  .msg { padding: 10px; border-radius: 8px; margin-bottom: 12px; }
-  .msg.ok { background: rgba(16,185,129,.15); border: 1px solid #10b981; color: #a7f3d0; }
-  .msg.err { background: rgba(239,68,68,.15); border: 1px solid #ef4444; color: #fecaca; }
-  .switch { display:flex; align-items:center; gap:8px; }
-  .switch input { transform: scale(1.2); }
-	.banner { display:flex; justify-content:space-between; align-items:center; gap:12px; background: rgba(59,130,246,.12); border:1px solid #3b82f6; color:#bfdbfe; padding:10px 12px; border-radius:8px; margin-bottom:12px; }
-	.banner button { background: transparent; border: none; color:#93c5fd; cursor:pointer; font-size:14px; }
+  .settings-layout { display: flex; gap: 24px; max-width: 1100px; margin: 40px auto; padding: 0 20px; align-items: flex-start; }
+  .sidebar { width: 220px; flex-shrink: 0; background-color: var(--bg-card); border: 1px solid var(--glass-border); border-radius: var(--border-radius); padding: 12px; position: sticky; top: 40px; }
+  .sidebar-nav { display: flex; flex-direction: column; gap: 4px; }
+  .nav-btn { background: transparent; color: var(--text-secondary); border: none; padding: 10px 16px; text-align: left; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; transition: var(--transition-fast); }
+  .nav-btn:hover { background-color: var(--bg-hover); color: var(--text-primary); }
+  .nav-btn.active { background-color: var(--accent); color: white; }
+  
+  .content { flex-grow: 1; min-width: 0; }
+  .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+  .page-title { font-size: 28px; font-weight: 600; margin: 0; }
+  .actions { display: flex; gap: 12px; justify-content: flex-end; }
+  
+  .section-title { font-size: 20px; font-weight: 600; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--glass-border); color: var(--text-primary); }
+  .form-group { margin-bottom: 16px; }
+  .form-label { display: block; font-size: 14px; font-weight: 500; color: var(--text-secondary); margin-bottom: 6px; }
+  .form-desc { font-size: 13px; color: var(--text-muted); margin-bottom: 8px; margin-top: -4px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  
+  .msg-banner { padding: 12px 16px; border-radius: var(--border-radius); margin-bottom: 20px; font-size: 14px; border: 1px solid transparent; }
+  .msg-banner.success { background-color: rgba(34, 197, 94, 0.1); border-color: rgba(34, 197, 94, 0.2); color: #4ade80; }
+  .msg-banner.error { background-color: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.2); color: #f87171; }
+  .msg-banner.info { background-color: rgba(59, 130, 246, 0.1); border-color: rgba(59, 130, 246, 0.2); color: #60a5fa; display: flex; justify-content: space-between; align-items: center; }
+  .msg-banner button { background: transparent; border: none; color: inherit; cursor: pointer; font-weight: 600; }
+  
+  .checkbox-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; cursor: pointer; }
+  .checkbox-row label { cursor: pointer; font-size: 14px; color: var(--text-primary); margin: 0; }
+  
+  .card { margin-bottom: 24px; animation: fadeIn 0.3s ease; }
+  .card-title { font-size: 18px; font-weight: 600; margin-bottom: 12px; }
+  
+  .status-indicator { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background-color: var(--bg-hover); border: 1px solid var(--glass-border); border-radius: 8px; margin-bottom: 16px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot.green { background-color: var(--success); box-shadow: 0 0 8px rgba(34, 197, 94, 0.4); }
+  .dot.red { background-color: var(--error); box-shadow: 0 0 8px rgba(239, 68, 68, 0.4); }
+  .dot.gray { background-color: var(--text-muted); }
+  
+  .hardware-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .size-btn-tag { display: inline-flex; align-items: center; gap: 8px; background-color: var(--bg-hover); border: 1px solid var(--glass-border); border-radius: 20px; padding: 6px 12px; font-size: 14px; }
+  .size-btn-tag button { background: transparent; border: none; color: var(--text-muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; transition: color var(--transition-fast); }
+  .size-btn-tag button:hover { color: var(--error); }
+  
+  .preset-list { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+  .preset-item { display: flex; justify-content: space-between; align-items: center; background-color: var(--bg-hover); border: 1px solid var(--glass-border); border-radius: 8px; padding: 12px 16px; }
+  .preset-item-info { display: flex; flex-direction: column; gap: 4px; }
+  .preset-item-title { font-weight: 600; color: var(--text-primary); }
+  .preset-item-desc { font-size: 12px; color: var(--text-secondary); }
 </style>
 
-<div class="container">
-  <div class="hdr">
-	<h1 class="title" style="font-size:24px">Settings</h1>
-	<a href="/" class="btn" style="text-decoration:none; background:#374151">← Back</a>
+<div class="settings-layout">
+  <div class="sidebar">
+    <div class="sidebar-nav">
+      <button class="nav-btn {activeTab === 'system' ? 'active' : ''}" on:click={() => activeTab = 'system'}>
+        <span style="margin-right: 8px;">🖥️</span> System Options
+      </button>
+      <button class="nav-btn {activeTab === 'app' ? 'active' : ''}" on:click={() => activeTab = 'app'}>
+        <span style="margin-right: 8px;">⚙️</span> App Management
+      </button>
+      <button class="nav-btn {activeTab === 'compress' ? 'active' : ''}" on:click={() => activeTab = 'compress'}>
+        <span style="margin-right: 8px;">🗜️</span> Defaults & Options
+      </button>
+      <button class="nav-btn {activeTab === 'security' ? 'active' : ''}" on:click={() => activeTab = 'security'}>
+        <span style="margin-right: 8px;">🔒</span> Security
+      </button>
+    </div>
   </div>
+  
+  <div class="content">
+    <div class="page-header" style="flex-wrap:wrap;">
+      <h1 class="page-title" style="margin:0;">Settings</h1>
+      <div class="actions" style="display:flex; gap:8px; flex-wrap:wrap;">
+        <a href="/" data-sveltekit-reload class="btn alt" style="text-decoration:none;">🏠 Home</a>
+        <a href="/advanced" class="btn alt" style="text-decoration:none;">⚙️ Advanced</a>
+        <a href="/batch" class="btn alt" style="text-decoration:none;">🗂 Batch</a>
+        <a href="/queue" class="btn alt" style="text-decoration:none;">📋 Queue</a>
+        <a href="/history" class="btn alt" style="text-decoration:none;">📜 History</a>
+      </div>
+    </div>
 
-	{#if showCodecSyncBanner}
-		<div class="banner">
-			<div>Codec visibility synced from hardware tests</div>
-			<button on:click={() => { try { const siPromise = fetch('/api/startup/info').then(r=>r.ok?r.json():null); siPromise.then(js => { const bootId = js?.boot_id; if (bootId) { window.localStorage.setItem('8mblocal:lastSeenBootId', bootId); } }); } catch {} showCodecSyncBanner = false; }}>Dismiss</button>
-		</div>
-	{/if}
+    {#if showCodecSyncBanner}
+      <div class="msg-banner info">
+        <span>Codec visibility synced from hardware tests</span>
+        <button on:click={() => { try { const siPromise = fetch('/api/startup/info').then(r=>r.ok?r.json():null); siPromise.then(js => { const bootId = js?.boot_id; if (bootId) { window.localStorage.setItem('8mb.local:lastSeenBootId', bootId); } }); } catch {} showCodecSyncBanner = false; }}>Dismiss</button>
+      </div>
+    {/if}
 
-  {#if message}<div class="msg ok">{message}</div>{/if}
-  {#if error}<div class="msg err">{error}</div>{/if}
+    {#if message}<div class="msg-banner success">{message}</div>{/if}
+    {#if error}<div class="msg-banner error">{error}</div>{/if}
 
-  <!-- Authentication (only show if enabled) -->
-  {#if authEnabled}
-	<div class="card">
-	  <div class="title">Authentication</div>
-	  <div class="switch" style="margin-bottom:12px">
-		<input id="auth_enabled" type="checkbox" bind:checked={authEnabled} />
-		<label class="label" for="auth_enabled" style="margin:0">Require authentication</label>
-	  </div>
+    <!-- SYSTEM TAB -->
+    {#if activeTab === 'system'}
+      
+      <!-- System capabilities -->
+      <div class="card">
+        <h2 class="card-title">System Information</h2>
+        <div class="grid sm:grid-cols-3 gap-4">
+          <div>
+            <h3 style="font-weight:600; margin-bottom:8px;">System</h3>
+            {#if sysCaps}
+              <p style="font-size:14px;">CPU: {sysCaps.cpu?.model || 'Unknown'} ({sysCaps.cpu?.cores_physical}C/{sysCaps.cpu?.cores_logical}T)</p>
+              <p style="font-size:14px;">Memory: {sysCaps.memory?.available_gb} GB free / {sysCaps.memory?.total_gb} GB</p>
+              <p style="font-size:14px; margin-top:4px;">
+                {#if sysCaps.gpus && sysCaps.gpus.length}
+                  <span style="color:var(--success);">NVIDIA GPU detected. NVENC enabled.</span>
+                {:else}
+                  <span style="color:var(--text-muted);">CPU-only environment detected. NVENC disabled.</span>
+                {/if}
+              </p>
+            {:else if sysCapsError}
+              <p style="font-size:14px; color:var(--error);">{sysCapsError}</p>
+            {:else}
+              <p style="font-size:14px; opacity:0.7;">Detecting system capabilities…</p>
+            {/if}
+          </div>
+          <div>
+            <h3 style="font-weight:600; margin-bottom:8px;">GPUs</h3>
+            {#if sysCaps?.gpus?.length}
+              {#each sysCaps.gpus as gpu}
+                <div style="font-size:14px; background:var(--bg-hover); padding:8px; border-radius:6px; margin-bottom:4px; border:1px solid var(--glass-border);">
+                  <div style="font-weight:500;">{gpu.name}</div>
+                  <div style="opacity:0.7; font-size:12px;">Memory: {gpu.memory_used_gb} GB / {gpu.memory_total_gb} GB</div>
+                </div>
+              {/each}
+              {#if sysCaps.nvidia_driver}
+                <p style="font-size:12px; margin-top:6px; opacity:0.6;">Driver: {sysCaps.nvidia_driver}</p>
+              {/if}
+            {:else}
+              <p style="font-size:14px; color:var(--text-muted);">No dedicated GPUs detected internally.</p>
+            {/if}
+          </div>
+          <div>
+            <h3 style="font-weight:600; margin-bottom:8px;">Network Diagnostics</h3>
+            {#if daemonStatus}
+              {#if daemonStatus.connected}
+                <div style="font-size:14px; background:var(--bg-hover); padding:10px; border-radius:6px; border:1px solid rgba(34, 197, 94, 0.2);">
+                  <div style="font-weight:600; color:var(--success); margin-bottom:4px; display:flex; align-items:center; gap:6px;">
+                    <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--success);"></span> Connected
+                  </div>
+                  {#if daemonStatus.host_cpu}
+                    <div style="margin-top:6px; font-size:13px; color:var(--text-secondary);">Processor: <span style="color:var(--text-primary);">{daemonStatus.host_cpu.model || 'Unknown'} ({daemonStatus.host_cpu.cores_physical} Core)</span></div>
+                  {/if}
+                  {#if daemonStatus.host_memory}
+                    <div style="margin-top:4px; font-size:13px; color:var(--text-secondary);">RAM: <span style="color:var(--text-primary);">{daemonStatus.host_memory.total_gb ? daemonStatus.host_memory.total_gb + ' GB' : daemonStatus.host_memory}</span></div>
+                  {/if}
+                  {#if daemonStatus.host_gpus && daemonStatus.host_gpus.length}
+                    <div style="margin-top:4px; font-size:13px; color:var(--text-secondary);">Graphics: <span style="color:var(--text-primary);">{daemonStatus.host_gpus.map((g: any) => g.name || g).join(', ')}</span></div>
+                  {/if}
+                  {#if daemonStatus.platform}
+                    <div style="margin-top:4px; font-size:12px; opacity:0.6;">Host env: {daemonStatus.platform}</div>
+                  {/if}
+                  {#if daemonStatus.codecs && daemonStatus.codecs.length}
+                    <div style="margin-top:2px; font-size:12px; opacity:0.6;">Accelerators: {daemonStatus.codecs.join(', ')}</div>
+                  {/if}
+                </div>
+              {:else}
+                <div style="font-size:14px; color:var(--error); background:var(--bg-hover); padding:10px; border-radius:6px; border:1px solid rgba(239, 68, 68, 0.2);">
+                  <div style="font-weight:600; margin-bottom:4px; display:flex; align-items:center; gap:6px;">
+                    <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--error);"></span> Unreachable
+                  </div>
+                  {#if daemonStatus.error}
+                     <div style="font-size:12px; color:var(--text-muted); line-height:1.4;">{daemonStatus.error}</div>
+                  {/if}
+                </div>
+              {/if}
+            {:else}
+               <p style="font-size:14px; opacity:0.7; padding: 10px; background:var(--bg-hover); border-radius:6px;">Waiting for connection test…</p>
+            {/if}
+          </div>
+        </div>
+      </div>
 
-	  <div class="row">
-		<div>
-		  <label class="label" for="username">Username</label>
-		  <input id="username" class="input" type="text" bind:value={username} placeholder="admin" />
-		</div>
-		<div>
-		  <label class="label" for="newpass">New password (optional)</label>
-		  <input id="newpass" class="input" type="password" bind:value={newPassword} />
-		</div>
-	  </div>
-	  {#if newPassword}
-		<div style="margin-top:12px">
-		  <label class="label" for="confirmpass">Confirm new password</label>
-		  <input id="confirmpass" class="input" type="password" bind:value={confirmPassword} />
-		</div>
-	  {/if}
+      <!-- Advanced UI Processing Automation -->
+      <div class="card">
+        <h2 class="card-title">Profiles & Automation</h2>
+        <p class="form-desc" style="margin-bottom:16px;">Configure how the user interface reacts pre-and-post-processing pipeline.</p>
+        
+        <div style="display:flex; flex-direction:column; gap:12px;">
+          <label class="checkbox-row">
+            <input type="checkbox" class="checkbox-ui" bind:checked={playSoundWhenDone} />
+            <span>🔔 Play sound when done</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" class="checkbox-ui" bind:checked={autoDownload} />
+            <span>⬇️ Auto-download when done</span>
+          </label>
+          <label class="checkbox-row" title="Automatically reduce audio bitrate when target size is tight.">
+            <input type="checkbox" class="checkbox-ui" bind:checked={autoAudioBitrate} />
+            <span>🎚️ Adaptive auto audio bitrate downshifting</span>
+          </label>
+          <label class="checkbox-row" title="Fragmented MP4 eliminates the 'loading' block at 99%.">
+            <input type="checkbox" class="checkbox-ui" bind:checked={fastMp4Finalize} />
+            <span style="color:#6366f1;">🚀 Fast finalize (highly recommended)</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" class="checkbox-ui" bind:checked={preferHwDecode} />
+            <span style="color:#6366f1;">⚡ Force hardware decoding (when available)</span>
+          </label>
+        </div>
+      </div>
+      
 
-	  <div style="margin-top:12px">
-		<button class="btn" on:click={saveAuth} disabled={saving}>{saving ? 'Saving…' : 'Save authentication'}</button>
-	  </div>
-	</div>
-  {:else}
-	<!-- Note when auth is disabled -->
-	<div class="card">
-	  <div class="title">Authentication</div>
-	  <p class="label" style="color:#9ca3af; margin-bottom:12px">
-		Authentication is currently disabled. To enable authentication and secure your instance, you'll need to configure it via the Docker container environment variables or configuration file.
-	  </p>
-	  <p class="label" style="color:#9ca3af; font-size:13px">
-		See the <a href="https://github.com/JMS1717/8mb.local" target="_blank" rel="noopener noreferrer" style="color:#3b82f6; text-decoration:underline">documentation</a> for setup instructions.
-	  </p>
-	</div>
-  {/if}
+      <!-- Hardware Tests -->
+      <div class="card">
+        <h2 class="card-title">Hardware Validation</h2>
+        <p class="form-desc">Validate hardware encoders and decoders inside the worker container. Useful after driver updates.</p>
+        
+        {#if hwTestsError}<div class="msg-banner error" style="margin-bottom:12px;">{hwTestsError}</div>{/if}
+        
+        <div style="display:flex; gap:12px; margin-bottom:16px;">
+          <button class="btn" on:click={rerunHardwareTests} disabled={hwTestsLoading}>{hwTestsLoading ? 'Running…' : 'Re-run Tests'}</button>
+          <button class="btn alt" on:click={async()=>{ try{ const r=await fetch('/api/system/encoder-tests'); if(r.ok){ const js=await r.json(); hwTests = js.results||[]; message='Loaded latest test results'; } }catch{}}} disabled={hwTestsLoading}>Refresh</button>
+        </div>
+        
+        {#if hwTests && hwTests.length}
+          <div style="background-color: var(--bg-hover); border: 1px solid var(--glass-border); border-radius: 8px; padding: 12px; font-size: 14px;">
+            {#each hwTests as t}
+              <div style="display:flex; justify-content:space-between; margin-bottom:8px; border-bottom: 1px solid var(--glass-border); padding-bottom:4px;">
+                <span>
+                  {t.codec.replace('libsvtav1', 'AV1 (SVT)').replace('libaom-av1', 'AV1 (AOM)').replace('libx264', 'H.264').replace('libx265', 'HEVC (x265)').replace('_nvenc', ' (Hardware)')} 
+                  <span style="opacity:0.6">({t.actual_encoder})</span>
+                </span>
+                {#if t.passed}
+                  <span style="color:var(--success); font-weight:600">PASS</span>
+                {:else}
+                  <span style="color:var(--error); font-weight:600">FAIL</span>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <p style="color:var(--text-muted); font-size: 14px;">No test results available yet.</p>
+        {/if}
+      </div>
 
-  <!-- Codec Visibility -->
-  <div class="card">
-	<div class="title">Available Codecs</div>
-	<p class="label" style="margin-bottom:16px; color:#9ca3af">
-	  Select which codecs appear in the compression page dropdown. GPU options use NVIDIA NVENC; software options use the CPU.
-	  <a href="/gpu-support" style="color:#3b82f6; text-decoration:underline">View NVIDIA encoding support →</a>
-	</p>
+      <!-- macOS Configuration -->
+      <div class="card">
+        <h2 class="card-title">macOS Configuration</h2>
+        <p class="form-desc" style="margin-bottom:16px;">Configure the connection to the native macOS VideoToolbox daemon.</p>
+        
+        <div style="display: flex; flex-direction: column; gap: 12px; max-width: 500px;">
+          <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 12px; align-items: end;">
+            <div>
+              <label class="form-label">Daemon Host / IP</label>
+              <input class="input" type="text" placeholder="e.g. 192.168.1.100" bind:value={daemonIp} />
+            </div>
+            <div>
+              <label class="form-label">Port</label>
+              <input class="input" type="text" placeholder="8000" bind:value={daemonPort} />
+            </div>
+          </div>
+          
+          <div style="display:flex; gap:8px;">
+            <button class="btn" on:click={saveDaemonPort} disabled={saving}>{saving ? 'Saving…' : 'Save Connection'}</button>
+            <button class="btn alt" on:click={testDaemon} disabled={daemonTesting}>{daemonTesting ? 'Testing…' : 'Test Connection'}</button>
+          </div>
+          
+          {#if daemonTestingMessage}
+            <div style="background:var(--bg-hover); border:1px solid var(--glass-border); padding:8px 12px; border-radius:6px; font-size:13px; margin-top:4px;">
+              {daemonTestingMessage}
+            </div>
+          {/if}
+        </div>
+      </div>
 
-	<!-- NVIDIA Section -->
-	<div style="margin-bottom:20px">
-	  <h3 style="color:#10b981; font-weight:600; font-size:15px; margin-bottom:8px">NVIDIA (NVENC)</h3>
-	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
-		<div class="switch">
-		  <input id="av1_nvenc" type="checkbox" bind:checked={codecSettings.av1_nvenc} />
-		  <label class="label" for="av1_nvenc" style="margin:0">AV1 (RTX 40/50)</label>
-		</div>
-		<div class="switch">
-		  <input id="hevc_nvenc" type="checkbox" bind:checked={codecSettings.hevc_nvenc} />
-		  <label class="label" for="hevc_nvenc" style="margin:0">HEVC (H.265)</label>
-		</div>
-		<div class="switch">
-		  <input id="h264_nvenc" type="checkbox" bind:checked={codecSettings.h264_nvenc} />
-		  <label class="label" for="h264_nvenc" style="margin:0">H.264</label>
-		</div>
-	  </div>
-	</div>
+      <!-- Codecs -->
+      <div class="card">
+        <h2 class="card-title">Encoder Visibility</h2>
+        <p class="form-desc">Select which codecs appear in the compression page dropdown. GPU options use NVIDIA NVENC; software options use CPU.</p>
+        
+        <h3 style="font-size: 15px; color: #4ade80; margin: 16px 0 12px; font-weight: 600;">NVIDIA (NVENC)</h3>
+        <div class="hardware-grid {sysCaps && (!sysCaps.gpus || !sysCaps.gpus.length) ? 'opacity-50 pointer-events-none' : ''}">
+          <label class="checkbox-row">
+            <input type="checkbox" class="checkbox-ui" bind:checked={codecSettings.av1_nvenc} disabled={sysCaps && (!sysCaps.gpus || !sysCaps.gpus.length)} />
+            <span>AV1 (RTX 40/50)</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" class="checkbox-ui" bind:checked={codecSettings.hevc_nvenc} disabled={sysCaps && (!sysCaps.gpus || !sysCaps.gpus.length)} />
+            <span>HEVC (H.265)</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" class="checkbox-ui" bind:checked={codecSettings.h264_nvenc} disabled={sysCaps && (!sysCaps.gpus || !sysCaps.gpus.length)} />
+            <span>H.264</span>
+          </label>
+        </div>
 
-	<!-- CPU Section -->
-	<div style="margin-bottom:20px">
-	  <h3 style="color:#9ca3af; font-weight:600; font-size:15px; margin-bottom:8px">CPU (Software Encoding)</h3>
-	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
-		<div class="switch">
-		  <input id="libaom_av1" type="checkbox" bind:checked={codecSettings.libaom_av1} />
-		  <label class="label" for="libaom_av1" style="margin:0">AV1 (Highest Quality)</label>
-		</div>
-		<div class="switch">
-		  <input id="libx265" type="checkbox" bind:checked={codecSettings.libx265} />
-		  <label class="label" for="libx265" style="margin:0">HEVC (H.265)</label>
-		</div>
-		<div class="switch">
-		  <input id="libx264" type="checkbox" bind:checked={codecSettings.libx264} />
-		  <label class="label" for="libx264" style="margin:0">H.264</label>
-		</div>
-	  </div>
-	</div>
+        <h3 style="font-size: 15px; color: var(--text-secondary); margin: 20px 0 12px; font-weight: 600;">CPU (Software Encoding)</h3>
+        <div class="hardware-grid">
+          <label class="checkbox-row">
+            <input type="checkbox" class="checkbox-ui" bind:checked={codecSettings.libsvtav1} />
+            <span>AV1 (SVT-AV1 Fast)</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" class="checkbox-ui" bind:checked={codecSettings.libaom_av1} />
+            <span>AV1 (Highest Quality)</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" class="checkbox-ui" bind:checked={codecSettings.libx265} />
+            <span>HEVC (H.265)</span>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" class="checkbox-ui" bind:checked={codecSettings.libx264} />
+            <span>H.264</span>
+          </label>
+        </div>
 
-	<div style="margin-top:16px">
-	  <button class="btn" on:click={saveCodecs} disabled={saving}>{saving ? 'Saving…' : 'Save codec settings'}</button>
-	</div>
+        <button class="btn" on:click={saveCodecs} disabled={saving}>{saving ? 'Saving…' : 'Save Extracted Codecs'}</button>
+      </div>
+    
+    <!-- APP TAB -->
+    {:else if activeTab === 'app'}
+      <!-- Worker Concurrency -->
+      <div class="card">
+        <h2 class="card-title">Worker Concurrency</h2>
+        <p class="form-desc">Maximum number of jobs that can compress simultaneously. Higher values allow more parallel jobs but require exponentially more resources.</p>
+        <div class="row">
+          <div>
+            <label class="form-label">Concurrent Job Limit</label>
+            <input class="input" type="number" min="1" max="20" bind:value={workerConcurrency} />
+          </div>
+          <div style="display:flex; align-items:flex-end">
+            <button class="btn" on:click={saveConcurrency} disabled={saving}>{saving ? 'Saving…' : 'Save Limit'}</button>
+          </div>
+        </div>
+
+        <details style="margin-top: 16px; background-color: var(--bg-hover); border: 1px solid var(--glass-border); border-radius: 8px; padding: 12px;">
+          <summary style="cursor: pointer; font-weight: 600; color: var(--accent); user-select: none;">💡 Resource Guidelines</summary>
+          <div style="margin-top: 8px; font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
+            <p style="margin-bottom: 6px;"><strong>Hardware Limits:</strong></p>
+            <ul style="margin-left: 16px; margin-bottom: 12px; padding-left: 0;">
+              <li>RTX 4000/3060+: 6-10 jobs</li>
+              <li>RTX 2060/1660: 3-5 jobs</li>
+              <li>CPU-only encoding: 1 job per 4 CPU cores is safe.</li>
+            </ul>
+            <p style="color: var(--warning); margin-bottom: 0;">⚠️ NVENC uses roughly 150MB of VRAM per encode session.</p>
+          </div>
+        </details>
+      </div>
+
+      <!-- History -->
+      <div class="card">
+        <h2 class="card-title">Compression Metrics</h2>
+        <p class="form-desc">Track completed jobs over time for analytics. Video files themselves are not stored permanently by the tracker.</p>
+        <label class="checkbox-row" style="margin-bottom: 16px;">
+          <input type="checkbox" class="checkbox-ui" bind:checked={historyEnabled} />
+          <span>Enable compression performance history</span>
+        </label>
+        
+        <div style="display:flex; gap:12px;">
+          <button class="btn" on:click={saveHistorySettings} disabled={saving}>{saving ? 'Saving…' : 'Update Metrics'}</button>
+          {#if historyEnabled}
+            <a href="/history" class="btn alt" style="text-decoration:none; display:flex; align-items:center;">View Complete Analytics →</a>
+          {/if}
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">File Retention Policy</h2>
+        <p class="form-desc">Controls how long completed files remain accessible via download links before automatic deletion.</p>
+        <div class="row" style="align-items: flex-end;">
+          <div>
+            <label class="form-label">Delay (Hours)</label>
+            <input class="input" type="number" min="0" bind:value={retentionHours} />
+          </div>
+          <button class="btn" on:click={saveRetention} disabled={saving}>{saving ? 'Saving…' : 'Set Retention'}</button>
+        </div>
+      </div>
+
+    <!-- COMPRESSION SETTINGS TAB -->
+    {:else if activeTab === 'compress'}
+      
+      <!-- Filename Output -->
+      <div class="card">
+        <h2 class="card-title">Output Naming Format</h2>
+        <p class="form-desc">Customize the resulting filename after a completed job.</p>
+        
+        <div class="form-group" style="max-width: 400px;">
+          <label class="form-label">Preset Brand Tag</label>
+          <input class="input" type="text" bind:value={filenameTag} placeholder="Leave empty for no tag" />
+          <p class="form-desc" style="margin-top: 6px;">Appended string (e.g. video_<b>8mb.local</b>.mp4)</p>
+        </div>
+        
+        <label class="checkbox-row" style="margin-top:16px;">
+          <input type="checkbox" class="checkbox-ui" bind:checked={filenameIncludeId} />
+          <span>Include short task ID (collision prevention)</span>
+        </label>
+
+        <p style="margin: 16px 0; padding: 10px; font-family: monospace; font-size: 13px; color: var(--text-secondary); background: var(--bg-hover); border-radius: 6px;">
+          video_{filenameTag ? filenameTag + '_' : ''}{filenameIncludeId ? 'a1b2c3d4' : ''}{(!filenameTag && !filenameIncludeId) ? '(original)' : ''}.mp4
+        </p>
+
+        <button class="btn" on:click={saveFilenameSettings} disabled={saving}>{saving ? 'Saving…' : 'Update Format'}</button>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Quick Target Sizes</h2>
+        <p class="form-desc">Customize the rapid-select MB size buttons found on the main submission view.</p>
+        
+        <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom: 20px;">
+          {#each sizeButtons as b, i}
+            <div class="size-btn-tag">
+              <span>{b} MB</span>
+              <button on:click={() => removeSizeButton(i)}>×</button>
+            </div>
+          {/each}
+        </div>
+        
+        <div class="row">
+          <div>
+            <label class="form-label">Add custom size</label>
+            <input class="input" type="number" min="1" bind:value={newSizeValue} placeholder="25" />
+          </div>
+          <div style="display:flex; align-items:flex-end">
+            <button class="btn alt" on:click={addSizeButton} disabled={saving}>Add Size</button>
+          </div>
+        </div>
+        <button class="btn" style="margin-top: 8px;" on:click={saveSizeButtons} disabled={saving}>{saving ? 'Saving…' : 'Save Button Array'}</button>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Initial Profile Values</h2>
+        <p class="form-desc">Configure the absolute default parameters pre-loaded when an unknown user opens the main page.</p>
+
+        <div class="form-group" style="max-width: 250px;">
+          <label class="form-label">Initial Size Slider (MB)</label>
+          <input class="input" type="number" min="1" bind:value={targetMB} />
+        </div>
+
+        <div class="row">
+          <div>
+            <label class="form-label">Default Video Codec</label>
+            <select class="input" bind:value={videoCodec}>
+              <optgroup label="NVIDIA NVENC (Hardware)">
+                <option value="av1_nvenc">AV1 (NVENC - RTX 40/50)</option>
+                <option value="hevc_nvenc">HEVC (NVENC)</option>
+                <option value="h264_nvenc">H.264 (NVENC)</option>
+              </optgroup>
+              <optgroup label="CPU (Software)">
+                <option value="libsvtav1">AV1 (SVT Fast)</option>
+                <option value="libaom-av1">AV1 (Highest Quality)</option>
+                <option value="libx265">HEVC</option>
+                <option value="libx264">H.264</option>
+              </optgroup>
+            </select>
+          </div>
+          <div>
+            <label class="form-label">Default Audio Codec</label>
+            <select class="input" bind:value={audioCodec}>
+              <option value="libopus">Opus</option>
+              <option value="aac">AAC</option>
+              <option value="none">Muted</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label class="form-label">Default Performance Preset</label>
+            <select class="input" bind:value={preset}>
+              <option value="p1">P1 (Fastest)</option>
+              <option value="p2">P2</option>
+              <option value="p3">P3</option>
+              <option value="p4">P4 (Balanced)</option>
+              <option value="p5">P5</option>
+              <option value="p6">P6</option>
+              <option value="p7">P7 (Best Quality)</option>
+              <option value="extraquality">Extra Quality (CPU intensive)</option>
+            </select>
+          </div>
+          <div>
+            <label class="form-label">Default Audio Kbps</label>
+            <select class="input" bind:value={audioKbps}>
+              <option value={64}>64 kbps</option>
+              <option value={96}>96 kbps</option>
+              <option value={128}>128 kbps</option>
+              <option value={192}>192 kbps</option>
+              <option value={256}>256 kbps</option>
+              <option value={320}>320 kbps</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top: 16px; display: flex; justify-content: flex-end;">
+          <button class="btn" on:click={saveDefaults} disabled={saving}>{saving ? "Saving…" : "Save Default Blueprint"}</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card-title">Saved Presets</h2>
+        <p class="form-desc">Provide your users with a quick dropdown menu containing specific configurations (e.g. Discord 8MB, Twitter 25M).</p>
+        
+        <div class="row" style="align-items: flex-end;">
+          <div>
+            <label class="form-label">System Active Preset</label>
+            <select class="input" bind:value={defaultPresetName}>
+              {#each presetProfiles as p}
+                <option value={p.name}>{p.name}</option>
+              {/each}
+            </select>
+          </div>
+          <button class="btn" on:click={saveDefaultPreset} disabled={saving}>{saving ? 'Saving…' : 'Make Active'}</button>
+        </div>
+
+        <hr style="border: 0; border-top: 1px solid var(--glass-border); margin: 24px 0;" />
+        
+        <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 12px;">Create New Preset</h3>
+        <p class="form-desc">A new preset captures the *Current Defaults* set directly above.</p>
+        <div class="form-group">
+          <label class="form-label">FPS Constraint</label>
+          <select class="input" bind:value={profileMaxFpsCap} style="max-width: 300px;">
+            <option value="">Respect Input FPS (Pass-through)</option>
+            {#each FPS_CAP_VALUES as v}
+              <option value={v}>Halt at {v} max fps (Downsample)</option>
+            {/each}
+          </select>
+        </div>
+        <div class="row" style="align-items: flex-end;">
+          <div>
+            <label class="form-label">Blueprint Name</label>
+            <input class="input" type="text" bind:value={newPresetName} placeholder="Snapchat 5MB H264" />
+          </div>
+          <button class="btn" on:click={addPresetFromCurrent} disabled={saving}>{saving ? 'Saving…' : 'Capture New Preset'}</button>
+        </div>
+
+        {#if presetProfiles.length > 0}
+          <div class="preset-list">
+            {#each presetProfiles as p}
+              <div class="preset-item">
+                <div class="preset-item-info">
+                  <span class="preset-item-title">{p.name} <span style="font-weight: 400; color: var(--text-muted);">({p.target_mb}MB)</span></span>
+                  <span class="preset-item-desc">{p.video_codec} • {p.audio_codec} • {p.preset}{#if p.max_output_fps} • max {p.max_output_fps}fps{/if}</span>
+                </div>
+                <button class="btn alt" on:click={() => deletePreset(p.name)} disabled={saving} style="padding: 6px 12px; font-size: 13px;">Drop</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+    <!-- SECURITY TAB -->
+    {:else if activeTab === 'security'}
+      <div class="card">
+        <h2 class="card-title">Instance Security</h2>
+        {#if authEnabled}
+          <label class="checkbox-row" style="margin-bottom: 24px;">
+            <input type="checkbox" class="checkbox-ui" bind:checked={authEnabled} />
+            <span>Require strong authentication to access Web UI and Rest APIs</span>
+          </label>
+          
+          <div class="row">
+            <div>
+              <label class="form-label">Primary Username</label>
+              <input class="input" type="text" bind:value={username} placeholder="admin" />
+            </div>
+            <div>
+              <label class="form-label">Modify Password</label>
+              <input class="input" type="password" bind:value={newPassword} placeholder="Leave empty to keep" />
+            </div>
+          </div>
+          {#if newPassword}
+            <div class="form-group" style="max-width: 48%; margin-top: -8px;">
+              <label class="form-label">Confirm Passphrase</label>
+              <input class="input" type="password" bind:value={confirmPassword} />
+            </div>
+          {/if}
+          <button class="btn" on:click={saveAuth} disabled={saving} style="margin-top: 12px;">{saving ? 'Validating…' : 'Update Credentials'}</button>
+        {:else}
+          <div class="msg-banner info" style="display: block;">
+            <span style="font-size: 16px; font-weight: 600; display: block; margin-bottom: 6px;">Authentication Inactive</span>
+            <span style="color: rgba(255,255,255,0.7);">Basic Auth is currently disabled via environment files. To secure your docker instance properly, you must configure it using the runtime environment variables block.</span>
+          </div>
+        {/if}
+      </div>
+    
+    {/if}
   </div>
-
-	<!-- Hardware Tests -->
-	<div class="card">
-		<div class="title">Hardware Tests</div>
-		<p class="label" style="margin-bottom:12px; color:#9ca3af">Validate hardware encoders/decoders inside the worker. Useful after driver updates or container restarts.</p>
-		{#if hwTestsError}
-			<div class="msg err">{hwTestsError}</div>
-		{/if}
-		<div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
-			<button class="btn" on:click={rerunHardwareTests} disabled={hwTestsLoading}>{hwTestsLoading ? 'Running…' : 'Re-run hardware tests'}</button>
-			<button class="btn alt" on:click={async()=>{ try{ const r=await fetch('/api/system/encoder-tests'); if(r.ok){ const js=await r.json(); hwTests = js.results||[]; message='Loaded latest test results'; } }catch{}}} disabled={hwTestsLoading}>Refresh results</button>
-		</div>
-		{#if hwTests && hwTests.length}
-			<ul class="text-sm space-y-1">
-				{#each hwTests as t}
-					<li class="flex items-center justify-between">
-						<span>{t.codec} <span class="opacity-60">({t.actual_encoder})</span></span>
-						{#if t.passed}
-							<span class="text-green-400">PASS</span>
-						{:else}
-							<span class="text-red-400">FAIL</span>
-						{/if}
-					</li>
-				{/each}
-			</ul>
-		{:else}
-			<p class="label" style="color:#9ca3af">No test results available yet.</p>
-		{/if}
-	</div>
-
-  <!-- Compression History -->
-  <div class="card">
-	<div class="title">📊 Compression History</div>
-	<p class="label" style="margin-bottom:16px; color:#9ca3af">
-	  Track completed compression jobs with metadata (filenames, sizes, codecs, presets). No video files are stored.
-	</p>
-
-	<div class="switch" style="margin-bottom:16px">
-	  <input id="history_enabled" type="checkbox" bind:checked={historyEnabled} />
-	  <label class="label" for="history_enabled" style="margin:0">Enable compression history tracking</label>
-	</div>
-
-	<div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
-	  <button class="btn" on:click={saveHistorySettings} disabled={saving}>
-		{saving ? 'Saving…' : 'Save history settings'}
-	  </button>
-	  {#if historyEnabled}
-		<a href="/history" class="btn alt" style="text-decoration:none; display:inline-block">
-		  View History →
-		</a>
-	  {/if}
-	</div>
-  </div>
-
-	<!-- File size buttons -->
-	<div class="card">
-		<div class="title">File size buttons</div>
-		<p class="label" style="color:#9ca3af">Customize the quick-select file size buttons shown on the main screen.</p>
-		<div style="display:flex; flex-wrap:wrap; gap:8px; margin:10px 0">
-			{#each sizeButtons as b, i}
-				<span style="display:inline-flex; align-items:center; gap:6px; background:#1f2937; border:1px solid #374151; border-radius:8px; padding:6px 8px">
-					{b} MB
-					<button class="btn" style="background:#374151; padding:4px 8px" on:click={()=>removeSizeButton(i)}>Remove</button>
-				</span>
-			{/each}
-		</div>
-		<div class="row">
-			<div>
-				<label class="label">Add size (MB)</label>
-				<input class="input" type="number" min="1" bind:value={newSizeValue} />
-			</div>
-			<div style="display:flex; align-items:flex-end">
-				<button class="btn" on:click={addSizeButton} disabled={saving}>Add</button>
-			</div>
-		</div>
-		<div style="margin-top:12px">
-			<button class="btn alt" on:click={saveSizeButtons} disabled={saving}>{saving ? 'Saving…' : 'Save size buttons'}</button>
-		</div>
-	</div>
-
-	<!-- Preset profiles -->
-	<div class="card">
-		<div class="title">Preset profiles</div>
-		<p class="label" style="color:#9ca3af">Create multiple presets you can select on the main screen (at least 5 supported).</p>
-		<div style="margin-bottom:8px">
-			<label class="label">Default preset</label>
-			<div class="row">
-				<select class="select" bind:value={defaultPresetName}>
-					{#each presetProfiles as p}
-						<option value={p.name}>{p.name}</option>
-					{/each}
-				</select>
-				<button class="btn" on:click={saveDefaultPreset} disabled={saving}>{saving ? 'Saving…' : 'Set default'}</button>
-			</div>
-		</div>
-		<div style="margin-top:12px">
-			<div class="row">
-				<div>
-					<label class="label">Max frame rate (stored in new presets)</label>
-					<p class="label" style="color:#6b7280; font-size:12px; margin:4px 0 8px">Defaults to same as input unless you choose a cap.</p>
-					<select class="select" bind:value={profileMaxFpsCap}>
-						<option value="">Same as input (default)</option>
-						{#each FPS_CAP_VALUES as v}
-							<option value={v}>{v} fps cap</option>
-						{/each}
-					</select>
-				</div>
-			</div>
-			<div class="row" style="margin-top:12px">
-				<div>
-					<label class="label">New preset name</label>
-					<input class="input" type="text" bind:value={newPresetName} placeholder="e.g., H265 9.7MB (NVENC)" />
-				</div>
-				<div style="display:flex; align-items:flex-end">
-					<button class="btn" on:click={addPresetFromCurrent} disabled={saving}>{saving ? 'Saving…' : 'Add from current defaults'}</button>
-				</div>
-			</div>
-		</div>
-		{#if presetProfiles.length}
-			<div style="margin-top:12px">
-				<div class="row" style="grid-template-columns: 1fr auto; gap:8px">
-					{#each presetProfiles as p}
-						<div style="background:#1f2937; border:1px solid #374151; border-radius:8px; padding:10px">
-							<div style="font-weight:600">{p.name}</div>
-							<div style="font-size:12px; color:#9ca3af">{p.video_codec} • {p.audio_codec} • {p.preset} • {p.target_mb}MB{#if p.max_output_fps != null && p.max_output_fps > 0} • max {p.max_output_fps} fps{/if}</div>
-						</div>
-						<div style="display:flex; align-items:center"><button class="btn" style="background:#374151" on:click={()=>deletePreset(p.name)} disabled={saving}>Delete</button></div>
-					{/each}
-				</div>
-			</div>
-		{/if}
-	</div>
-
-	<!-- Retention -->
-	<div class="card">
-		<div class="title">File retention</div>
-		<p class="label" style="color:#9ca3af">How long files remain on the server before automatic deletion.</p>
-		<div class="row">
-			<div>
-				<label class="label">Hours</label>
-				<input class="input" type="number" min="0" bind:value={retentionHours} />
-			</div>
-			<div style="display:flex; align-items:flex-end">
-				<button class="btn" on:click={saveRetention} disabled={saving}>{saving ? 'Saving…' : 'Save retention'}</button>
-			</div>
-		</div>
-	</div>
-
-	<!-- Worker Concurrency -->
-	<div class="card">
-		<div class="title">🚀 Worker Concurrency</div>
-		<p class="label" style="color:#9ca3af; margin-bottom: 12px;">
-			Maximum number of jobs that can compress simultaneously. Higher values allow more parallel jobs but require more GPU/CPU resources.
-		</p>
-		
-		<div class="row">
-			<div>
-				<label class="label">Max concurrent jobs</label>
-				<input class="input" type="number" min="1" max="20" bind:value={workerConcurrency} />
-			</div>
-			<div style="display:flex; align-items:flex-end">
-				<button class="btn" on:click={saveConcurrency} disabled={saving}>{saving ? 'Saving…' : 'Save concurrency'}</button>
-			</div>
-		</div>
-
-		<details style="margin-top: 12px; background: #1f2937; border: 1px solid #374151; border-radius: 8px; padding: 12px;">
-			<summary style="cursor: pointer; font-weight: 600; color: #60a5fa; user-select: none;">💡 Guidelines & Recommendations</summary>
-			<div style="margin-top: 8px; font-size: 14px; color: #d1d5db; line-height: 1.6;">
-				<p style="margin-bottom: 8px;"><strong>Hardware-based recommendations:</strong></p>
-				<ul style="margin-left: 20px; margin-bottom: 12px;">
-					<li><strong>Quadro RTX 4000 / RTX 3060+:</strong> 6-10 concurrent jobs (excellent NVENC throughput)</li>
-					<li><strong>GTX 1660 / RTX 2060:</strong> 3-5 concurrent jobs (good NVENC performance)</li>
-					<li><strong>GTX 1050 Ti / Entry-level:</strong> 2-3 concurrent jobs (basic NVENC)</li>
-					<li><strong>CPU-only encoding:</strong> 1-2 jobs per 4 CPU cores (very slow, high CPU usage)</li>
-				</ul>
-				
-				<p style="margin-bottom: 8px;"><strong>Performance considerations:</strong></p>
-				<ul style="margin-left: 20px; margin-bottom: 12px;">
-					<li><strong>NVENC hardware limit:</strong> Most NVIDIA GPUs support 2-3 NVENC sessions natively, but driver unlocks allow unlimited sessions</li>
-					<li><strong>Memory usage:</strong> Each job uses ~200-500MB RAM. Monitor system memory with high concurrency</li>
-					<li><strong>GPU memory:</strong> Each NVENC encode uses ~100-200MB VRAM. Check available VRAM</li>
-					<li><strong>Disk I/O:</strong> Higher concurrency increases disk read/write. Use SSD for best performance</li>
-				</ul>
-
-				<p style="margin-bottom: 8px;"><strong>Testing recommendations:</strong></p>
-				<ul style="margin-left: 20px;">
-					<li>Start with 4 concurrent jobs and gradually increase while monitoring GPU utilization</li>
-					<li>Watch for thermal throttling on high concurrency (GPU temps >80°C)</li>
-					<li>Monitor job completion times - if they increase significantly, reduce concurrency</li>
-					<li>Check queue page during high load to see which jobs are running simultaneously</li>
-				</ul>
-
-				<p style="margin-top: 12px; padding: 8px; background: #fef3c7; color: #92400e; border-radius: 4px;">
-					⚠️ <strong>Note:</strong> Container restart required for changes to take effect. Current running jobs will complete before new setting applies.
-				</p>
-			</div>
-		</details>
-	</div>
-
-  <!-- Defaults -->
-  <div class="card">
-	<div class="title">Default presets</div>
-	<p class="label" style="margin-bottom:12px; color:#9ca3af">
-	  These values are loaded when the main page opens. Changes update the current default profile.
-	</p>
-	<div>
-	  <label class="label" for="targetmb">Default target size (MB)</label>
-	  <input id="targetmb" class="input" type="number" min="1" bind:value={targetMB} />
-	</div>
-
-	<div class="row" style="margin-top:12px">
-	  <div>
-		<label class="label" for="vcodec">Video codec</label>
-		<select id="vcodec" class="select" bind:value={videoCodec}>
-		  <optgroup label="NVIDIA NVENC (Hardware)">
-			<option value="av1_nvenc">AV1 (NVENC - RTX 40/50)</option>
-			<option value="hevc_nvenc">HEVC / H.265 (NVENC)</option>
-			<option value="h264_nvenc">H.264 (NVENC)</option>
-		  </optgroup>
-		  <optgroup label="CPU (Software)">
-			<option value="libaom-av1">AV1 (CPU)</option>
-			<option value="libx265">HEVC / H.265 (CPU)</option>
-			<option value="libx264">H.264 (CPU)</option>
-		  </optgroup>
-		</select>
-	  </div>
-	  <div>
-		<label class="label" for="acodec">Audio codec</label>
-		<select id="acodec" class="select" bind:value={audioCodec}>
-		  <option value="libopus">Opus</option>
-		  <option value="aac">AAC</option>
-		  <option value="none">No audio</option>
-		</select>
-	  </div>
-	</div>
-
-	<div class="row" style="margin-top:12px">
-	  <div>
-		<label class="label" for="preset">Speed / quality</label>
-		<select id="preset" class="select" bind:value={preset}>
-		  <option value="p1">P1 (Fastest)</option>
-		  <option value="p2">P2</option>
-		  <option value="p3">P3</option>
-		  <option value="p4">P4 (Fast)</option>
-		  <option value="p5">P5</option>
-		  <option value="p6">P6 (Balanced)</option>
-		  <option value="p7">P7 (Best quality)</option>
-		</select>
-	  </div>
-	  <div>
-		<label class="label" for="kbps">Audio bitrate (kbps)</label>
-		<select id="kbps" class="select" bind:value={audioKbps}>
-		  <option value={64}>64</option>
-		  <option value={96}>96</option>
-		  <option value={128}>128</option>
-		  <option value={160}>160</option>
-		  <option value={192}>192</option>
-		  <option value={256}>256</option>
-		</select>
-	  </div>
-	</div>
-
-	<div class="row" style="margin-top:12px">
-	  <div>
-		<label class="label" for="container">Container</label>
-		<select id="container" class="select" bind:value={container}>
-		  <option value="mp4">MP4</option>
-		  <option value="mkv">MKV</option>
-		</select>
-	  </div>
-	  <div>
-		<label class="label" for="tune">Tune <span style="color:#6b7280; font-size:12px">(NVENC only)</span></label>
-		<select id="tune" class="select" bind:value={tune}>
-		  <option value="hq">High Quality</option>
-		  <option value="ll">Low Latency</option>
-		  <option value="ull">Ultra Low Latency</option>
-		  <option value="lossless">Lossless</option>
-		</select>
-	  </div>
-	</div>
-
-	<div style="margin-top:12px">
-	  <button class="btn alt" on:click={saveDefaults} disabled={saving}>{saving ? 'Saving…' : 'Save defaults'}</button>
-	</div>
-  </div>
-
-	<!-- Support (collapsed by default) -->
-	<div class="card" style="padding:8px">
-		<details>
-			<summary style="cursor:pointer; list-style:none; display:flex; align-items:center; gap:8px">
-				<span class="title" style="margin:0; font-size:18px">Support the Project</span>
-				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-			</summary>
-			<div style="margin-top:12px">
-				<p class="label" style="color:#cbd5e1">If 8mb.local helps you, a small gesture goes a long way. Thank you for supporting continued development!</p>
-				<div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:10px">
-					  <a class="btn" style="text-decoration:none" href="https://www.paypal.com/paypalme/jasonselsley" target="_blank" rel="noopener noreferrer">Support via PayPal</a>
-					<a class="btn" style="text-decoration:none; background:#374151" href="https://github.com/JMS1717/8mb.local" target="_blank" rel="noopener noreferrer">Star on GitHub</a>
-				</div>
-			</div>
-		</details>
-	</div>
 </div>

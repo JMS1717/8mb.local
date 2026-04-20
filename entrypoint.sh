@@ -16,6 +16,12 @@ for libdir in /usr/local/nvidia/lib64 /usr/local/nvidia/lib /usr/local/cuda/lib6
   fi
 done
 
-log "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+# Dynamic defaults for CPU encoding
+if [ -z "$WORKER_CONCURRENCY" ]; then
+  # On Apple Silicon 8-12 cores is common, leave some breathing room
+  cores=$(nproc)
+  export WORKER_CONCURRENCY=$(( cores > 2 ? cores - 1 : 1 ))
+  log "Set WORKER_CONCURRENCY to $WORKER_CONCURRENCY based on $cores CPU cores"
+fi
 
 exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf "$@"

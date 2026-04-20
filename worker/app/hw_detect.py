@@ -172,11 +172,13 @@ def map_codec_to_hw(
     """
     # CPU encoders -- honor directly
     if requested_codec in (LIBX264, LIBX265, LIBSVTAV1, LIBAOM_AV1):
-        encoder = requested_codec if requested_codec != LIBSVTAV1 else LIBAOM_AV1
+        encoder = requested_codec
         flags: list[str] = []
         if encoder == LIBX264:
             flags = ["-pix_fmt", "yuv420p", "-profile:v", "high"]
         elif encoder == LIBX265:
+            flags = ["-pix_fmt", "yuv420p"]
+        elif encoder == LIBSVTAV1:
             flags = ["-pix_fmt", "yuv420p"]
         return encoder, flags, []
 

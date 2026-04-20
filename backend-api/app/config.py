@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     HISTORY_ENABLED: bool = Field(default=True)
 
     # --- Version (baked at build time) ---
-    APP_VERSION: str = Field(default="136")
+    APP_VERSION: str = Field(default="200")
 
     # --- Logging ---
     LOG_LEVEL: str = Field(default="INFO")

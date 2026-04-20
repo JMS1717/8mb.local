@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-HISTORY_FILE = Path("/app/history.json")
+HISTORY_FILE = Path("/app/data/history.json")
 
 
 def _read_history() -> List[Dict[str, Any]]:
@@ -55,6 +55,17 @@ def add_history_entry(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
     encoder: Optional[str] = None,
+    # Output mediainfo fields
+    output_video_bitrate_kbps: Optional[float] = None,
+    output_audio_bitrate_kbps: Optional[float] = None,
+    output_width: Optional[int] = None,
+    output_height: Optional[int] = None,
+    output_duration_s: Optional[float] = None,
+    output_video_codec: Optional[str] = None,
+    output_audio_codec: Optional[str] = None,
+    output_size_bytes: Optional[int] = None,
+    compression_speed_x: Optional[float] = None,
+    encoding_time_s: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Add a compression history entry"""
     entry = {
@@ -88,6 +99,28 @@ def add_history_entry(
         entry['end_time'] = end_time
     if encoder is not None:
         entry['encoder'] = encoder
+
+    # Output mediainfo
+    if output_video_bitrate_kbps is not None:
+        entry['output_video_bitrate_kbps'] = round(output_video_bitrate_kbps, 1)
+    if output_audio_bitrate_kbps is not None:
+        entry['output_audio_bitrate_kbps'] = round(output_audio_bitrate_kbps, 1)
+    if output_width is not None:
+        entry['output_width'] = int(output_width)
+    if output_height is not None:
+        entry['output_height'] = int(output_height)
+    if output_duration_s is not None:
+        entry['output_duration_s'] = round(output_duration_s, 2)
+    if output_video_codec is not None:
+        entry['output_video_codec'] = output_video_codec
+    if output_audio_codec is not None:
+        entry['output_audio_codec'] = output_audio_codec
+    if output_size_bytes is not None:
+        entry['output_size_bytes'] = int(output_size_bytes)
+    if compression_speed_x is not None:
+        entry['compression_speed_x'] = round(compression_speed_x, 2)
+    if encoding_time_s is not None:
+        entry['encoding_time_s'] = round(encoding_time_s, 1)
 
     history = _read_history()
     history.insert(0, entry)  # Add to beginning (newest first)

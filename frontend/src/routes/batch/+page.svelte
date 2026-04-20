@@ -1,5 +1,4 @@
 <script lang="ts">
-  import '../../app.css';
   import { onDestroy, onMount } from 'svelte';
   import {
     uploadBatchWithProgress,
@@ -100,7 +99,7 @@
   $: cpuCodecs = availableCodecs.filter((c) => c.group === 'cpu');
   let presetProfiles: PresetProfile[] = [];
   let selectedPreset: string | null = null;
-  let sizeButtons: number[] = [4, 5, 8, 9.7, 25, 50, 100];
+  let sizeButtons: any[] = [4, 5, 8, 9.7, 25, 50, 100];
 
   let isUploading = false;
   let uploadProgress = 0;
@@ -642,6 +641,16 @@
     } catch {
       // Ignore
     }
+
+    // Pick up files from homepage multi-drop redirect
+    try {
+      const homeFiles = (window as any).__batchFilesFromHome as File[] | undefined;
+      if (homeFiles?.length) {
+        delete (window as any).__batchFilesFromHome;
+        sessionStorage.removeItem('batchFromHome');
+        applySelection(homeFiles);
+      }
+    } catch {}
   });
 
   onDestroy(() => {
@@ -658,22 +667,24 @@
   }
 </script>
 
-<div class="max-w-5xl mx-auto mt-8 space-y-6">
-  <div class="flex items-center justify-between">
+<div class="page-container">
+  <div class="page-header">
     <div>
-      <h1 class="text-2xl font-bold">Batch Upload</h1>
-      <p class="text-sm text-gray-400">Select multiple videos, choose a preset, and process everything in sequence.</p>
+      <h1 class="page-title">Batch Upload</h1>
     </div>
-    <div class="flex gap-2">
-      <a href="/" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors text-sm">← Home</a>
-      <a href="/queue" class="px-4 py-2 bg-blue-700 hover:bg-blue-600 text-white rounded-lg transition-colors text-sm">Queue</a>
+    <div class="header-actions" style="display:flex; gap:8px; flex-wrap:wrap; justify-content: flex-end; margin-left: auto;">
+      <a href="/" data-sveltekit-reload class="btn alt">🏠 Home</a>
+      <a href="/advanced" class="btn alt">⚙️ Advanced</a>
+      <a href="/queue" class="btn alt">📋 Queue</a>
+      <a href="/history" class="btn alt">📜 History</a>
+      <a href="/settings" class="btn alt">⚙️ Settings</a>
     </div>
   </div>
 
-  <div class="card space-y-4">
-    <h2 class="font-semibold">1) Select Files</h2>
+  <div class="card">
+    <h2 class="card-title">1) Select Files</h2>
     <div
-      class={`border-2 border-dashed rounded p-8 text-center transition-colors ${isDragActive ? 'border-emerald-400 bg-emerald-900/20' : 'border-gray-700'}`}
+      class="drop-zone {isDragActive ? 'active' : ''}"
       role="button"
       tabindex="0"
       on:drop={onDropFiles}
@@ -682,8 +693,8 @@
       on:click={openFilesPicker}
       on:keydown={onDropZoneKeydown}
     >
-      <p class="mb-2">Drag & drop videos here</p>
-      <p class="text-xs text-gray-400">or click to choose multiple files</p>
+      <p>Drag & drop videos here</p>
+      <p class="drop-subtext">or click to choose multiple files</p>
       <input
         id="batch-files-input"
         bind:this={filesInput}
@@ -730,7 +741,7 @@
     {#if targetMode === 'size'}
       <div class="space-x-2 flex flex-wrap gap-2">
         {#each sizeButtons as b}
-          <button class="btn" type="button" on:click={() => setPresetMB(Number(b))}>{b}MB</button>
+          <button class="btn" type="button" on:click={() => setPresetMB(Number(b.mb || b))}>{b.label || b + ' MB'}</button>
         {/each}
       </div>
     {/if}
@@ -938,8 +949,8 @@
     </div>
 
     {#if isUploading}
-      <div class="w-full h-2 bg-gray-800 rounded overflow-hidden">
-        <div class="h-2 bg-blue-600" style={`width:${uploadProgress}%`}></div>
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" style={`width:${uploadProgress}%`}></div>
       </div>
       {#if uploadTotalBytes > 0}
         <p class="text-xs text-gray-500">
@@ -967,18 +978,18 @@
         <span>{stateLabel(liveTaskPhase || 'running')}</span>
         <span>{liveTaskProgress.toFixed(1)}%</span>
       </div>
-      <div class="w-full h-2 bg-gray-800 rounded overflow-hidden">
-        <div class="h-2 bg-indigo-500" style={`width:${Math.max(0, Math.min(100, liveTaskProgress))}%`}></div>
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" style={`width:${Math.max(0, Math.min(100, liveTaskProgress))}%`}></div>
       </div>
 
       <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-        <div class="bg-gray-950 border border-gray-800 rounded px-2 py-1">Phase: {liveTaskPhase || 'encoding'}</div>
-        <div class="bg-gray-950 border border-gray-800 rounded px-2 py-1">Speed: {liveTaskSpeedX ? `${liveTaskSpeedX.toFixed(2)}x` : 'n/a'}</div>
-        <div class="bg-gray-950 border border-gray-800 rounded px-2 py-1">ETA: {liveTaskEtaLabel || 'n/a'}</div>
-        <div class="bg-gray-950 border border-gray-800 rounded px-2 py-1">Decoder/Encoder: {liveTaskDecodeMethod || '?'} / {liveTaskEncodeMethod || '?'}</div>
+        <div class="card">Phase: {liveTaskPhase || 'encoding'}</div>
+        <div class="card">Speed: {liveTaskSpeedX ? `${liveTaskSpeedX.toFixed(2)}x` : 'n/a'}</div>
+        <div class="card">ETA: {liveTaskEtaLabel || 'n/a'}</div>
+        <div class="card">Decoder/Encoder: {liveTaskDecodeMethod || '?'} / {liveTaskEncodeMethod || '?'}</div>
       </div>
 
-      <div class="bg-gray-950 border border-gray-800 rounded p-3 max-h-56 overflow-auto">
+      <div class="card">
         {#if liveTaskLogs.length === 0}
           <p class="text-xs text-gray-500">Waiting for detailed logs...</p>
         {:else}
@@ -1005,15 +1016,15 @@
         </div>
       </div>
 
-      <div class="w-full h-2 bg-gray-800 rounded overflow-hidden">
-        <div class="h-2 bg-emerald-500" style={`width:${batchStatus.overall_progress}%`}></div>
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" style={`width:${batchStatus.overall_progress}%`}></div>
       </div>
 
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-        <div class="bg-gray-950 border border-gray-800 rounded p-3">Queued: {batchStatus.queued_count}</div>
-        <div class="bg-gray-950 border border-gray-800 rounded p-3">Running: {batchStatus.running_count}</div>
-        <div class="bg-gray-950 border border-gray-800 rounded p-3">Completed: {batchStatus.completed_count}</div>
-        <div class="bg-gray-950 border border-gray-800 rounded p-3">Failed: {batchStatus.failed_count}</div>
+        <div class="card">Queued: {batchStatus.queued_count}</div>
+        <div class="card">Running: {batchStatus.running_count}</div>
+        <div class="card">Completed: {batchStatus.completed_count}</div>
+        <div class="card">Failed: {batchStatus.failed_count}</div>
       </div>
 
       <div class="flex gap-3">
@@ -1052,7 +1063,7 @@
                 <td class="p-2 min-w-40">
                   <div class="text-xs text-gray-300 mb-1">{item.progress.toFixed(1)}%</div>
                   <div class="h-2 bg-gray-800 rounded overflow-hidden">
-                    <div class="h-2 bg-blue-600" style={`width:${Math.max(0, Math.min(100, item.progress))}%`}></div>
+                    <div class="progress-bar-fill" style={`width:${Math.max(0, Math.min(100, item.progress))}%`}></div>
                   </div>
                 </td>
                 <td class="p-2">
@@ -1070,3 +1081,64 @@
     </div>
   {/if}
 </div>
+
+<style>
+  /* Layout */
+  .page-container { max-width: 1000px; margin: 40px auto; padding: 0 20px; }
+  .page-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; flex-wrap: wrap; gap: 16px; }
+  .page-title { font-size: 28px; font-weight: 600; margin: 0; }
+  .page-subtitle { font-size: 14px; color: var(--text-secondary); margin: 4px 0 0; }
+  .header-actions { display: flex; gap: 8px; align-items: center; }
+
+  /* Cards */
+  .card { background-color: var(--bg-card); border: 1px solid var(--glass-border); border-radius: var(--border-radius); padding: 20px; margin-bottom: 20px; }
+  .card-title { font-size: 18px; font-weight: 600; margin-bottom: 16px; }
+
+  /* Drop zone */
+  .drop-zone { border: 2px dashed var(--glass-border); border-radius: var(--border-radius); padding: 32px; text-align: center; cursor: pointer; transition: all var(--transition-fast); margin-bottom: 12px; }
+  .drop-zone:hover, .drop-zone.active { border-color: var(--success); background: rgba(34, 197, 94, 0.05); }
+  .drop-subtext { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  /* Form layout */
+  .form-label { display: block; font-size: 14px; font-weight: 500; color: var(--text-secondary); margin-bottom: 6px; }
+
+  /* Section headings */
+  h2 { margin-top: 0; }
+  h3 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
+
+  /* Grid helpers (scoped) */
+  .grid { display: grid; gap: 12px; }
+  .grid-3 { grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+
+  /* Stat boxes */
+  .stat-box { text-align: center; padding: 16px; background: var(--bg-hover); border-radius: 8px; border: 1px solid var(--glass-border); }
+  .stat-val { font-size: 24px; font-weight: 700; }
+  .stat-label { font-size: 13px; color: var(--text-muted); }
+
+  /* Progress bars */
+  .progress-bar-bg { width: 100%; height: 6px; background: var(--bg-hover); border-radius: 3px; overflow: hidden; }
+  .progress-bar-fill { height: 100%; background: var(--accent); transition: width 0.3s ease; border-radius: 3px; }
+
+  /* Logs */
+  .logs-box { padding: 12px; background: #000; border-radius: 6px; max-height: 224px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; color: #a1a1aa; white-space: pre-wrap; word-break: break-all; }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; padding: 10px 12px; font-size: 13px; color: var(--text-muted); background: var(--bg-hover); border-bottom: 1px solid var(--glass-border); }
+  td { padding: 10px 12px; font-size: 14px; border-bottom: 1px solid var(--glass-border); color: var(--text-secondary); }
+  tr:last-child td { border-bottom: none; }
+
+  /* Button variants */
+  .btn-danger { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+  .btn-danger:hover { background: #dc2626; color: white; }
+
+  /* Status colors */
+  .text-yellow { color: #facc15; }
+  .text-blue { color: #60a5fa; }
+  .text-green { color: #4ade80; }
+  .text-red { color: #f87171; }
+  .text-gray { color: var(--text-muted); }
+
+  /* Hidden utility */
+  .hidden { display: none; }
+</style>

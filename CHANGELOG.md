@@ -1,5 +1,44 @@
 # Changelog
 
+## [v200] - 2026-04-20
+
+### UI & Layout Redesign
+- **New Homepage Architecture**: Adopted and tweaked a highly-optimized external project homepage design as the base foundation for the 8mb.local root page, completely modernizing the aesthetic and component structure.
+- **Settings & Advanced Redesigns**: The wall-of-options in the advanced settings and global configurations have been retired in favor of sleek, compartmentalized cards decoupled from the legacy sidebar.
+- **Frontend Bloat Eradication**: Completely removed PostCSS, Tailwind CSS, and other unnecessary node modules from the Svelte environment, embracing a pure, native CSS architecture for incredibly fast build times.
+- **Dead Code Elimination**: Scoured and removed legacy dead code, deprecated components, and unused style fallbacks across the frontend.
+- **Homepage Default Syncing**: Fixed hard-coded defaults! The `8mb.local` homepage now dynamically queries the backend upon launch, strictly respecting any custom size thresholds, preset values, and codec preferences you defined in the Settings menu.
+- **Hardware Grid Extension**: The advanced compression target control module (size vs bitrate) has been extended to a three-column alignment, introducing a reactive `.size-grid` that beautifully structures input parameters across 5 fixed columns.
+- **Profiles & Automations Migration**: System-wide reactive UI options (such as "Play sound when done", MP4 finalize sequences, etc.) have successfully relocated natively to the global Settings tab, removing interface clutter without breaking backend job tracking.
+- **NVENC State Reactivity**: Added real-time checks forcing the `Settings` checkboxes mapping Encoder visibility pipelines into an inactive, gray-out state strictly upon diagnostic CPU detection returns. 
+- **Auto-Resolution Wrapping**: Re-wrapped the Auto-Resolution constraint text inputs on the Advanced Tab to prevent out-of-flow text wrapping against checkboxes.
+- **Footer Hierarchy Restructured**: The `HW Accel` DAEMON tag and the version indicator have been dropped neatly into a secondary footer stack below the Quick Nav links on the Homepage.
+- **Global Typography Normalization**: Purged all generic '8mb.local' domain strings bounding across every active tab title, making header tags contextual and relevant (`Advanced`, `Batch`, `Settings`, `History`).
+
+### Core Reliability & Encoders
+- **AV1 Codec Enhancements**: Fixed critical bugs within the baseline AV1 codec handling and successfully deployed a secondary high-performance AV1 codec alongside the legacy one for expanded hardware resilience.
+- **Encoder Diagnostics Baseline Check**: Evaluated `libx265` encode startup subprocess latency mappings, pushing out test evaluation thresholds to a flexible 30-second window to resolve transient boot failures across weaker hosts.
+- **macOS Hardware Daemon**: Fully stabilized and modernized the native macOS VideoToolbox offload daemon. It is now reliably managed via `launchd` and correctly identifies itself as `8mb.local` within system monitoring tools while cleanly interfacing with the backend worker.
+- **Auto-Resolution Selector Fixed**: Decoupled the minimum active height dropdown inside the Auto Resolution switch from its parent label, eliminating accidental repetitive toggling events when users try to interact with the picker.
+- **Custom macOS Daemon UI Management**: Users can now statically redefine their target Host daemon port natively within a new GUI component in Settings. System daemon diagnostics now accurately fetch host resource usages and capabilities.
+
+---
+
+## [v137] - 2026-04-20
+
+### UI & Architecture
+- **Tailwind CSS Eradication**: Completely removed Tailwind, PostCSS, and autoprefixer dependencies. The frontend now employs a lightweight, ultra-fast native CSS rendering grid (`app.css`), eliminating complex Javascript Node modules during SvelteKit build time and terminating unused selector warnings.
+- **Settings Page Overhaul**: Transformed the monolithic settings view into a sleek, sidebar-driven navigation structure. Divided settings into App, System, Compression, and Security clusters for immense readability improvements.
+- **Codec Visibility Normalization**: Native frontend labels now properly mask backend identifiers. `libsvtav1` translates beautifully to `AV1 (SVT)`, and CPU x265 flags simply as `HEVC`.
+
+### Core Reliability
+- **SVT-AV1 Init Resilience**: Fixed a Docker boot-time container failure where FFmpeg's container capabilities check would crash `libsvtav1` when executing a black-frame test without a bitrate mode. It now properly leverages scoped `-crf 30` only for SVT encoders, resolving all false-negative hardware detection test failures.
+- **`libaom-av1` Throttling Fixed**: Injected `-row-mt 1` multithreading flags natively preventing libaom CPU lock-ups during 10-bit encoding pipelines. 
+- **macOS Hardware Daemon Evolution**: Rewrote the VideoToolbox offload daemon (`daemon/install.sh`). The macOS daemon installer operates cleanly using standard `launchctl` and evaluates via native Python binaries without violating sandboxing. 
+- **Process Visibility**: The daemon directly utilizes `setproctitle` so Activity Monitor and `top` cleanly identify the system process as `8mb.local` instead of a generic python blob.
+
+---
+
 ## [v136] - 2026-04-17
 
 ### Portrait / display orientation
@@ -20,7 +59,7 @@
 ### Docker
 
 - Default **`docker-compose.yml`** requests **`gpus: all`** (NVIDIA). Hosts without GPU passthrough can use **`docker-compose.cpu.yml`** (`docker compose -f docker-compose.cpu.yml up -d --build`).
-- **Docker Hub:** **`jms1717/8mblocal:latest`** and **`jms1717/8mblocal:v136`** published for this release (`BUILD_VERSION` **136**). Pull: `docker pull jms1717/8mblocal:v136` (or `:latest`).
+- **Docker Hub:** **`xesurient/8mb.local:latest`** and **`xesurient/8mb.local:v200`** published for this release (`BUILD_VERSION` **200**). Pull: `docker pull xesurient/8mb.local:v200` (or `:latest`).
 
 ---
 

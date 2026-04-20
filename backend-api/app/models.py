@@ -72,10 +72,11 @@ class DefaultPresets(BaseModel):
     target_mb: float = 25
     video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
-    preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
-    audio_kbps: Literal[64,96,128,160,192,256] = 128
+    preset: str = 'p6'  # Accept any preset string (NVENC p1-p7, CPU presets, extraquality, numeric, etc.)
+    audio_kbps: int = 128
     container: Literal['mp4','mkv'] = 'mp4'
     tune: Literal['hq','ll','ull','lossless'] = 'hq'
+    max_output_fps: Optional[float] = Field(default=None, ge=0, le=1000)
 
 
 class AvailableCodecsResponse(BaseModel):
@@ -93,6 +94,7 @@ class CodecVisibilitySettings(BaseModel):
     # CPU
     libx264: bool = True
     libx265: bool = True
+    libsvtav1: bool = True
     libaom_av1: bool = True
 
 
@@ -101,8 +103,8 @@ class PresetProfile(BaseModel):
     target_mb: float
     video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1']
     audio_codec: Literal['libopus','aac','none']
-    preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality']
-    audio_kbps: Literal[64,96,128,160,192,256]
+    preset: str  # Accept any preset string (NVENC p1-p7, CPU named presets, numeric cpu-used, extraquality)
+    audio_kbps: int
     container: Literal['mp4','mkv']
     tune: Literal['hq','ll','ull','lossless']
     max_output_fps: Optional[float] = Field(default=None, ge=0, le=1000)

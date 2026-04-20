@@ -8,46 +8,25 @@ import subprocess
 import time
 import logging
 import sys
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Dict, Optional
 from redis import Redis
 
 from .celery_app import celery_app
-from .utils import ffprobe_info, calc_bitrates
+from .utils import ffprobe_info, calc_bitrates, get_gpu_env
 from .auto_resolution import choose_auto_resolution
 from .hw_detect import get_hw_info, map_codec_to_hw, choose_best_codec
 from .startup_tests import run_startup_tests
 from .progress import parse_time_string
+from .constants import CPU_PRESET_MAP, SVT_PRESET_MAP, LIBAOM_PRESET_MAP
 
 logger = logging.getLogger(__name__)
 
 REDIS = None
 # Cache encoder test results to avoid slow init tests on every job
 ENCODER_TEST_CACHE: Dict[str, bool] = {}
-
-
-def get_gpu_env():
-    """
-    Get environment with NVIDIA GPU variables and library paths for subprocess calls.
-    Includes LD_LIBRARY_PATH locations needed for CUDA on WSL2 and NVIDIA toolkit.
-    """
-    env = os.environ.copy()
-    # Ensure NVIDIA variables are set for GPU access
-    env['NVIDIA_VISIBLE_DEVICES'] = env.get('NVIDIA_VISIBLE_DEVICES', 'all')
-    env['NVIDIA_DRIVER_CAPABILITIES'] = env.get('NVIDIA_DRIVER_CAPABILITIES', 'compute,video,utility')
-    # Add common library locations (non-destructive append)
-    lib_paths = [
-        '/usr/local/nvidia/lib64',
-        '/usr/local/nvidia/lib',
-        '/usr/local/cuda/lib64',
-        '/usr/local/cuda/lib',
-        '/usr/lib/wsl/lib',  # WSL2 libcuda.so location
-        '/usr/lib/x86_64-linux-gnu',
-    ]
-    existing = env.get('LD_LIBRARY_PATH', '')
-    add = ':'.join(p for p in lib_paths if p)
-    env['LD_LIBRARY_PATH'] = (existing + (':' if existing and add else '') + add) if (existing or add) else ''
-    return env
 
 def _redis() -> Redis:
     global REDIS
@@ -67,6 +46,80 @@ def _is_cancelled(task_id: str) -> bool:
         return str(val) == '1'
     except Exception:
         return False
+
+def _daemon_available(daemon_url: str) -> bool:
+    try:
+        req = urllib.request.Request(f"{daemon_url}/health")
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            return data.get("status") == "ok"
+    except Exception:
+        return False
+
+def _offload_to_daemon(self, daemon_url: str, **kwargs):
+    # Prepare payload exactly as the daemon expects
+    payload = {
+        "input_path": kwargs.get("input_path"), # Must map to same path inside VM, handled by equal binds
+        "output_path": kwargs.get("output_path"),
+        "target_size_mb": kwargs.get("target_size_mb"),
+        "target_video_bitrate_kbps": kwargs.get("target_video_bitrate_kbps"),
+        "video_codec": kwargs.get("video_codec"),
+        "audio_codec": kwargs.get("audio_codec"),
+        "audio_bitrate_kbps": kwargs.get("audio_bitrate_kbps"),
+        "preset": kwargs.get("preset"),
+        "max_height": kwargs.get("max_height"),
+        "max_width": kwargs.get("max_width"),
+        "max_output_fps": kwargs.get("max_output_fps"),
+    }
+    
+    _publish(self.request.id, {"type": "log", "message": f"Offloading encoding task to native daemon at {daemon_url}..."})
+    
+    req = urllib.request.Request(f"{daemon_url}/encode", data=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json'}, method='POST')
+    
+    try:
+        with urllib.request.urlopen(req) as resp:
+            for line in resp:
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line.decode('utf-8').strip())
+                    
+                    if event.get("type") == "log" or event.get("type") == "ffmpeg_log":
+                        # Daemon emits raw ffmpeg logs, we can pass them to frontend
+                        _publish(self.request.id, {"type": "log", "message": event.get("message")})
+                        
+                        # If the daemon provided speed, publish it along with a dummy progress to trigger ETA logic in frontend
+                        # Ideally the daemon should compute progress, but for now we rely on the log parser
+                        if event.get("speed_x"):
+                            _publish(self.request.id, {"type": "progress", "progress": 50.0, "speed_x": event.get("speed_x"), "phase": "encoding"})
+                            
+                    elif event.get("type") == "done":
+                        _publish(self.request.id, {"type": "progress", "progress": 100.0, "phase": "done"})
+                        stats = {
+                            "input_path": kwargs.get("input_path"),
+                            "output_path": kwargs.get("output_path"),
+                            "target_size_mb": kwargs.get("target_size_mb"),
+                            "final_size_mb": round(event.get("size_bytes", 0) / (1024*1024), 2),
+                            "duration_s": 0, # Daemon currently doesn't compute duration
+                        }
+                        try:
+                            self.update_state(state="SUCCESS", meta={"output_path": kwargs.get("output_path"), "progress": 100.0, "detail": "done", **stats})
+                        except Exception:
+                            pass
+                        _publish(self.request.id, {"type": "done", "stats": stats})
+                        return stats
+                        
+                    elif event.get("type") == "error":
+                        _publish(self.request.id, {"type": "error", "message": event.get("message")})
+                        raise RuntimeError(f"Daemon error: {event.get('message')}")
+                        
+                except json.JSONDecodeError:
+                    continue
+                    
+    except urllib.error.URLError as e:
+        _publish(self.request.id, {"type": "error", "message": f"Lost connection to daemon: {e}"})
+        raise RuntimeError(f"Lost connection to daemon: {e}")
+
 
 
 @celery_app.task(name="worker.worker.get_hardware_info")
@@ -111,6 +164,19 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                    target_resolution: int | None = None, audio_only: bool = False,
                    target_video_bitrate_kbps: float | None = None,
                    max_output_fps: float | None = None):
+    
+    # Try native daemon for hardware accelerated encoding first (mostly VideoToolbox on macOS)
+    daemon_url = os.getenv("DAEMON_URL", "http://host.docker.internal:7998")
+    if video_codec.endswith("_videotoolbox") and _daemon_available(daemon_url):
+        return _offload_to_daemon(
+            self, daemon_url,
+            input_path=input_path, output_path=output_path, target_size_mb=target_size_mb,
+            target_video_bitrate_kbps=target_video_bitrate_kbps, video_codec=video_codec,
+            audio_codec=audio_codec, audio_bitrate_kbps=audio_bitrate_kbps,
+            preset=preset, max_height=max_height or target_resolution, max_width=max_width,
+            max_output_fps=max_output_fps
+        )
+
     # Detect hardware acceleration
     _publish(self.request.id, {"type": "log", "message": "Initializing: detecting hardware…"})
     hw_info = get_hw_info()
@@ -154,7 +220,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Fallback to CPU only if startup tests explicitly marked encoder as unavailable.
     # If cache is empty (tests still running in background), attempt hardware and rely on runtime fallback below.
     original_encoder = actual_encoder
-    if actual_encoder not in ("libx264", "libx265", "libaom-av1"):
+    if actual_encoder not in ("libx264", "libx265", "libsvtav1", "libaom-av1"):
         global ENCODER_TEST_CACHE
         cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
         if cache_key in ENCODER_TEST_CACHE and not ENCODER_TEST_CACHE[cache_key]:
@@ -173,7 +239,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 actual_encoder = "libx265"
                 v_flags = ["-pix_fmt", "yuv420p"]
             else:  # AV1
-                actual_encoder = "libaom-av1"
+                actual_encoder = "libsvtav1"
                 v_flags = ["-pix_fmt", "yuv420p"]
             init_hw_flags = []
             # Update hardware info display to show CPU fallback
@@ -295,16 +361,23 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 preset_flags += ["-crf", "18"]
             else:
                 preset_flags += ["-crf", "20"]
+        elif actual_encoder == "libsvtav1":
+            preset_flags = ["-preset", "2"]
+            preset_flags += ["-crf", "20"]
         elif actual_encoder == "libaom-av1":
-            preset_flags = ["-cpu-used", "0"]
+            preset_flags = ["-cpu-used", "0", "-aom-params", "row-mt=1"]
             preset_flags += ["-crf", "20"]
     elif actual_encoder.endswith("_nvenc"):
         preset_flags = ["-preset", preset_val]
         tune_flags = ["-tune", tune_val]
-    elif actual_encoder in ("libx264", "libx265", "libsvtav1"):
-        # Software encoders
-        cpu_preset_map = {"p1": "ultrafast", "p2": "superfast", "p3": "veryfast", "p4": "faster", "p5": "fast", "p6": "medium", "p7": "slow"}
-        preset_flags = ["-preset", cpu_preset_map.get(preset_val, "medium")]
+    elif actual_encoder in ("libx264", "libx265", "libsvtav1", "libaom-av1"):
+        # Software encoders — use centralized preset maps from constants.py
+        if actual_encoder == "libsvtav1":
+            preset_flags = ["-preset", SVT_PRESET_MAP.get(preset_val, "6")]
+        elif actual_encoder == "libaom-av1":
+            preset_flags = ["-cpu-used", LIBAOM_PRESET_MAP.get(preset_val, "4"), "-aom-params", "row-mt=1"]
+        else:
+            preset_flags = ["-preset", CPU_PRESET_MAP.get(preset_val, "medium")]
         if actual_encoder == "libx264":
             tune_flags = ["-tune", "film"]  # Better than 'hq' for CPU
 
@@ -554,6 +627,8 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         "-b:v", f"{int(video_kbps)}k",
         "-maxrate", f"{maxrate}k",
         "-bufsize", f"{bufsize}k",
+        # SVT-AV1 requires explicit VBR mode when using target bitrate
+        *(['-svtav1-params', 'rc=1'] if actual_encoder == 'libsvtav1' and preset_val != 'extraquality' else []),
         *preset_flags,  # Encoder-specific preset
         *tune_flags,    # Encoder-specific tune (if supported)
     ]
@@ -845,7 +920,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         elif "hevc" in actual_encoder or "h265" in actual_encoder:
             fb_encoder = "libx265"; fb_flags = ["-pix_fmt","yuv420p"]
         else:
-            fb_encoder = "libaom-av1"; fb_flags = ["-pix_fmt","yuv420p"]
+            fb_encoder = "libsvtav1"; fb_flags = ["-pix_fmt","yuv420p"]
 
         _publish(self.request.id, {"type": "log", "message": f"Encoder: CPU ({fb_encoder})"})
         actual_encoder = fb_encoder
@@ -875,12 +950,15 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             "-maxrate", f"{maxrate}k",
             "-bufsize", f"{bufsize}k",
         ]
+        # Apply the user's preset selection (not hardcoded defaults) via centralized maps
         if fb_encoder == "libx264":
-            cmd2 += ["-preset","medium","-tune","film"]
+            cmd2 += ["-preset", CPU_PRESET_MAP.get(preset_val, "medium"), "-tune", "film"]
         elif fb_encoder == "libx265":
-            cmd2 += ["-preset","medium"]
+            cmd2 += ["-preset", CPU_PRESET_MAP.get(preset_val, "medium")]
+        elif fb_encoder == "libsvtav1":
+            cmd2 += ["-preset", SVT_PRESET_MAP.get(preset_val, "6"), "-svtav1-params", "rc=1"]
         elif fb_encoder == "libaom-av1":
-            cmd2 += ["-cpu-used","4"]
+            cmd2 += ["-cpu-used", LIBAOM_PRESET_MAP.get(preset_val, "4"), "-aom-params", "row-mt=1"]
         if chosen_audio_codec is None:
             cmd2 += ["-an"]
         else:
@@ -1081,6 +1159,27 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             
             # Derive container from output path
             container = 'mp4' if str(output_path).lower().endswith('.mp4') else 'mkv'
+
+            # Probe output file for actual mediainfo
+            output_meta = {}
+            try:
+                out_info = ffprobe_info(output_path)
+                output_meta = {
+                    "output_video_bitrate_kbps": out_info.get("video_bitrate_kbps"),
+                    "output_audio_bitrate_kbps": out_info.get("audio_bitrate_kbps"),
+                    "output_width": out_info.get("width"),
+                    "output_height": out_info.get("height"),
+                    "output_duration_s": out_info.get("duration"),
+                    "output_video_codec": out_info.get("video_codec"),
+                    "output_audio_codec": out_info.get("audio_codec"),
+                    "output_size_bytes": os.path.getsize(output_path) if os.path.exists(output_path) else None,
+                    "compression_speed_x": round(speed_ewma, 2) if speed_ewma else None,
+                    "encoding_time_s": round(compression_duration, 1),
+                }
+                # Remove None values
+                output_meta = {k: v for k, v in output_meta.items() if v is not None}
+            except Exception as probe_err:
+                _publish(self.request.id, {"type": "log", "message": f"Could not probe output for history: {probe_err}"})
             
             hm.add_history_entry(
                 filename=filename,
@@ -1100,6 +1199,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 start_time=start_time,
                 end_time=end_time,
                 encoder=actual_encoder,
+                **output_meta,
             )
     except Exception as e:
         # Don't fail the job if history fails

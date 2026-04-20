@@ -7,9 +7,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    build-essential yasm cmake pkg-config git wget ca-certificates \
+    build-essential yasm nasm cmake pkg-config git wget ca-certificates \
     libnuma-dev libx264-dev libx265-dev libvpx-dev libopus-dev \
-    libaom-dev libdav1d-dev
+    libaom-dev libdav1d-dev meson ninja-build
 
 WORKDIR /build
 
@@ -18,13 +18,21 @@ WORKDIR /build
 RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
     cd nv-codec-headers && git checkout sdk/12.1 && make install && cd ..
 
-# Build FFmpeg with NVIDIA NVENC + CPU encoders
+# Build SVT-AV1 from source for fast CPU AV1 encoding
+RUN git clone --depth 1 --branch v2.3.0 https://gitlab.com/AOMediaCodec/SVT-AV1.git && \
+    cd SVT-AV1 && \
+    cd Build && \
+    cmake .. -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_APPS=OFF -DBUILD_DEC=OFF && \
+    make -j$(nproc) && make install && ldconfig && \
+    cd /build && rm -rf SVT-AV1
+
+# Build FFmpeg with NVIDIA NVENC + CPU encoders (including SVT-AV1)
 RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
         tar xf ffmpeg-6.1.1.tar.xz && cd ffmpeg-6.1.1 && \
                 ./configure \
       --enable-nonfree --enable-gpl \
       --enable-cuda-nvcc --enable-libnpp --enable-nvenc \
-      --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus --enable-libaom --enable-libdav1d \
+      --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus --enable-libaom --enable-libdav1d --enable-libsvtav1 \
       --extra-cflags=-I/usr/local/cuda/include \
       --extra-ldflags=-L/usr/local/cuda/lib64 \
       --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages && \
@@ -55,7 +63,7 @@ RUN npm run build && \
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
 # Build-time version (can be overridden)
-ARG BUILD_VERSION=136
+ARG BUILD_VERSION=200
 ENV APP_VERSION=${BUILD_VERSION}
 ARG BUILD_COMMIT=unknown
 ENV BUILD_COMMIT=${BUILD_COMMIT}
@@ -67,7 +75,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 python3-pip supervisor redis-server \
+    python3.10 python3-pip python3-dev gcc supervisor redis-server \
     libopus0 libx264-163 libx265-199 libvpx7 libnuma1 \
     libaom3 libdav1d5 \
     && apt-get clean && rm -rf /tmp/*
@@ -83,19 +91,19 @@ COPY --from=ffmpeg-build /usr/local/lib/libavfilter.so* /usr/local/lib/
 COPY --from=ffmpeg-build /usr/local/lib/libswscale.so* /usr/local/lib/
 COPY --from=ffmpeg-build /usr/local/lib/libswresample.so* /usr/local/lib/
 COPY --from=ffmpeg-build /usr/local/lib/libavdevice.so* /usr/local/lib/
+# SVT-AV1 shared library (built from source in Stage 1)
+COPY --from=ffmpeg-build /usr/local/lib/libSvtAv1Enc.so* /usr/local/lib/
 RUN ldconfig
 
 WORKDIR /app
 
-# Install Python dependencies (single consolidated requirements)
+# Install Python dependencies directly (Docker container = isolation; no venv needed)
 COPY requirements.txt /app/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip3 install --no-cache-dir -r /app/requirements.txt && \
+    pip3 install -r /app/requirements.txt && \
     rm /app/requirements.txt && \
-    # Remove pip cache and unnecessary files
-    find /usr/local/lib/python3.10 -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true && \
-    find /usr/local/lib/python3.10 -type f -name '*.pyc' -delete && \
-    find /usr/local/lib/python3.10 -type f -name '*.pyo' -delete
+    # Verify critical packages installed successfully
+    python3 -c "import uvicorn; import celery; print('✓ uvicorn + celery OK')"
 
 # Copy application code
 COPY backend-api/app /app/backend

@@ -197,11 +197,26 @@ def is_video_upload(upload: UploadFile) -> bool:
 
 
 def build_output_name(input_path: Path, task_id: str, container: str, audio_only: bool = False) -> str:
+    from . import settings_manager
     ext = ".m4a" if audio_only else (".mp4" if container == "mp4" else ".mkv")
     stem = input_path.stem
+    # Strip UUID prefix from previously processed files
     if len(stem) > 37 and stem[36] == '_':
         stem = stem[37:]
-    return f"{stem}_8mblocal_{task_id[:8]}{ext}"
+    # Build suffix from settings
+    try:
+        fn_settings = settings_manager.get_filename_settings()
+        tag = fn_settings.get('tag', '8mb.local')
+        include_id = fn_settings.get('include_id', True)
+    except Exception:
+        tag = '8mb.local'
+        include_id = True
+    parts = [stem]
+    if tag:
+        parts.append(tag)
+    if include_id:
+        parts.append(task_id[:8])
+    return '_'.join(parts) + ext
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +343,7 @@ async def sync_codec_settings_from_tests(timeout_s: int = 60) -> None:
         payload: dict[str, bool] = {
             "libx264": True,
             "libx265": True,
+            "libsvtav1": True,
             "libaom_av1": True,
             "h264_nvenc": False,
             "hevc_nvenc": False,
@@ -409,7 +425,8 @@ def _ensure_default_preset_matches_hardware(_sm, visibility: dict[str, bool]) ->
             return
 
         codec_priority = ['av1_nvenc', 'hevc_nvenc', 'h264_nvenc',
-                          'libaom_av1', 'libx265', 'libx264']
+                          'libsvtav1', 'libaom-av1', 'libx265', 'libx264']
+        # Map profile codec names (with hyphens) to visibility keys (with underscores)
         codec_to_vis = {'libaom-av1': 'libaom_av1'}
         for codec in codec_priority:
             vk = codec_to_vis.get(codec, codec)

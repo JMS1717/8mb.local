@@ -198,6 +198,12 @@ export async function getPresetProfiles() {
   return res.json();
 }
 
+export async function getDefaultPresets() {
+  const res = await fetch(`${BACKEND}/api/settings/presets`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export async function setDefaultPreset(name: string) {
   const res = await fetch(`${BACKEND}/api/settings/preset-profiles/default`, {
     method: 'PUT',
@@ -264,6 +270,12 @@ export async function updateRetentionHours(hours: number) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ hours }),
   });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function getDaemonStatus() {
+  const res = await fetch(`${BACKEND}/api/system/daemon-status`);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

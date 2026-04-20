@@ -9,7 +9,7 @@ load_dotenv()
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 
 celery_app = Celery(
-    "8mblocal",
+    "8mb.local",
     broker=REDIS_URL,
     backend=REDIS_URL,
     include=["worker.worker"],  # Ensure task module is imported so tasks register

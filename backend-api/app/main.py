@@ -58,13 +58,14 @@ app.include_router(settings_router.router)
 app.include_router(system.router)
 
 # ---------------------------------------------------------------------------
-# Startup hooks
+# Startup hook (consolidated — previously split across two handlers)
 # ---------------------------------------------------------------------------
 
 @app.on_event("startup")
 async def on_startup():
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    settings_manager.initialize_env_if_missing()
     start_scheduler()
     try:
         boot_id = str(uuid.uuid4())
@@ -76,12 +77,6 @@ async def on_startup():
         asyncio.create_task(sync_codec_settings_from_tests())
     except Exception as e:
         logger.warning(f"Startup initialization failed: {e}")
-
-
-@app.on_event("startup")
-async def startup_event():
-    settings_manager.initialize_env_if_missing()
-    start_scheduler()
     try:
         _ = get_hw_info_cached()
     except Exception:

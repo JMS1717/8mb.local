@@ -1,5 +1,4 @@
 <script lang="ts">
-  import '../../app.css';
   import { onMount, onDestroy } from 'svelte';
   
   interface Job {
@@ -266,48 +265,47 @@
   });
 </script>
 
-<div class="max-w-6xl mx-auto mt-8 space-y-6 p-4">
-  <div class="flex items-center justify-between mb-4">
-    <h1 class="text-2xl font-bold">Compression Queue</h1>
-    <div class="flex gap-4">
+<div class="page-container">
+  <div class="page-header">
+    <h1 class="page-title">Compression Queue</h1>
+    <div class="header-actions">
       {#if queueStatus.active_jobs.length > 0}
         <button 
           on:click={clearQueue}
-          class="px-4 py-2 bg-red-700 hover:bg-red-600 text-white rounded-lg transition-colors text-sm font-semibold"
+          class="btn btn-danger"
         >
           🗑️ Clear Queue
         </button>
       {/if}
-      <a href="/" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors text-sm">
-        ← Back to Compress
-      </a>
-      <a href="/history" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors text-sm">
-        History
-      </a>
+      <a href="/" data-sveltekit-reload class="btn alt">🏠 Home</a>
+      <a href="/advanced" class="btn alt">⚙️ Advanced</a>
+      <a href="/batch" class="btn alt">🗂 Batch</a>
+      <a href="/history" class="btn alt">📜 History</a>
+      <a href="/settings" class="btn alt">⚙️ Settings</a>
     </div>
   </div>
 
   <!-- Queue Summary -->
   <div class="card">
-    <h2 class="font-semibold mb-3">Queue Summary</h2>
-    <div class="grid grid-cols-3 gap-4">
-      <div class="text-center">
-        <div class="text-2xl font-bold text-yellow-400">{queueStatus.queued_count}</div>
-        <div class="text-sm text-gray-400">Queued</div>
+    <h2 class="card-title">Queue Summary</h2>
+    <div class="grid grid-3">
+      <div class="stat-box">
+        <div class="stat-val text-yellow">{queueStatus.queued_count}</div>
+        <div class="stat-label">Queued</div>
       </div>
-      <div class="text-center">
-        <div class="text-2xl font-bold text-blue-400">{queueStatus.running_count}</div>
-        <div class="text-sm text-gray-400">Running</div>
+      <div class="stat-box">
+        <div class="stat-val text-blue">{queueStatus.running_count}</div>
+        <div class="stat-label">Running</div>
       </div>
-      <div class="text-center">
-        <div class="text-2xl font-bold text-green-400">{queueStatus.completed_count}</div>
-        <div class="text-sm text-gray-400">Completed (1h)</div>
+      <div class="stat-box">
+        <div class="stat-val text-green">{queueStatus.completed_count}</div>
+        <div class="stat-label">Completed (1h)</div>
       </div>
     </div>
   </div>
 
   {#if loading}
-    <div class="card text-center">
+    <div class="card empty-state">
       <p class="text-gray-400">Loading queue...</p>
     </div>
   {:else if error}
@@ -316,33 +314,33 @@
       <button class="btn mt-2" on:click={fetchQueueStatus}>Retry</button>
     </div>
   {:else if queueStatus.active_jobs.length === 0}
-    <div class="card text-center">
+    <div class="card empty-state">
       <p class="text-gray-400">No active jobs. <a href="/" class="text-blue-400 underline">Start a compression</a></p>
     </div>
   {:else}
     <!-- Active Jobs List -->
-    <div class="space-y-4">
+    <div class="job-list">
       {#each queueStatus.active_jobs as job (job.task_id)}
-          <div class="card {job.state === 'running' ? 'border-2 border-blue-500 bg-blue-900/10' : ''}">
-          <div class="flex items-start justify-between gap-4">
-            <div class="flex-1 min-w-0">
+          <div class="job-item {job.state === 'running' ? 'running' : ''}">
+          <div>
+            <div>
               <!-- Job header -->
-              <div class="flex items-center gap-2 mb-2">
+              <div class="job-header">
                   {#if job.state === 'running'}
-                    <span class="text-lg animate-pulse">⚡</span>
+                    <span>⚡</span>
                   {/if}
                 <span class="text-lg">{getStateIcon(job.state)}</span>
-                <span class="font-semibold {getStateColor(job.state)} uppercase text-sm">{job.state}</span>
-                <span class="text-xs text-gray-500">•</span>
-                  <span class="text-sm {job.state === 'running' ? 'text-blue-300 font-semibold' : 'text-gray-300'}">{getPhaseDisplay(job)}</span>
-                <span class="text-xs text-gray-500">•</span>
-                <span class="text-sm text-gray-400 truncate">{job.filename}</span>
+                <span class="job-status-badge {job.state}">{job.state}</span>
+                <span class="text-gray">•</span>
+                  <span style="font-weight: 500;">{getPhaseDisplay(job)}</span>
+                <span class="text-gray">•</span>
+                <span class="job-name">{job.filename}</span>
               </div>
               
               <!-- Progress bar for running/queued -->
               {#if job.state === 'running' || job.state === 'queued'}
-                <div class="mb-2">
-                  <div class="flex items-center justify-between text-xs text-gray-400 mb-1">
+                <div class="progress-wrap">
+                  <div class="progress-text">
                     <span>{job.progress.toFixed(1)}%</span>
                     {#if job.state === 'running'}
                       <span class="flex gap-3">
@@ -351,14 +349,14 @@
                       </span>
                     {/if}
                   </div>
-                  <div class="h-2 bg-gray-800 rounded">
-                    <div class="h-2 bg-blue-600 rounded transition-all" style={`width:${job.progress}%`}></div>
+                  <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" style={`width:${job.progress}%`}></div>
                   </div>
                 </div>
               {/if}
 
               <!-- Job details -->
-              <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs text-gray-400">
+              <div class="job-details">
                 <div>Target: {job.target_size_mb} MB</div>
                 <div>Codec: {job.video_codec}</div>
                 <div>Created: {formatTimestamp(job.created_at)}</div>
@@ -375,7 +373,7 @@
 
               <!-- Error message -->
               {#if job.error}
-                <div class="mt-2 p-2 bg-red-900/20 border border-red-600/30 rounded text-sm text-red-300">
+                <div class="error-block">
                   {job.error}
                 </div>
               {/if}
@@ -383,24 +381,24 @@
               <!-- Expandable logs -->
               {#if job.state === 'running'}
                 <button 
-                  class="mt-2 text-xs text-blue-400 underline"
+                  class="logs-toggle"
                   on:click={() => toggleJobExpansion(job.task_id)}
                 >
                   {expandedJobs.has(job.task_id) ? '▼ Hide logs' : '▶ Show live logs'}
                 </button>
                 {#if expandedJobs.has(job.task_id)}
-                  <div class="mt-2 p-2 bg-black/30 rounded max-h-48 overflow-y-auto">
-                    <pre class="text-xs text-gray-300 whitespace-pre-wrap">{(jobLogs.get(job.task_id) || ['Connecting to live stream...']).join('\n')}</pre>
+                  <div class="logs-box">
+                    <div>{(jobLogs.get(job.task_id) || ['Connecting to live stream...']).join('\n')}</div>
                   </div>
                 {/if}
               {/if}
             </div>
 
             <!-- Actions -->
-            <div class="flex flex-col gap-2">
+            <div style="margin-top: 12px;">
               {#if job.state === 'completed' && job.progress >= 100 && job.output_path}
                 <a 
-                  class="btn bg-green-600 hover:bg-green-700 text-white text-sm px-4 py-2"
+                  class="btn"
                   href={`/api/jobs/${job.task_id}/download`}
                   target="_blank"
                 >
@@ -415,9 +413,63 @@
   {/if}
 </div>
 
+
 <style>
-  /* Ensure logs scroll smoothly */
-  pre {
-    font-family: 'Courier New', monospace;
-  }
+  .page-container { max-width: 1200px; margin: 40px auto; padding: 0 20px; }
+  .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+  .page-title { font-size: 28px; font-weight: 600; margin: 0; }
+  .header-actions { display: flex; gap: 12px; justify-content: flex-end; flex-wrap: wrap; }
+  
+  .card { background-color: var(--bg-card); border: 1px solid var(--glass-border); border-radius: var(--border-radius); padding: 20px; margin-bottom: 20px; }
+  .card-title { font-size: 18px; font-weight: 600; margin-bottom: 12px; }
+  
+  .grid { display: grid; gap: 16px; }
+  .grid-3 { grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+  
+  .stat-box { text-align: center; padding: 16px; background: var(--bg-hover); border-radius: 8px; }
+  .stat-val { font-size: 24px; font-weight: 700; }
+  .stat-label { font-size: 13px; color: var(--text-muted); }
+  
+  .job-list { display: flex; flex-direction: column; gap: 16px; }
+  .job-item { background: var(--bg-card); border: 1px solid var(--glass-border); border-radius: var(--border-radius); padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .job-item.running { border-color: rgba(59, 130, 246, 0.5); background: rgba(59, 130, 246, 0.05); }
+  
+  .job-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .job-status-badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
+  .job-status-badge.queued { background: rgba(250, 204, 21, 0.1); color: #facc15; }
+  .job-status-badge.running { background: rgba(96, 165, 250, 0.1); color: #60a5fa; }
+  .job-status-badge.completed { background: rgba(74, 222, 128, 0.1); color: #4ade80; }
+  .job-status-badge.failed { background: rgba(248, 113, 113, 0.1); color: #f87171; }
+  .job-name { font-size: 14px; color: var(--text-secondary); word-break: break-all; }
+  
+  .progress-wrap { margin: 8px 0; }
+  .progress-text { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+  .progress-bar-bg { width: 100%; height: 6px; background: var(--bg-hover); border-radius: 3px; overflow: hidden; }
+  .progress-bar-fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+  
+  .job-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; font-size: 12px; color: var(--text-secondary); margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--glass-border); }
+  
+  .text-yellow { color: #facc15; }
+  .text-blue { color: #60a5fa; }
+  .text-green { color: #4ade80; }
+  .text-red { color: #f87171; }
+  .text-gray { color: var(--text-muted); }
+  
+  .error-block { padding: 8px 12px; background: rgba(239, 68, 68, 0.1); border-left: 3px solid #ef4444; color: #fca5a5; font-size: 13px; margin-top: 8px; border-radius: 0 4px 4px 0; }
+  
+  .logs-toggle { background: transparent; border: none; color: var(--accent); font-size: 12px; cursor: pointer; padding: 0; text-decoration: underline; margin-top: 8px; }
+  .logs-box { margin-top: 8px; padding: 12px; background: #000; border-radius: 6px; max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 11px; color: #a1a1aa; white-space: pre-wrap; word-break: break-all; }
+  
+  .btn-danger { background: #dc2626; color: white; }
+  .btn-danger:hover { background: #b91c1c; }
+  
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; padding: 12px; font-size: 13px; color: var(--text-muted); border-bottom: 1px solid var(--glass-border); }
+  td { padding: 16px 12px; font-size: 14px; border-bottom: 1px solid var(--glass-border); color: var(--text-secondary); }
+  tr:last-child td { border-bottom: none; }
+  
+  .empty-state { text-align: center; padding: 40px; color: var(--text-muted); }
+  .empty-state a { color: var(--accent); text-decoration: underline; }
 </style>
+

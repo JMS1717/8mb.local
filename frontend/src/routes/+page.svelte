@@ -1,1713 +1,530 @@
 <script lang="ts">
-  import '../app.css';
   import { onMount, onDestroy } from 'svelte';
-  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion, getBatchStatus, batchZipDownloadUrl } from '$lib/api';
-  import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
+  import { goto } from '$app/navigation';
+  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, cancelJob, getVersion, getDaemonStatus, getDefaultPresets } from '$lib/api';
 
+  // State
   let file: File | null = null;
-  let uploadInput: HTMLInputElement | null = null; // reference to clear file input
-  let uploadedFileName: string | null = null; // Track what file was uploaded
-  let isAnalyzing: boolean = false; // Track analysis state for UI feedback
-  let targetMB = 25;
-  /** 'size' = target output file size (MB); 'bitrate' = fixed video bitrate (kbps). */
-  let targetMode: 'size' | 'bitrate' = 'size';
-  let targetVideoKbps = 2500;
-  let videoCodec: string = 'av1_nvenc';
-  let audioCodec: 'libopus' | 'aac' | 'none' = 'libopus';
-  let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p6';
-  let audioKbps: 32|48|64|96|128|160|192|256 = 128;
-  // Auto audio bitrate control: downshift audio for extreme compressions
-  let autoAudioBitrate: boolean = true;
-  // User's preferred audio bitrate (used as an upper bound when auto is ON)
-  let baseAudioKbps: 32|48|64|96|128|160|192|256 = 128;
-  let fileSizeLabel: string | null = null;
-  let container: 'mp4' | 'mkv' = 'mp4';
-  let tune: 'hq'|'ll'|'ull'|'lossless' = 'hq';
-  // Decoder preference
-  let preferHwDecode: boolean = true; // Prefer hardware decoding when available
-  // MP4 finalize preference - default OFF for broader compatibility
-  let fastMp4Finalize: boolean = false;
-  // New resolution and trim controls
-  let maxWidth: number | null = null;
-  let maxHeight: number | null = null;
-  // Auto resolution options
-  let autoResolution: boolean = false; // default OFF; will show recommendations instead
-  let minAutoHeight: 240|360|480|720 = 240; // do not go below unless user changes
-  let explicitHeight: 2160|1440|1080|720|480|360|240|null = null; // explicit override
-  let audioOnly: boolean = false; // Audio-only conversion
-  /** '' = no cap; otherwise max output fps when source is faster (persisted). */
-  let maxFpsCap: FpsCap = '';
-  let startTime: string = '';
-  let endTime: string = '';
-  // New UI options
-  let playSoundWhenDone = true; // default ON
-  let autoDownload = true;
-  let warnText: string | null = null;
-  let resolutionSuggestText: string | null = null;
-  let resolutionSuggestHeight: 2160|1440|1080|720|480|360|240|null = null;
+  let previewUrl: string | null = null;
+  let isPlaying = true;
+  let previewVideo: HTMLVideoElement | null = null;
+  let aspectRatio = 56.25; // Default 16:9
+
+  // Settings
+  let targetSize = 10;
+  let customSize = '';
+  let isCustom = false;
   
-  // Helper function to parse time string to seconds
-  function parseTimeToSeconds(timeStr: string): number | null {
-    if (!timeStr || timeStr.trim() === '') return null;
-    const str = timeStr.trim();
-    
-    // Try HH:MM:SS or MM:SS format
-    if (str.includes(':')) {
-      const parts = str.split(':').map(p => parseFloat(p));
-      if (parts.length === 3) {
-        // HH:MM:SS
-        return parts[0] * 3600 + parts[1] * 60 + parts[2];
-      } else if (parts.length === 2) {
-        // MM:SS
-        return parts[0] * 60 + parts[1];
-      }
-    }
-    
-    // Try plain number (seconds)
-    const num = parseFloat(str);
-    return isNaN(num) ? null : num;
-  }
-
-  function parseExplicitHeight(value: string): 2160|1440|1080|720|480|360|240|null {
-    const parsed = Number(value);
-    if (parsed === 2160 || parsed === 1440 || parsed === 1080 || parsed === 720 || parsed === 480 || parsed === 360 || parsed === 240) {
-      return parsed;
-    }
-    return null;
-  }
-
-  // Calculate effective duration based on trim settings
-  $: effectiveDuration = (() => {
-    if (!jobInfo) return 0;
-    
-    const fullDuration = jobInfo.duration_s;
-    const startSec = parseTimeToSeconds(startTime);
-    const endSec = parseTimeToSeconds(endTime);
-    
-    const effectiveStart = startSec !== null ? startSec : 0;
-    const effectiveEnd = endSec !== null ? endSec : fullDuration;
-    
-    // Calculate trimmed duration
-    const trimmedDuration = Math.max(0, effectiveEnd - effectiveStart);
-    
-    return trimmedDuration > 0 ? trimmedDuration : fullDuration;
-  })();
-
-  $: containerNote = (container === 'mp4' && audioCodec === 'libopus' && !audioOnly) ? 'MP4 does not support Opus; audio will be encoded as AAC automatically.' : null;
-  $: estimated = jobInfo ? {
-    duration_s: effectiveDuration,
-    total_kbps: effectiveDuration > 0
-      ? (targetMode === 'bitrate'
-          ? (targetVideoKbps + (audioCodec === 'none' ? 0 : audioKbps))
-          : (targetMB * 8192.0) / effectiveDuration)
-      : 0,
-    video_kbps: targetMode === 'bitrate'
-      ? targetVideoKbps
-      : (effectiveDuration > 0 ? Math.max(((targetMB * 8192.0) / effectiveDuration) - (audioCodec === 'none' ? 0 : audioKbps), 0) : 0),
-    final_mb: targetMode === 'bitrate' && effectiveDuration > 0
-      ? ((targetVideoKbps + (audioCodec === 'none' ? 0 : audioKbps)) * effectiveDuration) / 8192.0
-      : targetMB
-  } : null;
-  // Update warning dynamically based on current estimate (no need to re-upload)
-  $: warnText = estimated && estimated.video_kbps < 100 ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
-  // Resolution recommendation banner when Auto is OFF: suggest a lower height if bitrate density is low
-  $: (() => {
-    resolutionSuggestText = null;
-    resolutionSuggestHeight = null;
-    if (!jobInfo || !estimated) return;
-    if (audioOnly) return;
-    if (autoResolution) return; // Auto handles this
-    const ow = jobInfo.original_width || 0;
-    const oh = jobInfo.original_height || 0;
-    if (!ow || !oh) return;
-    const currentH = explicitHeight || oh;
-    // Compute kbps per megapixel at the current selected height
-    const mpAt = (h:number) => (ow * (h/oh) * h) / 1_000_000.0;
-    const mp = mpAt(currentH);
-    if (mp <= 0) return;
-    const kv = estimated.video_kbps || 0;
-    if (kv <= 0) return;
-    const kbpsPerMpix = kv / mp;
-    // Softer thresholds than backend to avoid aggressive prompts
-    const LADDER: Array<2160|1440|1080|720|480|360|240> = [2160,1440,1080,720,480,360,240];
-    // Only warn if density below 600 kbps/mpix
-    const MIN_OK = 600;
-    const MIN_FALLBACK = 380; // if really starved, accept this floor
-    if (kbpsPerMpix >= MIN_OK) return; // no suggestion
-    // Find first height meeting MIN_OK; else MIN_FALLBACK; else min rung
-    const cappedOrigH = LADDER.find(h => h <= oh) ?? oh;
-    let rec: any = null;
-    for (const h of LADDER) {
-      if (h > oh) continue;
-      const d = kv / mpAt(h);
-      if (d >= MIN_OK) { rec = h; break; }
-    }
-    if (!rec) {
-      for (const h of LADDER) {
-        if (h > oh) continue;
-        const d = kv / mpAt(h);
-        if (d >= MIN_FALLBACK) { rec = h; break; }
-      }
-    }
-    if (!rec) rec = LADDER[LADDER.length-1];
-    // If currently already at or below recommendation, no suggestion
-    if (currentH <= rec) return;
-    // Prefer 1080p when original >= 1440 and 1080p meets MIN_FALLBACK
-    if (oh >= 1440 && kv / mpAt(1080) >= MIN_FALLBACK) {
-      rec = 1080;
-    }
-    resolutionSuggestHeight = rec;
-    const label = rec === 2160 ? '2160p (4K)' : rec === 1440 ? '1440p' : rec === 1080 ? '1080p' : `${rec}p`;
-    resolutionSuggestText = `Recommended: lower resolution to ${label} for better quality at this size.`;
-  })();
+  // Quality Quality
+  type QualityPreset = 'p3' | 'p5' | 'p6' | 'p7';
+  let quality: QualityPreset = 'p5';
+  let perfectQualityOverride = false;
   
-  // Removed auto-reupload on settings changes. Analysis is now separate from upload.
-  // Changing target size or audio bitrate only updates client-side estimates.
+  // Codec (auto-assigned)
+  let autoCodec = '';
 
-  let jobInfo: any = null;
-  let taskId: string | null = null;
-  let progress = 0;
-  let displayedProgress = 0;
-  let logLines: string[] = [];
-  let doneStats: any = null;
-  let isCompressing = false;
-  let esRef: EventSource | null = null;
-  let errorText: string | null = null;
-  let isUploading = false;
-  let uploadProgress = 0;
-  let isCancelling = false;
-  // Download readiness
-  let isReady: boolean = false;
-  let readyFilename: string | null = null;
-  let showTryDownload: boolean = false;
-  let readyTimer: any = null;
-  let tryDownloading: boolean = false; // UI state for Try Download button
-  // ETA / status helpers
-  let startedAt: number | null = null;
-  let etaSeconds: number | null = null;
-  let etaLabel: string | null = null;
-  let currentSpeedX: number | null = null;
-  let hasProgress = false;
-  let decodeMethod: string | null = null;
-  let encodeMethod: string | null = null;
-  let isFinalizing = false; // Track if we're in the finalization phase
-  let isRetrying = false; // Track if we're in automatic retry mode
-  let retryMessage = ''; // Retry details to display
-  let finalizePoller: any = null; // interval id for readiness polling during finalizing
-  // Support widget state
-  let showSupport = false;
-  function toggleSupport(){ showSupport = !showSupport; }
-  function closeSupport(){ showSupport = false; }
-  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeSupport(); };
-  // App version (subtle badge)
+  // App version
   let appVersion: string | null = null;
 
-  // Available codecs from backend
-  let availableCodecs: Array<{value: string, label: string, group: string}> = [];
-  let hardwareType = 'cpu';
-  let sysCaps: any = null;
-  let sysCapsError: string | null = null;
-  // Encoder tests summary
-  let encoderTests: Array<{ 
-    codec: string; 
-    actual_encoder: string; 
-    passed: boolean; 
-    encode_passed: boolean;
-    encode_message?: string;
-    decode_passed?: boolean;
-    decode_message?: string;
-  }>|null = null;
-  let gpuOk: boolean = false;
-  // Presets and size buttons
-  let presetProfiles: Array<any> = [];
-  let selectedPreset: string | null = null;
-  let sizeButtons: number[] = [4,5,8,9.7,50,100];
-  // Recent history
-  let history: any[] = [];
-  let historyEnabled = false;
-  // Batch progress tracker (shared with /batch page)
-  const ACTIVE_BATCH_KEY = 'activeBatchId';
-  let activeBatchId: string | null = null;
-  let activeBatchStatus: any = null;
-  let activeBatchError: string | null = null;
-  let activeBatchPoller: any = null;
+  // Daemon status
+  let daemonStatus: { enabled: boolean; connected: boolean; codecs?: string[] } | null = null;
 
-  // Load default presets and available codecs on mount
+  // Processing state
+  let status: 'idle' | 'analyzing' | 'compressing' | 'done' | 'error' = 'idle';
+  let uploadProgress = 0;
+  let compressProgress = 0;
+  let errorMessage = '';
+  let isDragging = false;
+  let multiDropMessage = '';
+  
+  let jobInfo: any = null;
+  let taskId: string | null = null;
+  let esRef: EventSource | null = null;
+
+  const sizePresets = [8, 10, 25, 50, 100];
+  
+  $: selectedSize = isCustom ? (parseFloat(customSize) || 8) : targetSize;
+  $: canCompress = file && selectedSize > 0 && status === 'idle' && !(isCustom && !customSize.trim());
+  $: finalPreset = perfectQualityOverride ? 'extraquality' : quality;
+
+  function formatBytes(bytes: number): string {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  }
+
   onMount(async () => {
-    // Restore UI preferences
-    try {
-      const ps = localStorage.getItem('playSoundWhenDone');
-      if (ps !== null) playSoundWhenDone = (ps === 'true');
-      const ad = localStorage.getItem('autoDownload');
-      if (ad !== null) autoDownload = (ad === 'true');
-      // If not present in localStorage, default to true and set it
-      if (ad === null) localStorage.setItem('autoDownload', 'true');
-      const aab = localStorage.getItem('autoAudioBitrate');
-      if (aab !== null) autoAudioBitrate = (aab === 'true');
-      if (aab === null) localStorage.setItem('autoAudioBitrate', 'true');
-      const parsedFps = parseStoredFpsCap(localStorage.getItem('maxOutputFpsCap'));
-      if (parsedFps !== null) maxFpsCap = parsedFps;
-    } catch {}
-    try {
-      const res = await fetch('/api/settings/presets');
-      if (res.ok) {
-        const presets = await res.json();
-        targetMB = presets.target_mb;
-        videoCodec = presets.video_codec;
-        audioCodec = presets.audio_codec;
-        preset = presets.preset;
-        audioKbps = presets.audio_kbps;
-        container = presets.container;
-        tune = presets.tune;
-      }
-    } catch (err) {
-      console.warn('Failed to load default presets, using hardcoded defaults');
-    }
-
-    // Load available codecs
-    try {
-      const codecData = await getAvailableCodecs();
-      // Tentatively set hardware based on worker-reported type; we'll refine after sysCaps
-      hardwareType = codecData.hardware_type || 'cpu';
-      availableCodecs = buildCodecList(codecData);
-    } catch (err) {
-      console.warn('Failed to load available codecs, using fallback');
-      availableCodecs = [
-        { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
-        { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
-        { value: 'libaom-av1', label: 'AV1 (CPU)', group: 'cpu' },
-        { value: 'libsvtav1', label: 'AV1 (CPU - SVT-AV1)', group: 'cpu' },
-      ];
-    }
-
-    // Load system capabilities (CPU, memory, GPUs)
-    try {
-      sysCaps = await getSystemCapabilities();
-      // Use the worker-reported hardware type without forcing overrides
-      const hw = sysCaps?.hardware?.type;
-      if (hw) hardwareType = hw;
-    } catch (e:any) {
-      sysCapsError = e?.message || 'Failed to fetch system capabilities';
-    }
-
-    // Load encoder startup tests to report GPU availability
-    try {
-      const tests = await getEncoderTestResults();
-      gpuOk = !!tests?.any_hardware_passed;
-      encoderTests = (tests?.results || []);
-    } catch {}
-
-    // Fetch app version
     try {
       const v = await getVersion();
       appVersion = v?.version || null;
     } catch {}
 
-    // Load preset profiles and size buttons
     try {
-      const pp = await getPresetProfiles();
-      presetProfiles = pp.profiles || [];
-      selectedPreset = pp.default || (presetProfiles[0]?.name ?? null);
-      if (selectedPreset) applyPreset(selectedPreset);
-    } catch {}
-    try {
-      const sb = await getSizeButtons();
-      if (sb?.buttons?.length) sizeButtons = sb.buttons;
-    } catch {}
-
-    // Fetch recent history (best-effort)
-    try {
-      const res = await fetch('/api/history');
-      if (res.ok) {
-        const data = await res.json();
-        historyEnabled = !!data.enabled;
-        history = (data.entries || []).slice(0,5);
+      const codecData = await getAvailableCodecs();
+      let defaultCodecOverride = '';
+      try {
+        const defaults = await getDefaultPresets();
+        if (defaults && defaults.target_mb) targetSize = defaults.target_mb;
+        if (defaults && defaults.preset) quality = defaults.preset;
+        if (defaults && defaults.video_codec) defaultCodecOverride = defaults.video_codec;
+      } catch (e) {
+        console.warn("Failed to load default presets", e);
       }
-    } catch {}
-
-    // Restore the currently tracked batch from the batch page
-    try {
-      const tracked = localStorage.getItem(ACTIVE_BATCH_KEY);
-      if (tracked) {
-        activeBatchId = tracked;
-        await refreshActiveBatchStatus();
+      
+      if (codecData?.enabled_codecs?.length > 0) {
+        if (defaultCodecOverride && codecData.enabled_codecs.includes(defaultCodecOverride)) {
+          autoCodec = defaultCodecOverride;
+        } else {
+          autoCodec = codecData.enabled_codecs[0];
+        }
       }
+    } catch (e) {
+      console.warn("Failed to load codecs");
+      autoCodec = 'libsvtav1';
+    }
+
+    // Check daemon status (best-effort, non-blocking)
+    try {
+      daemonStatus = await getDaemonStatus();
     } catch {}
   });
 
-  function applyPreset(name: string){
-    const p = presetProfiles.find(x => x.name === name);
-    if (!p) return;
-    selectedPreset = name;
-    targetMB = p.target_mb;
-    videoCodec = p.video_codec;
-    audioCodec = p.audio_codec;
-    preset = p.preset;
-    audioKbps = p.audio_kbps;
-    container = p.container;
-    tune = p.tune;
-    maxFpsCap = maxFpsFromProfile(p.max_output_fps);
-  }
+  onDestroy(() => {
+    try { esRef?.close(); } catch {}
+  });
 
-  function formatDurationTime(seconds: number): string {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    
-    if (h > 0) {
-      return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-    } else {
-      return `${m}:${s.toString().padStart(2, '0')}`;
-    }
-  }
-
-  function buildCodecList(codecData: any): Array<{value: string, label: string, group: string}> {
-    const list: Array<{value: string, label: string, group: string}> = [];
-    const enabledCodecs = codecData.enabled_codecs || [];
-    
-    // Build list of all possible codecs with labels
-    const codecDefinitions = [
-      // NVIDIA NVENC
-      { value: 'av1_nvenc', label: 'AV1 (NVIDIA - RTX 40/50 series)', group: 'nvidia' },
-      { value: 'hevc_nvenc', label: 'HEVC (H.265, NVIDIA)', group: 'nvidia' },
-      { value: 'h264_nvenc', label: 'H.264 (NVIDIA)', group: 'nvidia' },
-      // CPU / software
-      { value: 'libaom-av1', label: 'AV1 (CPU - Highest Quality)', group: 'cpu' },
-      { value: 'libsvtav1', label: 'AV1 (CPU - SVT-AV1)', group: 'cpu' },
-      { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
-      { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
-    ];
-    
-    // Filter to only include codecs that are enabled in settings
-    for (const codec of codecDefinitions) {
-      if (enabledCodecs.includes(codec.value)) {
-        list.push(codec);
-      }
-    }
-    
-    return list;
-  }
-
-  // Auto-adjust audio bitrate for extreme compressions:
-  // Ensure at least minVideoKbps is left for video; lower audio down to a floor of 32 kbps if needed.
-  $: (async () => {
-    try {
-      if (!autoAudioBitrate) return;
-      if (audioCodec === 'none') return;
-      const dur = effectiveDuration;
-      if (!dur || dur <= 0) return;
-      const totalKbps = (targetMB * 8192.0) / dur;
-      if (!isFinite(totalKbps) || totalKbps <= 0) return;
-      const minVideoKbps = 100; // keep at least ~100 kbps for video to avoid severe degradation
-      const allowed: Array<32|48|64|96|128|160|192|256> = [256,192,160,128,96,64,48,32];
-      const base = baseAudioKbps;
-      let newAudio: 32|48|64|96|128|160|192|256 = base as any;
-      if ((totalKbps - base) < minVideoKbps) {
-        const maxAudio = Math.max(32, Math.floor(totalKbps - minVideoKbps));
-        // Find the largest allowed bitrate not exceeding maxAudio and the user's base preference
-        let chosen: 32|48|64|96|128|160|192|256 = 32;
-        for (const v of allowed) {
-          if (v <= maxAudio && v <= base) { chosen = v; break; }
-        }
-        newAudio = chosen;
-      }
-      if (newAudio !== audioKbps) {
-        audioKbps = newAudio as any;
-      }
-    } catch {}
-  })();
-
-  // Smooth progress animation - gradually update displayedProgress towards actual progress
-  $: (() => {
-    // Direct update for significant changes or completion
-    if (progress >= 100 || Math.abs(progress - displayedProgress) > 10) {
-      displayedProgress = progress;
-    } else if (progress > displayedProgress) {
-      // Only animate forward, not backward
-      const diff = progress - displayedProgress;
-      if (diff > 0.1) {
-        const step = Math.min(diff / 5, 1);
-        displayedProgress = Math.min(displayedProgress + step, progress);
-      } else {
-        displayedProgress = progress;
-      }
-    }
-  })();
-
-  function getCodecColor(group: string): string {
-    switch(group) {
-      case 'nvidia': return '#22c55e'; // green
-      case 'cpu': return '#6b7280';    // gray
-      default: return '#6b7280';
-    }
-  }
-
-  function getCodecIcon(group: string): string {
-    switch(group) {
-      case 'nvidia': return '🟢';
-      case 'cpu': return '⚪';
-      default: return '⚪';
-    }
-  }
-
-  function formatSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    const kb = bytes / 1024;
-    if (kb < 1024) return `${kb.toFixed(1)} KB`;
-    const mb = kb / 1024;
-    if (mb < 1024) return `${mb.toFixed(2)} MB`;
-    const gb = mb / 1024;
-    return `${gb.toFixed(2)} GB`;
-  }
-
-  function formatBatchState(state?: string): string {
-    if (!state) return 'Unknown';
-    if (state === 'completed_with_errors') return 'Completed with errors';
-    return state.charAt(0).toUpperCase() + state.slice(1);
-  }
-
-  function isBatchTerminal(state?: string): boolean {
-    return state === 'completed' || state === 'completed_with_errors' || state === 'failed';
-  }
-
-  function stopActiveBatchPolling() {
-    if (activeBatchPoller) {
-      clearInterval(activeBatchPoller);
-      activeBatchPoller = null;
-    }
-  }
-
-  function clearActiveBatchTracker() {
-    activeBatchId = null;
-    activeBatchStatus = null;
-    activeBatchError = null;
-    stopActiveBatchPolling();
-    try { localStorage.removeItem(ACTIVE_BATCH_KEY); } catch {}
-  }
-
-  async function refreshActiveBatchStatus(silent = false) {
-    if (!activeBatchId) return;
-    try {
-      const status = await getBatchStatus(activeBatchId);
-      activeBatchStatus = status;
-      activeBatchError = null;
-      if (isBatchTerminal(status?.state)) {
-        stopActiveBatchPolling();
-      } else if (!activeBatchPoller) {
-        activeBatchPoller = setInterval(() => {
-          refreshActiveBatchStatus(true).catch(() => {});
-        }, 3000);
-      }
-    } catch (e: any) {
-      const msg = e?.message || 'Failed to load active batch status';
-      if (!silent) activeBatchError = msg;
-      const low = String(msg).toLowerCase();
-      if (low.includes('404') || low.includes('batch not found')) {
-        clearActiveBatchTracker();
-      }
-    }
-  }
-
-  function formatEta(sec: number): string {
-    if (!isFinite(sec) || sec < 0) return '';
-    const s = Math.round(sec);
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const r = s % 60;
-    if (h > 0) return `${h}h ${m}m`;
-    if (m > 0) return `${m}m ${r}s`;
-    return `${r}s`;
-  }
-
-  function setPresetMB(mb:number){ targetMB = mb; }
-  // "10MB (Discord)" option: pick slightly under to ensure final stays below 10MB
-  function setPresetMBSafe10(){ targetMB = 9.7; }
-
-  async function onDrop(e: DragEvent){
+  // Drag & drop handlers
+  function handleDragOver(e: DragEvent) {
     e.preventDefault();
-    if (!e.dataTransfer) return;
-    const f = e.dataTransfer.files?.[0];
-    if (f) {
-      file = f;
-      fileSizeLabel = formatSize(f.size);
-      // Auto-analyze on drop
-      setTimeout(() => doUpload(), 100);
-    }
+    if (status !== 'idle' && status !== 'error' && status !== 'done') return;
+    isDragging = true;
   }
-  function allowDrop(e: DragEvent){ e.preventDefault(); }
-
-  async function doUpload(){
-    if (!file) return;
-    if (isUploading || isAnalyzing) return;
-    // Skip re-upload when same file is already uploaded; recompute client-side estimates only
-    if (uploadedFileName === file.name && jobInfo?.filename) {
-      warnText = (estimated && estimated.video_kbps < 100) ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
+  function handleDragLeave() { isDragging = false; }
+  function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    isDragging = false;
+    multiDropMessage = '';
+    const files = e.dataTransfer?.files;
+    if (!files?.length) return;
+    if (files.length > 5) {
+      multiDropMessage = 'Maximum 5 files. Please try again with fewer files.';
       return;
     }
-    isAnalyzing = true;
-    isUploading = true;
-    uploadProgress = 0;
-    errorText = null;
+    if (files.length > 1) {
+      // Multi-file: redirect to batch
+      redirectToBatch(Array.from(files));
+      return;
+    }
+    setFile(files[0]);
+  }
+  function handleFileSelect(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (!input.files?.length) return;
+    multiDropMessage = '';
+    if (input.files.length > 5) {
+      multiDropMessage = 'Maximum 5 files. Please try again with fewer files.';
+      input.value = '';
+      return;
+    }
+    if (input.files.length > 1) {
+      redirectToBatch(Array.from(input.files));
+      input.value = '';
+      return;
+    }
+    setFile(input.files[0]);
+    input.value = '';
+  }
+  function redirectToBatch(files: File[]) {
+    // Store file names for the batch page to show a notice
     try {
-      console.log('Analyzing file...', file.name);
-      jobInfo = await uploadWithProgress(file, targetMB, audioKbps, { onProgress: (p:number)=>{ uploadProgress = p; } });
-      console.log('Analysis complete:', jobInfo);
-      uploadedFileName = file.name; // Mark this file as uploaded
-      // Set warn based on current client-side estimate
-      warnText = (estimated && estimated.video_kbps < 100) ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
-    } catch (err: any) {
-      console.error('Analysis failed:', err);
-      errorText = `Analysis failed: ${err.message || err}`;
-    } finally {
-      isUploading = false;
-      isAnalyzing = false;
+      const names = files.map(f => f.name);
+      sessionStorage.setItem('batchFromHome', JSON.stringify(names));
+      // We can't transfer File objects via storage, so store in a global
+      (window as any).__batchFilesFromHome = files;
+    } catch {}
+    goto('/batch');
+  }
+  function setFile(f: File) {
+    clearFileCore(); // keep settings, clear state
+    file = f;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = URL.createObjectURL(f);
+    isPlaying = true;
+    aspectRatio = 56.25;
+  }
+  function togglePreview(e: Event) {
+    e.stopPropagation();
+    if (previewVideo) {
+      if (previewVideo.paused) { previewVideo.play(); isPlaying = true; }
+      else { previewVideo.pause(); isPlaying = false; }
     }
   }
+  function clearFileCore() {
+    status = 'idle';
+    uploadProgress = 0;
+    compressProgress = 0;
+    errorMessage = '';
+    jobInfo = null;
+    if (taskId) { cancelJob(taskId).catch(()=>{}); taskId = null; }
+    try { esRef?.close(); esRef = null; } catch {}
+  }
+  function clearFile() {
+    clearFileCore();
+    file = null;
+    if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
+  }
 
-  async function doCompress(){
-    // Ensure we have analysis; if not, perform upload/analyze once
-    if (!jobInfo) {
-      if (!file) { errorText = 'Please select a file and analyze first.'; return; }
-      await doUpload();
-      if (!jobInfo) return; // if upload failed
-    }
-    if (isCompressing) return; // prevent double submission
-    errorText = null;
+  // Action flow
+  async function doCompress() {
+    if (!canCompress) return;
     try {
-      isCompressing = true;
-      isReady = false;
-      readyFilename = null;
-      hasProgress = false;
-      isFinalizing = false;
-      startedAt = Date.now();
-      etaSeconds = null;
-      etaLabel = null;
-      currentSpeedX = null;
-      logLines = ['Starting compression…', ...logLines].slice(0, 500);
-      const estMb =
-        targetMode === 'bitrate' && effectiveDuration > 0
-          ? ((targetVideoKbps + (audioCodec === 'none' ? 0 : audioKbps)) * effectiveDuration) / 8192.0
-          : targetMB;
+      // 1. Analyze / Upload
+      status = 'analyzing';
+      uploadProgress = 0;
+      errorMessage = '';
+      
+      jobInfo = await uploadWithProgress(file as File, selectedSize, 128, {
+        onProgress: (p) => { uploadProgress = p; }
+      });
+
+      if (!jobInfo || !jobInfo.job_id) {
+        throw new Error("Upload failed to return job ID");
+      }
+
+      // 2. Compress
+      status = 'compressing';
+      compressProgress = 0;
+      
       const payload = {
         job_id: jobInfo.job_id,
         filename: jobInfo.filename,
-        target_size_mb: estMb,
-        target_video_bitrate_kbps: targetMode === 'bitrate' ? targetVideoKbps : undefined,
-        video_codec: videoCodec,
-        audio_codec: audioCodec,
-        audio_bitrate_kbps: audioKbps,
-        preset,
-        container,
-        tune,
-        force_hw_decode: preferHwDecode,
-  fast_mp4_finalize: fastMp4Finalize,
-        // Optional resolution and trim parameters
-        max_width: (autoResolution || explicitHeight) ? undefined : (maxWidth || undefined),
-        max_height: (autoResolution && !explicitHeight) ? undefined : (explicitHeight || maxHeight || undefined),
-        auto_resolution: autoResolution,
-        min_auto_resolution: minAutoHeight,
-        target_resolution: explicitHeight || undefined,
-        audio_only: audioOnly,
-        max_output_fps: maxFpsCap === '' ? undefined : Number(maxFpsCap),
-        start_time: startTime.trim() || undefined,
-        end_time: endTime.trim() || undefined,
+        target_size_mb: selectedSize,
+        video_codec: autoCodec || 'libsvtav1',
+        audio_codec: 'libopus',
+        audio_bitrate_kbps: 128,
+        preset: finalPreset,
+        container: 'mp4',
+        tune: 'hq',
+        fast_mp4_finalize: true,
+        force_hw_decode: true
       };
-      console.log('Starting compression...', payload);
+
       const { task_id } = await startCompress(payload);
       taskId = task_id;
       
-      console.log('🔴 [DEBUG] About to open SSE for task_id:', task_id);
-      
-      // Open SSE progress stream
-      logLines = ['✓ Job started. Opening progress stream...', ...logLines].slice(0, 500);
-      
-      const es = openProgressStream(task_id);
-      console.log('🔴 [DEBUG] openProgressStream returned:', es);
-      esRef = es;
-      
-      es.onopen = () => {
-        console.log('SSE connection opened for task:', task_id);
-        logLines = ['✅ Connected to progress stream', ...logLines].slice(0, 500);
-      };
-      
-      es.onmessage = (ev) => {
+      // 3. Track progress
+      esRef = openProgressStream(task_id);
+      esRef.onmessage = (ev) => {
         try {
           const data = JSON.parse(ev.data);
-          console.log('SSE event:', data.type, data);
-          
-          // Handle connection confirmation
-          if (data.type === 'connected') {
-            console.log('SSE connection confirmed, task_id:', data.task_id);
-            return; // Just log, don't show to user
-          }
-          
-          // Handle pings
-          if (data.type === 'ping') {
-            return; // Silent heartbeat
-          }
-          
-          // Handle progress updates
           if (data.type === 'progress') {
-            progress = data.progress;
-            
-            // ETA from server if present; otherwise hide (no client-side guess)
-            if (typeof data.eta_seconds === 'number' && isFinite(data.eta_seconds) && data.eta_seconds > 0) {
-              etaSeconds = data.eta_seconds;
-              const s = Math.round(etaSeconds);
-              const h = Math.floor(s / 3600);
-              const m = Math.floor((s % 3600) / 60);
-              const r = s % 60;
-              etaLabel = h > 0 ? `${h}h ${m}m` : (m > 0 ? `${m}m ${r}s` : `${r}s`);
-            } else {
-              etaSeconds = null;
-              etaLabel = null;
-            }
-
-            // Update current speed if provided
-            if (typeof data.speed_x === 'number' && isFinite(data.speed_x) && data.speed_x > 0) {
-              currentSpeedX = data.speed_x;
-            }
-
-            // If we hit 100%, mark as complete
+            compressProgress = data.progress;
             if (data.progress >= 100 || data.phase === 'done') {
-              progress = 100;
-              displayedProgress = 100;
-              isCompressing = false;
-              isFinalizing = false;
-              logLines = ['✅ 100% - Waiting for final confirmation...', ...logLines].slice(0, 500);
+              finishJob();
             }
-            
-            // Mark that we've received at least one progress update
-            else if (!hasProgress && data.progress > 0) {
-              hasProgress = true;
-            }
-            
-            // Detect finalization phase (95-100%)
-            if (data.phase === 'finalizing' || (data.progress >= 95 && data.progress < 100)) {
-              isFinalizing = true;
-            } else if (data.phase === 'encoding') {
-              isFinalizing = false;
-            }
+          } else if (data.type === 'done') {
+            finishJob();
+          } else if (data.type === 'error') {
+            throw new Error(data.message || 'Compression failed');
+          } else if (data.type === 'retry') {
+            errorMessage = `Retrying: ${data.overage_percent?.toFixed(1)}% over target`;
           }
-          
-          // Handle log messages
-          if (data.type === 'log' && data.message) {
-            logLines = [data.message, ...logLines].slice(0, 500);
-            
-            // Extract encoding speed
-            const speedMatch = data.message.match(/speed=([\d.]+)x/);
-            if (speedMatch) {
-              currentSpeedX = parseFloat(speedMatch[1]);
-            }
-            
-            // Detect hardware methods
-            // Decoder detection: handle variations like "Decoder: using cuda" or "Decoder: forcing av1_cuvid"
-            {
-              const msg = data.message as string;
-              const lower = msg.toLowerCase();
-              if (lower.startsWith('decoder:')) {
-                // Try to capture token after 'using' or 'forcing'
-                const m1 = msg.match(/Decoder:\s*(?:using|forcing)\s*([\w_]+)/i);
-                if (m1) {
-                  decodeMethod = m1[1];
-                } else {
-                  // Fallback: capture first word after 'Decoder:'
-                  const m2 = msg.match(/Decoder:\s*([\w_]+)/i);
-                  if (m2) decodeMethod = m2[1];
-                }
-              }
-            }
-            // Encoder detection: handle "Using encoder: h264_nvenc" and "Encoder: CPU (libx264)"
-            {
-              const msg = data.message as string;
-              const mUse = msg.match(/Using\s+encoder:\s*([\w_-]+)/i);
-              if (mUse) {
-                encodeMethod = mUse[1];
-              }
-              const mEnc = msg.match(/Encoder:\s*([\w_-]+)/i);
-              if (mEnc) {
-                // May be "CPU (libx264)"; extract inner encoder if present
-                const val = mEnc[1];
-                const inner = msg.match(/Encoder:\s*CPU\s*\(([^)]+)\)/i);
-                encodeMethod = inner ? inner[1] : val;
-              }
-            }
-          }
-          
-          // Do not handle early 'ready' events; download is enabled only after 'done'
-          
-          // Handle completion
-          if (data.type === 'done') {
-            console.log('Received done event, completing job');
-            doneStats = data.stats;
-            progress = 100;
-            displayedProgress = 100;
-            isCompressing = false;
-            isFinalizing = false;
-            isRetrying = false;
-            retryMessage = '';
-            isReady = true;
-            hasProgress = false;
-            
-            logLines = ['✅ Compression complete!', ...logLines].slice(0, 500);
-            
-            try { esRef?.close(); esRef = null; } catch {}
-            
-            // Play sound if enabled (gentle success chime)
-            if (playSoundWhenDone) {
-              // Pleasant ascending chime (C-E-G major chord)
-              const audio = new Audio('data:audio/wav;base64,UklGRiQFAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAFAAB/goSGiIqMjo+RkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ6foKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr/AwcLDxMXGx8jJysvMzc7P0NHS09TV1tfY2drb3N3e3+Dh4uPk5ebn6Onq6+zt7u/w8fLz9PX29/j5+vv8/f7/gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v8=');
-              audio.volume = 0.4;
-              audio.play().catch(() => {});
-            }
-            
-            // Auto-download if enabled
-            if (autoDownload && taskId) {
-              setTimeout(() => {
-                window.location.href = downloadUrl(taskId!);
-              }, 500);
-            }
-          }
-          
-          // Handle errors
-          if (data.type === 'error') {
-            logLines = [`❌ Error: ${data.message}`, ...logLines];
-            errorText = data.message;
-            isCompressing = false;
-            isFinalizing = false;
-            try { esRef?.close(); } catch {}
-          }
-          
-          // Handle retry
-          if (data.type === 'retry') {
-            isRetrying = true;
-            retryMessage = `File was ${data.overage_percent?.toFixed(1)}% over target - Re-encoding with optimized bitrate`;
-            
-            logLines = [`🔄 RETRY: ${data.message}`, ...logLines].slice(0, 500);
-            
-            // Show prominent notification banner
-            const retryMsg = `⚠️ File too large (${data.overage_percent?.toFixed(1)}% over target) - Re-encoding with adjusted bitrate...`;
-            logLines = [
-              '═══════════════════════════════════════════════════',
-              `🔄 AUTOMATIC RETRY IN PROGRESS`,
-              retryMsg,
-              'This is normal - the system will automatically optimize the output.',
-              '═══════════════════════════════════════════════════',
-              ...logLines
-            ].slice(0, 500);
-            
-            // Play distinct "retry" sound (warning tone - lower pitched)
-            try {
-              // Lower warning tone (F note) - distinct from success chime
-              const audio = new Audio('data:audio/wav;base64,UklGRiQDAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQADAAB/fn18e3p5eHd2dXRzcnFwb25tbGtqaWhnZmVkY2JhYF9eXVxbWllYV1ZVVFNSUVBPTk1MS0pJSEdGRURDQkFAPz49PDo6OTg3NjU0MzIxMC8uLSwrKikoJyYlJCMiISAfHh0cGxoZGBcWFRQTEhEQDw4NDAsKCQgHBgUEAwIBAACAgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ6foKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr/AwcLDxMXGx8jJysvMzc7P0NHS09TV1tfY2drb3N3e3+Dh4uPk5ebn6Onq6+zt7u/w8fLz9PX29/j5+vv8/f7/gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v8=');
-              audio.volume = 0.3;
-              audio.play().catch(() => {});
-              // Play second tone after brief pause
-              setTimeout(() => {
-                const audio2 = new Audio('data:audio/wav;base64,UklGRiQDAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQADAAB/fn18e3p5eHd2dXRzcnFwb25tbGtqaWhnZmVkY2JhYF9eXVxbWllYV1ZVVFNSUVBPTk1MS0pJSEdGRURDQkFAPz49PDo6OTg3NjU0MzIxMC8uLSwrKikoJyYlJCMiISAfHh0cGxoZGBcWFRQTEhEQDw4NDAsKCQgHBgUEAwIBAACAgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ6foKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr/AwcLDxMXGx8jJysvMzc7P0NHS09TV1tfY2drb3N3e3+Dh4uPk5ebn6Onq6+zt7u/w8fLz9PX29/j5+vv8/f7/gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v8=');
-                audio2.volume = 0.3;
-                audio2.play().catch(() => {});
-              }, 250);
-            } catch {}
-            
-            // Reset progress for retry
-            displayedProgress = 1;
-            progress = 1;
-          }
-          
-          // Handle cancellation
-          if (data.type === 'canceled') {
-            logLines = ['🚫 Job canceled', ...logLines];
-            isCompressing = false;
-            isFinalizing = false;
-            try { esRef?.close(); } catch {}
-          }
-          
-        } catch (e) {
-          console.error('Failed to parse SSE message:', e);
+        } catch (err: any) {
+          if (err.message) throw err;
         }
       };
       
-      es.onerror = (err) => {
-        console.error('SSE error:', err);
-        console.log('SSE readyState:', es.readyState, 'taskId:', taskId);
-        
-        // Don't immediately fail - the job might still be running
-        // Only show warning, don't stop isCompressing
-        logLines = ['⚠️ Progress stream connection issue. Checking queue for updates...', ...logLines].slice(0, 500);
-        
-        // Close this connection attempt
-        try { esRef?.close(); esRef = null; } catch {}
-        
-        // Suggest checking queue page
-        if (!doneStats && taskId) {
-          logLines = [
-            `💡 View live progress at: <a href="/queue" class="text-blue-400 underline">/queue</a>`,
-            `Task ID: ${taskId}`,
-            ...logLines
-          ].slice(0, 500);
-        }
+      esRef.onerror = () => {
+        if (status === 'compressing') throw new Error('Lost connection to progress stream');
       };
-      
+
     } catch (err: any) {
-      console.error('Compress failed:', err);
-      errorText = `Compression failed: ${err.message || err}`;
-      isCompressing = false;
-    }
-  }
-
-  // Try Download handler: attempt download immediately via server's wait parameter
-  async function tryDownloadNow(){
-    if (!taskId) return;
-    tryDownloading = true;
-    const url = downloadUrl(taskId);
-    // Just open the URL with ?wait=2 to give the backend time to finalize
-    // If it's not ready, the backend will return a 404 with detail JSON, but at least
-    // the finalization watchdog will keep polling and eventually succeed
-    try {
-      // Use window.location with wait parameter; if it fails, browser shows download or error
-      window.location.href = `${url}?wait=2`;
-    } finally {
-      // Reset state after a moment (the page may navigate away if download succeeds)
-      setTimeout(() => { tryDownloading = false; }, 1000);
-    }
-  }
-
-  // Finalization watchdog: start/stop a short poller if we hit 100% but 'ready' hasn't arrived
-  $: (async () => {
-    // CRITICAL: Only trigger watchdog at EXACTLY 100%, not at high progress like 98%
-    // This prevents "zombie stream" bug where client resets while server still encoding
-    const shouldPoll = !!taskId && displayedProgress >= 99.9 && !isReady && !doneStats && isCompressing;
-    console.log('[Watchdog] Reactive check - shouldPoll:', shouldPoll, 'displayedProgress:', displayedProgress, 'isReady:', isReady, 'isCompressing:', isCompressing);
-    if (shouldPoll && !finalizePoller) {
-      console.log('[Watchdog] Starting finalization poll for', taskId);
-      finalizePoller = setInterval(async () => {
-        if (!taskId) return;
-        try {
-          console.log('[Watchdog] Polling download endpoint...');
-          // Try GET request with short wait instead of HEAD (more reliable)
-          const dlRes = await fetch(`${downloadUrl(taskId)}?wait=2`, { 
-            method: 'GET',
-            cache: 'no-store',
-            redirect: 'manual' // Don't follow redirects, just check response
-          });
-          console.log('[Watchdog] Response status:', dlRes.status, 'ok:', dlRes.ok);
-          
-          if (dlRes.ok && dlRes.status === 200) {
-            console.log('[Watchdog] File ready! Auto-downloading...');
-            isReady = true;
-            isFinalizing = false;
-            showTryDownload = false;
-            isCompressing = false;
-            clearInterval(finalizePoller);
-            finalizePoller = null;
-            // Trigger download by navigating to URL
-            window.location.href = downloadUrl(taskId!);
-          } else if (dlRes.status === 404) {
-            const body = await dlRes.json().catch(() => ({}));
-            console.log('[Watchdog] File not ready yet (404):', body.detail?.state || 'unknown state');
-          } else {
-            console.log('[Watchdog] Unexpected status, will retry...');
-          }
-        } catch (e) {
-          console.log('[Watchdog] Poll error:', e);
-        }
-      }, 1000);
-    } else if (!shouldPoll && finalizePoller) {
-      console.log('[Watchdog] Stopping finalization poll (shouldPoll=false)');
-      clearInterval(finalizePoller);
-      finalizePoller = null;
-    }
-  })();
-
-  function reconnectStream(){
-    if (!taskId) return;
-    errorText = null;
-    try { esRef?.close(); } catch {}
-    const es = openProgressStream(taskId);
-    esRef = es;
-    isCompressing = true;
-    es.onmessage = (ev) => {
-      try { const data = JSON.parse(ev.data);
-        if (data.type === 'progress') { progress = data.progress; }
-        if (data.type === 'log' && data.message) { logLines = [data.message, ...logLines].slice(0, 500); }
-        if (data.type === 'done') { 
-          doneStats = data.stats; 
-          progress = 100;
-          isCompressing = false;
-          try { esRef?.close(); } catch {}
-          // Play sound when done if enabled (gentle success chime)
-          if (playSoundWhenDone) {
-            // Pleasant ascending chime (C-E-G major chord)
-            const audio = new Audio('data:audio/wav;base64,UklGRiQFAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAFAAB/goSGiIqMjo+RkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ6foKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr/AwcLDxMXGx8jJysvMzc7P0NHS09TV1tfY2drb3N3e3+Dh4uPk5ebn6Onq6+zt7u/w8fLz9PX29/j5+vv8/f7/gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v8=');
-            audio.volume = 0.4;
-            audio.play().catch(() => {});
-          }
-          // Auto-download if enabled
-          if (autoDownload && taskId) {
-            setTimeout(() => {
-              window.location.href = downloadUrl(taskId!);
-            }, 500);
-          }
-        }
-        if (data.type === 'error') { logLines = [data.message, ...logLines]; isCompressing = false; try { esRef?.close(); } catch {} }
-      } catch {}
-    }
-    es.onerror = () => {
-      logLines = ['[SSE] Connection error: lost progress stream.', ...logLines].slice(0, 500);
-      errorText = 'Lost connection to progress stream. Check server/network and try again.';
-      isCompressing = false;
+      status = 'error';
+      errorMessage = err.message || 'Something went wrong';
       try { esRef?.close(); } catch {}
     }
   }
 
-  // Remove older reset; replace with one that clears readiness flags too
-  
-  function reset(){
-    // Clear all job-related state but keep the selected file loaded so it can be reused
-    uploadedFileName = null;
-    jobInfo = null;
-    taskId = null;
-    progress = 0;
-    displayedProgress = 0;
-    logLines = [];
-    doneStats = null;
-    warnText = null;
-    errorText = null;
-    isUploading = false;
-    isCompressing = false;
-    isFinalizing = false;
-    decodeMethod = null;
-    encodeMethod = null;
-    isReady = false;
-    readyFilename = null;
-    showTryDownload = false;
-    if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
-    if (finalizePoller) { clearInterval(finalizePoller); finalizePoller = null; }
-    try { esRef?.close(); } catch {}
-    // Note: we intentionally do NOT clear `file` or `fileSizeLabel` here
-  }
-
-  function clearSelectedFile(){
-    // Clear the chosen file and related analysis state
-    file = null;
-    fileSizeLabel = null;
-    uploadedFileName = null;
-    jobInfo = null;
-    warnText = null;
-    errorText = null;
-    // Reset the input element so the same file can be selected again
-    try { if (uploadInput) uploadInput.value = ''; } catch {}
-  }
-  $: (() => { /* clear ETA when not compressing */ if (!isCompressing) { startedAt = null; etaSeconds = null; etaLabel = null; currentSpeedX = null; hasProgress = false; isFinalizing = false; } })();
-
-  async function onCancel(){
-    if (!taskId || isCancelling) return;
-    isCancelling = true;
-    try {
-      await cancelJob(taskId);
-      logLines = ['Cancellation requested…', ...logLines].slice(0, 500);
-    } catch (e:any) {
-      errorText = e?.message || 'Failed to cancel';
-    } finally {
-      isCancelling = false;
+  function finishJob() {
+    status = 'done';
+    compressProgress = 100;
+    try { esRef?.close(); esRef = null; } catch {}
+    
+    // Play pleasant chime
+    const audio = new Audio('data:audio/wav;base64,UklGRiQFAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAFAAB/goSGiIqMjo+RkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ6foKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr/AwcLDxMXGx8jJysvMzc7P0NHS09TV1tfY2drb3N3e3+Dh4uPk5ebn6Onq6+zt7u/w8fLz9PX29/j5+vv8/f7/gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v8=');
+    audio.volume = 0.4;
+    audio.play().catch(() => {});
+    
+    // Auto download
+    if (taskId) {
+      setTimeout(() => {
+        window.location.href = downloadUrl(taskId!);
+      }, 500);
     }
   }
 
-  onDestroy(() => {
-    stopActiveBatchPolling();
-  });
-
-  // Persist UI preferences
-  $: (() => { try { localStorage.setItem('playSoundWhenDone', String(playSoundWhenDone)); } catch {} })();
-  $: (() => { try { localStorage.setItem('autoDownload', String(autoDownload)); } catch {} })();
-  $: (() => { try { localStorage.setItem('autoAudioBitrate', String(autoAudioBitrate)); } catch {} })();
-  $: (() => { try { localStorage.setItem('maxOutputFpsCap', maxFpsCap); } catch {} })();
 </script>
 
-<div class="max-w-3xl mx-auto mt-8 space-y-6">
-  <div class="flex items-center justify-between mb-4">
-    <h1 class="text-2xl font-bold">8mb.local {#if appVersion}<span class="align-middle text-xs ml-2 px-2 py-0.5 rounded border border-gray-700 text-gray-400">v{appVersion}</span>{/if}</h1>
-    <div class="flex gap-2">
-      <a href="/batch" class="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg transition-colors text-sm">
-        🗂 Batch
-      </a>
-      <a href="/queue" class="px-4 py-2 bg-blue-700 hover:bg-blue-600 text-white rounded-lg transition-colors text-sm">
-        📋 Queue
-      </a>
-      <a href="/settings" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors text-sm">
-        ⚙️ Settings
-      </a>
-    </div>
-  </div>
+<div class="container">
+  <!-- Header -->
+  <header class="header">
+    <h1 class="logo">8mb<span class="accent">.local</span></h1>
+    <p class="tagline">Compress videos to any size.</p>
+  </header>
 
-  {#if activeBatchId}
-    <div class="card border border-emerald-700/40">
-      <div class="flex items-center justify-between gap-2 flex-wrap">
-        <div>
-          <h3 class="font-semibold">Batch Tracker</h3>
-          <p class="text-xs text-gray-400">Batch ID: {activeBatchId}</p>
-        </div>
-        <div class="flex gap-2">
-          <a href="/batch" class="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded text-sm">Open</a>
-          {#if activeBatchStatus?.completed_count > 0}
-            <a href={batchZipDownloadUrl(activeBatchId)} class="px-3 py-1.5 bg-blue-700 hover:bg-blue-600 text-white rounded text-sm">ZIP</a>
-          {/if}
-          <button class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm" on:click={() => refreshActiveBatchStatus(false)}>Refresh</button>
-          <button class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded text-sm" on:click={clearActiveBatchTracker}>Clear</button>
-        </div>
-      </div>
+  <input id="file-input" type="file" accept="video/*,image/gif" multiple class="file-input-hidden" on:change={handleFileSelect} />
 
-      {#if activeBatchStatus}
-        <div class="mt-3">
-          <div class="flex items-center justify-between text-sm mb-1">
-            <span>{formatBatchState(activeBatchStatus.state)}</span>
-            <span>{Number(activeBatchStatus.overall_progress || 0).toFixed(1)}%</span>
-          </div>
-          <div class="h-2 bg-gray-800 rounded overflow-hidden">
-            <div class="h-2 bg-emerald-500" style={`width:${Math.max(0, Math.min(100, Number(activeBatchStatus.overall_progress || 0)))}%`}></div>
-          </div>
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs mt-2">
-            <div class="bg-gray-950 border border-gray-800 rounded px-2 py-1">Queued: {activeBatchStatus.queued_count}</div>
-            <div class="bg-gray-950 border border-gray-800 rounded px-2 py-1">Running: {activeBatchStatus.running_count}</div>
-            <div class="bg-gray-950 border border-gray-800 rounded px-2 py-1">Done: {activeBatchStatus.completed_count}</div>
-            <div class="bg-gray-950 border border-gray-800 rounded px-2 py-1">Failed: {activeBatchStatus.failed_count}</div>
-          </div>
-        </div>
-      {:else if activeBatchError}
-        <p class="text-sm text-amber-300 mt-2">{activeBatchError}</p>
-      {:else}
-        <p class="text-sm opacity-70 mt-2">Loading active batch status…</p>
-      {/if}
-    </div>
-  {/if}
-
-  <!-- System capabilities -->
-  <div class="card">
-    <div class="grid sm:grid-cols-2 gap-4">
-      <div>
-        <h3 class="font-semibold mb-2">System</h3>
-        {#if sysCaps}
-          <p class="text-sm">CPU: {sysCaps.cpu?.model || 'Unknown'} ({sysCaps.cpu?.cores_physical}C/{sysCaps.cpu?.cores_logical}T)</p>
-          <p class="text-sm">Memory: {sysCaps.memory?.available_gb} GB free / {sysCaps.memory?.total_gb} GB</p>
-          <p class="text-sm">Hardware: <span class="inline-flex items-center gap-1"><span class="inline-block w-2 h-2 rounded-full" style={`background-color:${getCodecColor(hardwareType)}`}></span>{hardwareType.toUpperCase()}</span></p>
-          <p class="text-sm mt-1">
-            {#if hardwareType !== 'cpu'}
-              {#if gpuOk}
-                <span class="inline-flex items-center gap-2 text-green-300">
-                  <span class="w-2 h-2 bg-green-500 rounded-full"></span>
-                  GPU encoding available
-                </span>
+  <!-- Drop Zone -->
+  <label for="file-input" class="drop-zone card" class:dragging={isDragging} class:has-file={!!file} class:processing={status === 'analyzing' || status === 'compressing'} on:dragover={handleDragOver} on:dragleave={handleDragLeave} on:drop={handleDrop}>
+    {#if file}
+      <div class="file-preview-card fade-in" style="aspect-ratio: 100 / {Math.min(aspectRatio, 75)};" on:click|preventDefault|stopPropagation={() => { if (['idle','done','error'].includes(status)) document.getElementById('file-input')?.click(); }} role="button" tabindex="0">
+        {#if previewUrl}
+          <video bind:this={previewVideo} src={previewUrl} muted playsinline loop autoplay class="bg-video"
+            on:loadedmetadata={(e) => { const v=e.target; if(v.videoWidth) aspectRatio = (v.videoHeight/v.videoWidth)*100; }}></video>
+          <div class="video-overlay"></div>
+        {/if}
+        <div class="preview-content">
+          <button type="button" class="file-icon" class:clickable={!!previewUrl} on:click|preventDefault|stopPropagation={togglePreview} disabled={!previewUrl}>
+            {#if previewUrl}
+              {#if isPlaying}
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/></svg>
               {:else}
-                <span class="inline-flex items-center gap-2 text-amber-300" title="Hardware encoder tests did not pass; encoding may fall back to CPU.">
-                  <span class="w-2 h-2 bg-amber-500 rounded-full"></span>
-                  GPU encoding unavailable — falling back to CPU
-                </span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
               {/if}
             {:else}
-              <span class="text-gray-400">CPU-only environment</span>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
             {/if}
-          </p>
-        {:else if sysCapsError}
-          <p class="text-sm text-amber-400">{sysCapsError}</p>
-        {:else}
-          <p class="text-sm opacity-70">Detecting system capabilities…</p>
-        {/if}
-      </div>
-      <div>
-        <h3 class="font-semibold mb-2">GPUs</h3>
-        {#if sysCaps?.gpus?.length}
-          <ul class="text-sm space-y-1">
-            {#each sysCaps.gpus as g}
-              <li>#{g.index} {g.name} — {g.memory_used_gb}/{g.memory_total_gb} GB</li>
-            {/each}
-          </ul>
-          {#if sysCaps.nvidia_driver}
-            <p class="text-xs opacity-70 mt-1">NVIDIA Driver: {sysCaps.nvidia_driver}</p>
-          {/if}
-        {:else}
-          <p class="text-sm opacity-70">No dedicated GPUs detected</p>
-        {/if}
-        {#if encoderTests}
-          <details class="mt-3">
-            <summary class="cursor-pointer text-sm">Encoder tests</summary>
-            <ul class="mt-2 text-xs space-y-2">
-              {#each encoderTests as t}
-                <li class="flex flex-col">
-                  <div class="flex items-center justify-between">
-                    <span class="font-medium">{t.codec} <span class="opacity-60">({t.actual_encoder})</span></span>
-                    {#if t.passed}
-                      <span class="text-green-400">PASS</span>
-                    {:else}
-                      <span class="text-red-400">FAIL</span>
-                    {/if}
-                  </div>
-                  {#if t.decode_passed !== null && t.decode_passed !== undefined}
-                    <div class="ml-3 mt-1 flex items-center justify-between opacity-80">
-                      <span>Decode:</span>
-                      {#if t.decode_passed === true}
-                        <span class="text-green-400 text-xs">✓ {t.decode_message || 'OK'}</span>
-                      {:else}
-                        <span class="text-red-400 text-xs" title={t.decode_message || 'Failed'}>✗ {t.decode_message || 'Failed'}</span>
-                      {/if}
-                    </div>
-                  {/if}
-                  <div class="ml-3 mt-1 flex items-center justify-between opacity-80">
-                    <span>Encode:</span>
-                    {#if t.encode_passed === true}
-                      <span class="text-green-400 text-xs">✓ {t.encode_message || 'OK'}</span>
-                    {:else}
-                      <span class="text-red-400 text-xs" title={t.encode_message || 'Failed'}>✗ {t.encode_message || 'Failed'}</span>
-                    {/if}
-                  </div>
-                </li>
-              {/each}
-            </ul>
-            {#if !gpuOk && hardwareType !== 'cpu'}
-              <div class="mt-3 text-xs text-amber-300 bg-amber-900/20 border border-amber-700/30 rounded p-2">
-                GPU present but encoders failed. Common causes:
-                <ul class="list-disc ml-4 mt-1 opacity-90">
-                  <li>Container not started with GPU access (Compose gpus: all)</li>
-                  <li>Docker Desktop (Windows): enable WSL2 GPU support and set Resources → GPU</li>
-                  <li>Outdated or missing NVIDIA driver</li>
-                  <li>Permissions: NVENC init "Operation not permitted" inside container</li>
-                </ul>
-              </div>
-            {/if}
-          </details>
-        {/if}
-      </div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="border-2 border-dashed border-gray-700 rounded p-8 text-center"
-         on:drop={onDrop} on:dragover={allowDrop}>
-      <p class="mb-2">Drag & drop a video here</p>
-  <input bind:this={uploadInput} type="file" accept="video/*" on:change={(e:any)=>{ const f=e.target.files?.[0]||null; file=f; fileSizeLabel = f? formatSize(f.size): null; if(f) setTimeout(()=>doUpload(), 100); }} />
-      {#if file}
-        <div class="mt-2 flex items-center gap-2">
-          <p class="text-sm text-gray-400">{file.name} {#if fileSizeLabel}<span class="opacity-70">• {fileSizeLabel}</span>{/if}</p>
-          <button class="btn" on:click={clearSelectedFile} title="Clear selected file">Clear</button>
-        </div>
-      {/if}
-      {#if isUploading}
-        <div class="mt-4">
-          <p class="text-xs text-gray-400 mb-1">Analyzing video… {uploadProgress}%</p>
-          <div class="h-2 bg-gray-800 rounded">
-            <div class="h-2 bg-blue-600 rounded" style={`width:${uploadProgress}%`}></div>
-          </div>
-          <p class="text-xs text-gray-500 mt-1">Reading file properties and calculating optimal bitrates...</p>
-        </div>
-      {/if}
-    </div>
-  </div>
-
-  <div class="card grid grid-cols-1 sm:grid-cols-2 gap-4">
-    <div class="space-y-2">
-      <div class="flex flex-wrap gap-3 text-sm items-center">
-        <label class="flex items-center gap-2 cursor-pointer">
-          <input type="radio" name="targetMode" value="size" bind:group={targetMode} disabled={audioOnly} />
-          Target file size
-        </label>
-        <label class="flex items-center gap-2 cursor-pointer">
-          <input type="radio" name="targetMode" value="bitrate" bind:group={targetMode} disabled={audioOnly} />
-          Target video bitrate
-        </label>
-      </div>
-      {#if targetMode === 'size'}
-        <div class="space-x-2 flex flex-wrap gap-2">
-          {#each sizeButtons as b}
-            <button class="btn" type="button" on:click={()=>setPresetMB(b)}>{b}MB</button>
-          {/each}
-        </div>
-        <div class="flex items-center gap-2 flex-wrap">
-          <label class="text-sm">Custom size (MB)</label>
-          <input class="input w-28" type="number" bind:value={targetMB} min="1" disabled={audioOnly} />
-        </div>
-      {:else}
-        <div class="flex items-center gap-2 flex-wrap">
-          <label class="text-sm">Video bitrate (kbps)</label>
-          <input class="input w-32" type="number" bind:value={targetVideoKbps} min="50" max="200000" step="50" disabled={audioOnly} />
-        </div>
-        <p class="text-xs text-gray-500">Audio is still set separately below; total size is not capped in this mode.</p>
-      {/if}
-    </div>
-    <div class="text-sm text-gray-400 sm:text-right">
-      {#if estimated && targetMode === 'bitrate' && effectiveDuration > 0}
-        <p>≈ {estimated.final_mb.toFixed(2)} MB at this bitrate for the selected duration (estimate).</p>
-      {/if}
-    </div>
-  </div>
-
-  <!-- Primary controls: Codec and Speed/Quality preset (visible without expanding) -->
-  <div class="card grid sm:grid-cols-3 gap-4">
-    <div>
-      <label class="block mb-1 text-sm">Video Codec</label>
-      <select class="input w-full codec-select" bind:value={videoCodec}>
-        {#each availableCodecs as codec}
-          <option value={codec.value} data-group={codec.group}>
-            {getCodecIcon(codec.group)} {codec.label}
-          </option>
-        {/each}
-      </select>
-      {#if hardwareType !== 'cpu'}
-        <p class="text-xs text-gray-400 mt-1">
-          <span class="inline-block w-2 h-2 rounded-full mr-1" style="background-color: {getCodecColor(hardwareType)}"></span>
-          Detected: {hardwareType.toUpperCase()} acceleration
-        </p>
-      {:else}
-        <p class="text-xs text-gray-400 mt-1">
-          <span class="inline-block w-2 h-2 rounded-full bg-gray-500 mr-1"></span>
-          CPU encoding (no GPU detected)
-        </p>
-      {/if}
-      <!-- Audio-only toggle moved here (out of Advanced) -->
-      <div class="mt-2">
-        <label class="flex items-center gap-2 cursor-pointer text-sm"><input type="checkbox" bind:checked={audioOnly} /><span>Extract audio only (.m4a)</span></label>
-      </div>
-    </div>
-    <div>
-      <label class="block mb-1 text-sm">Resolution</label>
-      <div class="flex items-center gap-2">
-        <select class="input w-full" disabled={audioOnly || autoResolution}
-          on:change={(e:any)=>{ const v = e.target.value; explicitHeight = parseExplicitHeight(v); }}>
-          <option value="">Original</option>
-          <option value="2160">2160p (4K)</option>
-          <option value="1440">1440p</option>
-          <option value="1080">1080p</option>
-          <option value="720">720p</option>
-          <option value="480">480p</option>
-          <option value="360">360p</option>
-          <option value="240">240p</option>
-        </select>
-      </div>
-      
-      <div class="mt-2 flex items-center gap-3">
-        <label class="flex items-center gap-2 text-xs cursor-pointer">
-          <input type="checkbox" bind:checked={autoResolution} disabled={audioOnly} />
-          <span>Auto (won’t go below</span>
-          <select class="input h-7 py-0 px-2 text-xs w-20" bind:value={minAutoHeight} disabled={audioOnly || !autoResolution}>
-            <option value={240}>240p</option>
-            <option value={360}>360p</option>
-            <option value={480}>480p</option>
-            <option value={720}>720p</option>
-          </select>
-          <span>)</span>
-        </label>
-      </div>
-      {#if jobInfo?.original_width && jobInfo?.original_height}
-        <p class="text-xs opacity-70 mt-1">Input: {jobInfo.original_width}×{jobInfo.original_height}{#if jobInfo.original_video_fps != null && jobInfo.original_video_fps > 0}&nbsp;· ~{Number(jobInfo.original_video_fps).toFixed(2).replace(/\.?0+$/, '')} fps{/if} → Output: {explicitHeight ? `${explicitHeight}p (max height)` : (autoResolution ? `auto (≥${minAutoHeight}p)` : (maxHeight || 'original'))}{#if maxFpsCap} · max {maxFpsCap} fps{/if}</p>
-      {/if}
-    </div>
-    <div>
-      <label class="block mb-1 text-sm">Quality preset</label>
-      <select class="input w-full" bind:value={preset}>
-        <option value="p1">Fast (P1)</option>
-        <option value="p5">Balanced (P5)</option>
-        <option value="p6">Default (P6)</option>
-        <option value="p7">Best Quality (P7)</option>
-        <option value="extraquality">🌟 Extra Quality</option>
-      </select>
-    </div>
-  </div>
-
-  <div class="card">
-    <details>
-      <summary class="cursor-pointer">Advanced Options</summary>
-      <div class="mt-4 grid sm:grid-cols-4 gap-4">
-        <!-- Moved Speed/Quality to primary controls; remove here -->
-        <!-- Audio Only moved to primary controls -->
-        <div>
-          <label class="block mb-1 text-sm">Audio Codec</label>
-          <select class="input w-full" bind:value={audioCodec}>
-            <option value="libopus">Opus (Default)</option>
-            <option value="aac">AAC</option>
-            <option value="none">🔇 None (Mute)</option>
-          </select>
-        </div>
-        <div>
-          <label class="block mb-1 text-sm">Container</label>
-          <select class="input w-full" bind:value={container}>
-            <option value="mp4">MP4 (Most compatible)</option>
-            <option value="mkv">MKV (Best with Opus)</option>
-          </select>
-        </div>
-        <div>
-          <label class="block mb-1 text-sm">Audio Bitrate (kbps)</label>
-          <select class="input w-full" bind:value={audioKbps} disabled={audioCodec === 'none' || autoAudioBitrate} on:change={(e:any)=>{ const v = parseInt(e.target.value); if (!Number.isNaN(v)) baseAudioKbps = v as any; }}>
-            <option value={32}>32</option>
-            <option value={48}>48</option>
-            <option value={64}>64</option>
-            <option value={96}>96</option>
-            <option value={128}>128</option>
-            <option value={160}>160</option>
-            <option value={192}>192</option>
-            <option value={256}>256</option>
-          </select>
-          {#if audioCodec === 'none'}
-            <p class="text-xs text-gray-400 mt-1">Disabled (audio muted)</p>
-          {:else if autoAudioBitrate}
-            <p class="text-xs text-gray-400 mt-1">Auto audio bitrate is ON (will downshift for extreme compression)</p>
-          {/if}
-        </div>
-        <div>
-          <label class="block mb-1 text-sm flex items-center gap-1">
-            Tune <span class="text-[11px] opacity-70">(what to prioritize)</span>
-          </label>
-          <select class="input w-full" bind:value={tune} title="Tune tells the encoder what to optimize for.">
-            <option value="hq">Best Quality (HQ)</option>
-            <option value="ll">Low Latency (faster)</option>
-            <option value="ull">Ultra‑Low Latency (fastest)</option>
-            <option value="lossless">Lossless (no quality loss)</option>
-          </select>
-          <p class="mt-1 text-xs opacity-70">Quality = best visuals. Low/Ultra‑low latency = faster encodes (good for screen/streams). Lossless = huge files.</p>
-        </div>
-        <div class="sm:col-span-2 lg:col-span-4">
-          <label class="block mb-1 text-sm">Max frame rate</label>
-          <select class="input w-full max-w-md" bind:value={maxFpsCap} disabled={audioOnly}>
-            <option value="">Same as input (default)</option>
-            {#each FPS_CAP_VALUES as v}
-              <option value={v}>{v} fps (cap)</option>
-            {/each}
-          </select>
-          <p class="text-xs opacity-70 mt-1">Default keeps the same frame rate as the input. If you pick a cap and the source is faster, the output is reduced. Slower sources stay unchanged. Saved in this browser.</p>
-        </div>
-      </div>
-      <!-- Preset Profiles moved here (smaller) -->
-      {#if presetProfiles?.length}
-        <div class="mt-4 pt-4 border-t border-gray-700">
-          <h4 class="text-sm font-medium mb-2">Profiles</h4>
-          <div class="max-w-sm">
-            <label class="block mb-1 text-xs">Select profile</label>
-            <select class="input w-full text-xs py-1 h-8" bind:value={selectedPreset} on:change={(e:any)=>applyPreset(e.target.value)}>
-              {#each presetProfiles as p}
-                <option value={p.name}>{p.name}</option>
-              {/each}
-            </select>
-            <p class="mt-1 text-xs opacity-70">Profiles adjust size, audio, and container. Codec and quality preset remain as chosen above.</p>
-          </div>
-        </div>
-      {/if}
-      
-      <!-- Resolution and Trim Controls (explicit pixel fields when auto off) -->
-      <div class="mt-4 pt-4 border-t border-gray-700">
-        <h4 class="text-sm font-medium mb-3">Resolution & Trimming</h4>
-        <div class="grid sm:grid-cols-4 gap-4">
-          <div>
-            <label class="block mb-1 text-sm">Max Width (px)</label>
-            <input class="input w-full" type="number" bind:value={maxWidth} placeholder="Original" min="1" disabled={autoResolution || !!explicitHeight} />
-          </div>
-          <div>
-            <label class="block mb-1 text-sm">Max Height (px)</label>
-            <input class="input w-full" type="number" bind:value={maxHeight} placeholder="Original" min="1" disabled={autoResolution || !!explicitHeight} />
-          </div>
-          <div>
-            <label class="block mb-1 text-sm">Start Time</label>
-            <input class="input w-full" type="text" bind:value={startTime} placeholder="0 or 00:00:00" />
-            <p class="mt-1 text-xs opacity-70">Format: seconds or HH:MM:SS</p>
-          </div>
-          <div>
-            <label class="block mb-1 text-sm">End Time</label>
-            <input class="input w-full" type="text" bind:value={endTime} placeholder="Full duration" />
-            <p class="mt-1 text-xs opacity-70">Format: seconds or HH:MM:SS</p>
-          </div>
-        </div>
-        <p class="mt-2 text-xs opacity-70">
-          Leave resolution blank to keep original. Aspect ratio is maintained.
-          Leave times blank to use full duration.
-        </p>
-      </div>
-      
-      <!-- UI Options -->
-      <div class="mt-4 pt-4 border-t border-gray-700">
-        <h4 class="text-sm font-medium mb-3">UI Options</h4>
-        <div class="flex flex-wrap gap-4">
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" bind:checked={playSoundWhenDone} class="w-4 h-4" />
-            <span class="text-sm">🔔 Play sound when done</span>
-          </label>
-          <label class="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" bind:checked={autoDownload} class="w-4 h-4" />
-            <span class="text-sm">⬇️ Auto-download when done</span>
-          </label>
-          <label class="flex items-center gap-2 cursor-pointer" title="Automatically reduce audio bitrate when target size is tight to preserve minimum video quality.">
-            <input type="checkbox" bind:checked={autoAudioBitrate} class="w-4 h-4" />
-            <span class="text-sm">🎚️ Auto audio bitrate</span>
-          </label>
-          {#if container === 'mp4'}
-          <label class="flex items-center gap-2 cursor-pointer" title="Fragmented MP4 eliminates the long 'finalizing' step (99%->100%). Works with all modern players and Discord. Recommended!">
-            <input type="checkbox" bind:checked={fastMp4Finalize} class="w-4 h-4" />
-            <span class="text-sm">🚀 Fast finalize (recommended)</span>
-          </label>
-          {/if}
-          <label class="flex items-center gap-2 cursor-pointer" title="When enabled, the decoder will try to use GPU hardware decoding whenever possible.">
-            <input type="checkbox" bind:checked={preferHwDecode} class="w-4 h-4" />
-            <span class="text-sm">⚡ Force hardware decoding</span>
-          </label>
-        </div>
-      </div>
-      
-      {#if containerNote}
-        <p class="mt-2 text-xs text-amber-400">{containerNote}</p>
-      {/if}
-    </details>
-  </div>
-
-  {#if jobInfo}
-    <div class="card">
-      <p class="text-sm">
-        {#if effectiveDuration !== jobInfo.duration_s}
-          <span class="text-blue-400">Duration: {formatDurationTime(effectiveDuration)} (trimmed from {formatDurationTime(jobInfo.duration_s)})</span>
-          <br />
-        {/if}
-        Original: {Math.round((jobInfo.original_video_bitrate_kbps||0)+(jobInfo.original_audio_bitrate_kbps||0))} kbps
-        Target: {estimated ? Math.round(estimated.total_kbps) : Math.round(jobInfo.estimate_total_kbps)} kbps -> Video ~{estimated ? Math.round(estimated.video_kbps) : Math.round(jobInfo.estimate_video_kbps)} kbps
-      </p>
-      {#if estimated}
-        <p class="text-xs opacity-80">Estimated final size: ~{estimated.final_mb.toFixed(2)} MB</p>
-      {/if}
-      {#if warnText}<p class="text-amber-400 text-sm mt-1">{warnText}</p>{/if}
-      {#if resolutionSuggestText}
-        <div class="mt-2 p-3 border border-amber-700/40 bg-amber-900/20 rounded">
-          <div class="text-sm text-amber-200">{resolutionSuggestText}</div>
-          {#if resolutionSuggestHeight}
-            <button class="btn mt-2 text-xs" on:click={() => { explicitHeight = resolutionSuggestHeight; }}>
-              Apply {resolutionSuggestHeight}p
-            </button>
-          {/if}
-        </div>
-      {/if}
-    </div>
-  {/if}
-
-  {#if errorText}
-    <div class="card border-red-500">
-      <p class="text-red-400">{errorText}</p>
-      {#if taskId && !doneStats}
-        <div class="mt-2 flex gap-2 items-center">
-          <button class="btn" on:click={reconnectStream}>Reconnect to progress</button>
-          <span class="text-xs opacity-70">This just reopens the live log/progress stream; the job may still be running on the server.</span>
-        </div>
-      {/if}
-    </div>
-  {/if}
-
-  <div class="flex gap-2">
-    <button class="btn" on:click={doUpload} disabled={!file || isUploading || isAnalyzing}>
-      {#if jobInfo}
-        Re-analyze
-      {:else}
-        Analyze
-      {/if}
-    </button>
-  <button class="btn" on:click={doCompress} disabled={!jobInfo || isCompressing}>
-      {#if isCompressing}
-        {#if hasProgress}
-          Compressing… {progress}%{#if etaLabel} — ~{etaLabel} left{/if}
-        {:else}
-          Starting…
-        {/if}
-      {:else}
-        Compress
-      {/if}
-    </button>
-    {#if taskId && isCompressing}
-      <button class="btn" on:click={onCancel} disabled={isCancelling}>{isCancelling ? 'Canceling…' : 'Cancel'}</button>
-    {/if}
-    <button class="btn" on:click={reset} disabled={!file && !taskId}>Reset</button>
-  </div>
-
-  <!-- Download Ready Card - Prominent when file is ready -->
-  {#if taskId && doneStats}
-    <div class="card bg-gradient-to-r from-green-900/30 to-blue-900/30 border-2 border-green-500/50">
-      <div class="flex items-center justify-between gap-4 flex-wrap">
-        <div class="flex-1">
-          <h3 class="text-lg font-bold text-green-400 mb-1">✓ Compression Complete!</h3>
-          {#if doneStats}
-            <p class="text-sm text-gray-300">Final size: <span class="font-semibold text-white">{doneStats.final_size_mb} MB</span></p>
-          {:else}
-            <p class="text-sm text-gray-300">Your file is ready to download</p>
-          {/if}
-        </div>
-        <a 
-          class="btn bg-green-600 hover:bg-green-700 text-white font-bold px-8 py-3 text-lg shadow-lg"
-          href={downloadUrl(taskId)} 
-          target="_blank"
-        >
-          ⬇️ Download
-        </a>
-      </div>
-    </div>
-  {/if}
-
-  {#if taskId}
-    <div class="card">
-      <div class="flex items-center justify-between mb-2">
-        {#if decodeMethod || encodeMethod}
-          <div class="text-sm text-gray-300">
-            Pipeline: {decodeMethod || 'auto'} → {encodeMethod || (videoCodec || 'auto')}
-          </div>
-        {/if}
-        {#if encodeMethod}
-          {#if /_nvenc$/.test(encodeMethod)}
-            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: NVIDIA NVENC</span>
-          {:else}
-            <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-200 border border-slate-600/40">Encoder: CPU ({encodeMethod})</span>
-          {/if}
-        {:else}
-          <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-600/40">Encoder: detecting…</span>
-        {/if}
-      </div>
-      {#if encodeMethod && encodeMethod.startsWith('lib') && hardwareType !== 'cpu'}
-        <div class="text-xs text-amber-300 mt-1">Hardware encoder unavailable for this job — using CPU fallback.</div>
-      {/if}
-      
-      {#if isRetrying}
-        <div class="mb-3 p-3 bg-amber-900/30 border-2 border-amber-500 rounded-lg animate-pulse">
-          <div class="flex items-center gap-2">
-            <span class="text-2xl">🔄</span>
-            <div class="flex-1">
-              <div class="font-bold text-amber-300 text-lg">AUTOMATIC RETRY IN PROGRESS</div>
-              <div class="text-sm text-amber-200 mt-1">{retryMessage}</div>
-              <div class="text-xs text-gray-400 mt-1">This is normal - optimizing output to meet target size</div>
-            </div>
-          </div>
-        </div>
-      {/if}
-      
-      <div class="h-3 bg-gray-800 rounded">
-        <div class="h-3 bg-indigo-600 rounded" style={`width:${displayedProgress}%`}></div>
-      </div>
-      <div class="mt-2 text-xs text-gray-400 flex items-center justify-between">
-        <span>
-          {displayedProgress.toFixed(1)}%
-          {#if isCompressing && isFinalizing && !doneStats} 
-            <span class="text-blue-300">(finalizing…)</span>
-          {:else if currentSpeedX && displayedProgress < 95}
-            <span class="text-green-300">• {currentSpeedX.toFixed(2)}x</span>
-          {/if}
-        </span>
-        {#if isCompressing && displayedProgress<99 && etaLabel}
-          <span>~{etaLabel} remaining</span>
-        {:else if isCompressing && isFinalizing && !doneStats}
-          <span class="text-gray-400">Saving metadata...</span>
-        {/if}
-      </div>
-
-      {#if !isReady && !doneStats && showTryDownload}
-        <div class="mt-4 text-sm bg-amber-900/20 border border-amber-600/30 rounded p-3">
-          <p class="text-amber-300">Finalizing… You can try downloading now.</p>
-          <button class="btn inline-block mt-2" on:click={tryDownloadNow} disabled={tryDownloading}>
-            {tryDownloading ? 'Trying…' : 'Try Download'}
           </button>
+          <div class="file-details">
+            <span class="file-name">{file.name}</span>
+            <span class="file-size">{formatBytes(file.size)}</span>
+          </div>
+          <button class="btn-clear" on:click|preventDefault|stopPropagation={clearFile} aria-label="Cancel">×</button>
         </div>
-      {/if}
+      </div>
+    {:else}
+      <div class="drop-content">
+        <div class="drop-icon">📁</div>
+        <p class="drop-text"><strong>Drag & Drop</strong> your video here</p>
+        <p class="drop-subtext">or click to choose — drop up to 5 for batch</p>
+      </div>
+    {/if}
+  </label>
+  {#if multiDropMessage}
+    <p class="multi-drop-msg">{multiDropMessage}</p>
+  {/if}
 
-      <details class="mt-3">
-        <summary class="cursor-pointer">FFmpeg log</summary>
-        <pre class="mt-2 text-xs whitespace-pre-wrap">{logLines.join('\n')}</pre>
-      </details>
+  <!-- Controls -->
+  <div class="size-section">
+    <div class="setting-label">Target Size</div>
+    <div class="size-track">
+      {#each sizePresets as size}
+        <button class="size-option" class:active={!isCustom && targetSize === size} on:click={() => { targetSize = size; isCustom = false; }} disabled={status !== 'idle'}>
+          <span class="size-value">{size}</span><span class="size-unit">MB</span>
+        </button>
+      {/each}
+      <div class="size-option custom" class:active={isCustom}>
+        <input type="text" inputmode="numeric" placeholder="..." bind:value={customSize} on:focus={() => { isCustom = true; }} on:input={(e) => { customSize = e.target.value.replace(/[^0-9.]/g, '').slice(0, 5); }} disabled={status !== 'idle'} />
+        <span class="size-unit">MB</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="size-section mt-1">
+    <div class="setting-label flex justify-between">
+      <span>Quality</span>
+    </div>
+    <div class="size-track">
+      <button class="size-option" class:active={quality === 'p3'} on:click={() => { quality = 'p3'; perfectQualityOverride = false; }} disabled={status !== 'idle'}>Fast</button>
+      <button class="size-option" class:active={quality === 'p5'} on:click={() => { quality = 'p5'; perfectQualityOverride = false; }} disabled={status !== 'idle'}>Balanced</button>
+      <button class="size-option" class:active={quality === 'p6'} on:click={() => { quality = 'p6'; perfectQualityOverride = false; }} disabled={status !== 'idle'}>Quality</button>
+      <button class="size-option" class:active={quality === 'p7'} on:click={() => { quality = 'p7'; perfectQualityOverride = false; }} disabled={status !== 'idle'}>Best</button>
+    </div>
+    <label class="flex items-center gap-2 mt-2 cursor-pointer opacity-80 hover:opacity-100 transition-opacity justify-end">
+      <input type="checkbox" bind:checked={perfectQualityOverride} class="checkbox-ui" disabled={status !== 'idle'}>
+      <span class="text-sm shadow-text">Perfect Quality Override</span>
+    </label>
+  </div>
+
+  <!-- Progress -->
+  {#if status !== 'idle'}
+    <div class="progress-section fade-in">
+      {#if status === 'analyzing'}
+        <div class="progress-label"><span>Uploading & Analyzing...</span><span class="font-mono">{uploadProgress}%</span></div>
+        <div class="progress-container"><div class="progress-bar" style="width: {uploadProgress}%"></div></div>
+      {:else if status === 'compressing'}
+        <div class="progress-label"><span>Compressing...</span><span class="font-mono">{compressProgress}%</span></div>
+        <div class="progress-container"><div class="progress-bar" style="width: {compressProgress}%"></div></div>
+        {#if errorMessage.includes('Retrying')}<p class="status-warning text-xs mt-1 text-center">{errorMessage}</p>{/if}
+      {:else if status === 'done'}
+        <div class="status-done"><span class="status-icon">✅</span><span>Done! Download started.</span></div>
+      {:else if status === 'error'}
+        <div class="status-error"><span class="status-icon">💔</span><span>{errorMessage || 'An error occurred'}</span><button class="btn-dismiss" on:click={() => { status = 'idle'; errorMessage = ''; }}>×</button></div>
+      {/if}
     </div>
   {/if}
 
-  <!-- Recent history on main screen -->
-  <div class="card">
-    <div class="flex items-center justify-between mb-2">
-      <h3 class="font-semibold">Recent History</h3>
-      <a href="/history" class="text-sm text-blue-400 underline">View all →</a>
+  <!-- Action -->
+  {#if status === 'idle'}
+    <div class="action-section">
+      <button class="btn-primary compress-btn" on:click={doCompress} disabled={!canCompress}>
+        UPLOAD AND COMPRESS
+      </button>
     </div>
-    {#if !historyEnabled}
-      <p class="text-sm opacity-70">History tracking is disabled. Enable it in Settings.</p>
-    {:else if history.length === 0}
-      <p class="text-sm opacity-70">No history yet.</p>
-    {:else}
-      <ul class="text-sm space-y-2">
-        {#each history as item}
-          <li class="flex items-center justify-between gap-2">
-            <span class="truncate">{item.filename}</span>
-            <div class="flex items-center gap-3">
-              <span class="opacity-70">{item.compressed_size_mb.toFixed(2)} MB</span>
-              <a class="text-blue-400 underline" href={`/api/jobs/${encodeURIComponent(item.task_id)}/download`} title="Download">⬇️</a>
-            </div>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </div>
+  {/if}
 
-  <!-- Support badge moved to corner (smaller, unobtrusive) -->
+  <!-- Footer -->
+  <footer class="footer">
+    <a href="/advanced" class="advanced-link">Advanced options &rarr;</a>
+    <div class="footer-icons">
+      <a href="/batch" class="icon-link" aria-label="Batch" title="Batch compress">🗂</a>
+      <a href="/history" class="icon-link" aria-label="History" title="History">📜</a>
+      <a href="/settings" class="icon-link" aria-label="Settings" title="Settings">⚙️</a>
+    </div>
+    <div class="footer-status">
+      {#if daemonStatus?.enabled}
+        <span class="daemon-badge" title={daemonStatus.connected ? `Daemon: ${daemonStatus.codecs?.join(', ') || 'connected'}` : 'Daemon: unreachable'}>
+          <span class="daemon-dot" class:connected={daemonStatus.connected} class:disconnected={!daemonStatus.connected}></span>
+          <span class="daemon-label">{daemonStatus.connected ? 'HW Accel' : 'Daemon offline'}</span>
+        </span>
+      {/if}
+      {#if appVersion}<span class="version">v{appVersion}</span>{/if}
+    </div>
+  </footer>
 </div>
 
-<!-- Floating support widget -->
-<button
-  class="fixed bottom-4 right-4 bg-gray-800/90 hover:bg-gray-700 text-xs px-3 py-1.5 rounded-full shadow-lg border border-gray-700 backdrop-blur-sm flex items-center gap-1 z-50"
-  on:click={toggleSupport}
-  aria-expanded={showSupport}
-  aria-controls="support-popover"
-  title="Support the project"
->
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4 text-rose-400">
-    <path d="M11.645 20.91l-.007-.003-.022-.01a15.247 15.247 0 01-.383-.184 25.18 25.18 0 01-4.244-2.62C4.688 16.197 2.25 13.614 2.25 10.5 2.25 8.014 4.237 6 6.75 6c1.56 0 2.927.802 3.75 2.016C11.323 6.802 12.69 6 14.25 6 16.763 6 18.75 8.014 18.75 10.5c0 3.114-2.438 5.697-4.739 7.593a25.175 25.175 0 01-4.244 2.62 15.247 15.247 0 01-.383.184l-.022.01-.007.003-.003.001a.75.75 0 01-.614 0l-.003-.001z" />
-  </svg>
-  <span>Support</span>
-  <span class="sr-only">the project</span>
-</button>
-
-{#if showSupport}
-  <div
-    id="support-popover"
-    class="fixed bottom-16 right-4 w-64 bg-gray-900/95 text-gray-100 border border-gray-700 rounded-lg shadow-xl p-3 z-50"
-    role="dialog"
-    aria-label="Support the project"
-    on:keydown={onKey}
-  >
-    <div class="flex items-start justify-between gap-2">
-      <p class="text-xs leading-relaxed">
-        Thanks for using <span class="font-semibold">8mb.local</span>! If this saved you time and you'd like to chip in, tips are appreciated (never expected).
-      </p>
-      <button class="text-gray-400 hover:text-gray-200 text-sm" on:click={closeSupport} title="Close" aria-label="Close">×</button>
-    </div>
-    <div class="mt-2">
-      <a class="underline text-xs hover:text-rose-300" href="https://paypal.me/jasonselsley" target="_blank" rel="noopener noreferrer">paypal.me/jasonselsley</a>
-    </div>
-  </div>
-{/if}
-
-{#if isUploading || isCompressing}
-  <!-- Non-blocking mini status panel in bottom-right -->
-  <div class="fixed bottom-20 right-4 z-40 pointer-events-none">
-    <div class="pointer-events-auto bg-gray-900/95 border border-gray-700 rounded-lg p-3 shadow-xl flex items-center gap-3">
-      <div class="h-5 w-5 rounded-full border-2 border-gray-600 border-t-indigo-500 animate-spin"></div>
-      <div class="text-sm">
-        {#if isUploading}
-          <div>Uploading… {uploadProgress}%</div>
-        {:else if isCompressing}
-          {#if hasProgress}
-            <div>
-              Compressing… {displayedProgress.toFixed(1)}%
-              {#if displayedProgress<99 && etaLabel}
-                — ~{etaLabel} left
-              {:else if displayedProgress>=99}
-                — finalizing…
-              {/if}
-            </div>
-          {:else}
-            <div>Starting…</div>
-          {/if}
-        {/if}
-      </div>
-    </div>
-  </div>
-{/if}
-
 <style>
-  /* Color-code codec options based on hardware type */
-  .codec-select option[data-group="nvidia"] {
-    color: #22c55e;
-    font-weight: 500;
+  :root {
+    --bg-card: #111111;
+    --bg-hover: #1a1a1a;
+    --text-primary: #ffffff;
+    --text-secondary: #888888;
+    --text-muted: #555555;
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --accent-glow: rgba(99, 102, 241, 0.3);
+    --success: #22c55e;
+    --warning: #f59e0b;
+    --error: #ef4444;
+    --border-radius: 12px;
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --transition-fast: 0.15s ease;
   }
-  .codec-select option[data-group="cpu"] {
-    color: #9ca3af;
+
+  .container {
+    width: 100%;
+    max-width: 480px;
+    margin: 40px auto;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    padding: 0 16px;
   }
+
+  .header { text-align: center; }
+  .logo { font-size: 2.5rem; font-weight: 700; letter-spacing: -1px; margin: 0; }
+  .accent { color: var(--accent); }
+  .tagline { color: var(--text-secondary); margin-top: 8px; font-size: 0.95rem; }
+
+  .file-input-hidden { position: fixed; top: -9999px; left: -9999px; }
+
+  /* Drop Zone */
+  .drop-zone {
+    position: relative; min-height: 200px; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: all var(--transition-fast); border: 2px dashed var(--glass-border);
+    background: rgba(255, 255, 255, 0.02); border-radius: 16px;
+  }
+  .drop-zone:hover, .drop-zone.dragging { border-color: var(--accent); background: rgba(99, 102, 241, 0.05); }
+  .drop-zone.has-file { border-style: solid; border-color: var(--glass-border); padding: 12px; min-height: 220px; }
+  .drop-zone.processing { cursor: wait; border-color: var(--accent-glow); }
+
+  .drop-content { text-align: center; padding: 20px; }
+  .drop-icon { font-size: 3rem; margin-bottom: 12px; }
+  .drop-text { font-size: 1.1rem; margin-bottom: 4px; }
+  .drop-subtext { font-size: 0.85rem; color: var(--text-muted); }
+
+  /* File Preview */
+  .file-preview-card {
+    display: flex; flex-direction: column; width: 100%; height: 100%; position: relative;
+    overflow: hidden; border-radius: 12px; background: var(--bg-card); box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  }
+  .bg-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0.5; }
+  .video-overlay { position: absolute; inset: 0; background: linear-gradient(to top, rgba(0,0,0,0.9), rgba(0,0,0,0.2) 60%); }
+  
+  .preview-content { position: absolute; bottom: 0; left: 0; right: 0; display: flex; align-items: center; gap: 16px; padding: 16px; z-index: 10; }
+  .file-icon { width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: white; cursor: pointer; backdrop-filter: blur(4px); }
+  .file-icon:hover { background: rgba(255,255,255,0.25); transform: scale(1.05); }
+  
+  .file-details { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .file-name { font-weight: 600; font-size: 1rem; color: white; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+  .file-size { font-size: 0.8rem; color: rgba(255,255,255,0.7); }
+  
+  .btn-clear { width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.1); color: white; font-size: 1.2rem; cursor: pointer; display: flex; align-items: center; justify-content: center; line-height: 0; backdrop-filter: blur(4px); }
+  .btn-clear:hover { background: var(--error); border-color: var(--error); transform: scale(1.1); }
+
+  /* Settings Track */
+  .size-section { display: flex; flex-direction: column; gap: 8px; }
+  .setting-label { font-size: 0.85rem; font-weight: 500; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-left: 4px; }
+  .size-track { display: flex; background: var(--bg-card); border: 1px solid var(--glass-border); border-radius: var(--border-radius); padding: 4px; gap: 2px; }
+  .size-option { flex: 1; padding: 10px 4px; border: none; background: transparent; color: var(--text-secondary); font-size: 0.9rem; font-weight: 500; border-radius: 8px; cursor: pointer; transition: all var(--transition-fast); display: flex; align-items: center; justify-content: center; gap: 2px; }
+  .size-option:hover:not(:disabled):not(.active) { background: var(--bg-hover); color: var(--text-primary); }
+  .size-option.active { background: linear-gradient(135deg, var(--accent), var(--accent-hover)); color: white; font-weight: 600; box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3); }
+  .size-option:disabled { opacity: 0.5; cursor: not-allowed; }
+  .size-value { font-weight: inherit; }
+  .size-unit { font-size: 0.65rem; opacity: 0.7; }
+  
+  .size-option.custom { flex: 0.8; min-width: 65px; gap: 2px; }
+  .size-option.custom input { width: 36px; background: transparent; border: none; color: inherit; font-size: 0.9rem; font-weight: inherit; text-align: center; outline: none; }
+  .size-option.custom input::placeholder { color: var(--text-muted); }
+  .size-option.custom.active input { color: white; }
+
+  /* Progress UI */
+  .fade-in { animation: fadeIn 0.3s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  
+  .progress-section { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+  .progress-label { display: flex; justify-content: space-between; font-size: 0.85rem; color: var(--text-secondary); }
+  .font-mono { font-family: monospace; }
+  .progress-container { width: 100%; height: 6px; background: var(--bg-card); border-radius: 3px; overflow: hidden; }
+  .progress-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-hover)); border-radius: 3px; transition: width 0.3s linear; }
+  
+  .status-done, .status-error { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px; border-radius: var(--border-radius); font-size: 0.9rem; font-weight: 500; }
+  .status-done { background: rgba(34, 197, 94, 0.1); color: var(--success); }
+  .status-error { background: rgba(239, 68, 68, 0.1); color: var(--error); position: relative; }
+  .status-warning { color: var(--warning); }
+  .btn-dismiss { background: none; border: none; color: inherit; position: absolute; right: 12px; font-size: 1.2rem; cursor: pointer; opacity: 0.7; }
+  .btn-dismiss:hover { opacity: 1; }
+
+  /* Buttons */
+  .btn-primary { width: 100%; padding: 16px; border: none; border-radius: var(--border-radius); font-size: 1rem; font-weight: 700; letter-spacing: 1px; color: white; background: linear-gradient(to bottom, #6366f1, #4f46e5); box-shadow: inset 0 1px 0 rgba(255,255,255,0.2), 0 4px 12px rgba(0,0,0,0.2), 0 0 20px rgba(99,102,241,0.3); cursor: pointer; transition: all 0.3s; position: relative; overflow: hidden; }
+  .btn-primary:hover:not(:disabled) { transform: translateY(-2px); box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), 0 6px 20px rgba(99,102,241,0.5); }
+  .btn-primary:active:not(:disabled) { transform: translateY(0); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; filter: grayscale(50%); }
+
+  /* Footer */
+  .footer { margin-top: 16px; display: flex; flex-direction: column; align-items: center; gap: 16px; border-top: 1px solid var(--glass-border); padding-top: 24px; }
+  .advanced-link { color: var(--text-secondary); text-decoration: none; font-size: 0.9rem; font-weight: 500; transition: color 0.2s; }
+  .advanced-link:hover { color: var(--accent); }
+  
+  .footer-icons { display: flex; justify-content: center; align-items: center; gap: 24px; margin-bottom: 8px; }
+  .footer-status { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 4px; }
+  .version { font-size: 0.75rem; color: var(--text-muted); font-family: monospace; }
+  .icon-link { color: var(--text-muted); text-decoration: none; font-size: 1.1rem; transition: all 0.2s; opacity: 0.7; }
+  .icon-link:hover { opacity: 1; transform: rotate(15deg); }
+
+  /* Utilities */
+  .checkbox-ui { accent-color: var(--accent); width: 14px; height: 14px; }
+  .shadow-text { text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+
+  /* Daemon status badge */
+  .daemon-badge { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; color: var(--text-muted); padding: 2px 8px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--glass-border); cursor: default; }
+  .daemon-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .daemon-dot.connected { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,0.5); }
+  .daemon-dot.disconnected { background: #ef4444; box-shadow: 0 0 6px rgba(239,68,68,0.4); }
+  .daemon-label { white-space: nowrap; }
+
+  /* Multi-drop message */
+  .multi-drop-msg { text-align: center; font-size: 0.8rem; color: #fbbf24; margin-top: -8px; }
 </style>

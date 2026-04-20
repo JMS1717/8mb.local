@@ -1,23 +1,30 @@
 # GPU is enabled by default (`gpus: all`). Requires NVIDIA Container Toolkit on the host.
 # If `docker compose up` fails because no GPU is available, use `docker-compose.cpu.yml` instead.
 services:
-  8mblocal:
+  8mb.local:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "136"
-    image: jms1717/8mblocal:latest
-    container_name: 8mblocal
+        BUILD_VERSION: "200"
+    image: xesurient/8mb.local:latest
+    container_name: 8mb.local
     ports:
       - "8001:8001"
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
+      - ./data:/app/data
       - ./.env:/app/.env  # optional custom settings
-    gpus: all
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     restart: unless-stopped

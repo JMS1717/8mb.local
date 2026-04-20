@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 ENV_FILE = Path("/app/.env")
-SETTINGS_FILE = Path("/app/settings.json")
+SETTINGS_FILE = Path("/app/data/settings.json")
 
 
 def _read_settings() -> Dict[str, Any]:
@@ -53,27 +53,10 @@ def _ensure_defaults() -> Dict[str, Any]:
             {"name": "H264 8MB (NVENC)", "target_mb": 8, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
             {"name": "HEVC 50MB HQ (NVENC)", "target_mb": 50, "video_codec": "hevc_nvenc", "audio_codec": "aac", "preset": "p7", "audio_kbps": 192, "container": "mp4", "tune": "hq"},
             {"name": "H264 25MB Fast (NVENC)", "target_mb": 25, "video_codec": "h264_nvenc", "audio_codec": "aac", "preset": "p3", "audio_kbps": 128, "container": "mp4", "tune": "ll"},
-            {"name": "AV1 8MB (CPU)", "target_mb": 8, "video_codec": "libaom-av1", "audio_codec": "libopus", "preset": "4", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
+            {"name": "AV1 8MB (CPU Fast)", "target_mb": 8, "video_codec": "libsvtav1", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
+            {"name": "AV1 8MB (CPU Best Quality)", "target_mb": 8, "video_codec": "libsvtav1", "audio_codec": "libopus", "preset": "p7", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
         ]
         changed = True
-    try:
-        profiles = data.get('preset_profiles', [])
-        has_av1_nvenc = any(p.get('video_codec') == 'av1_nvenc' for p in profiles)
-        if not has_av1_nvenc:
-            profiles.insert(0, {
-                "name": "AV1 9.7MB (NVENC)",
-                "target_mb": 9.7,
-                "video_codec": "av1_nvenc",
-                "audio_codec": "libopus",
-                "preset": "p6",
-                "audio_kbps": 128,
-                "container": "mp4",
-                "tune": "hq",
-            })
-            data['preset_profiles'] = profiles
-            changed = True
-    except Exception:
-        pass
     if 'default_preset' not in data:
         data['default_preset'] = _pick_initial_default(data.get('preset_profiles', []))
         changed = True
@@ -84,6 +67,7 @@ def _ensure_defaults() -> Dict[str, Any]:
             'av1_nvenc': True,
             'libx264': True,
             'libx265': True,
+            'libsvtav1': True,
             'libaom_av1': True,
         }
         changed = True
@@ -247,6 +231,7 @@ def _profile_to_dict(p: Dict[str, Any]) -> dict:
         'audio_kbps': int(p.get('audio_kbps', 128)),
         'container': p.get('container', 'mp4'),
         'tune': p.get('tune', 'hq'),
+        'max_output_fps': p.get('max_output_fps', None)
     }
 
 
@@ -295,6 +280,7 @@ def update_default_presets(
     audio_kbps: int,
     container: str,
     tune: str,
+    max_output_fps: Optional[float] = None
 ):
     """Update the current default preset profile's values in settings.json."""
     data = _ensure_defaults()
@@ -309,6 +295,8 @@ def update_default_presets(
         'container': container,
         'tune': tune,
     }
+    if max_output_fps is not None and max_output_fps > 0:
+        new_values['max_output_fps'] = float(max_output_fps)
     replaced = False
     for i, p in enumerate(data['preset_profiles']):
         if p.get('name') == default_name:
@@ -331,6 +319,7 @@ def get_codec_visibility_settings() -> dict:
         'av1_nvenc': vis.get('av1_nvenc', True),
         'libx264': vis.get('libx264', True),
         'libx265': vis.get('libx265', True),
+        'libsvtav1': vis.get('libsvtav1', True),
         'libaom_av1': vis.get('libaom_av1', True),
     }
 
@@ -339,7 +328,7 @@ def update_codec_visibility_settings(settings: dict):
     """Update codec visibility in settings.json."""
     data = _ensure_defaults()
     vis = data.get('codec_visibility', {})
-    valid_keys = {'h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'libx264', 'libx265', 'libaom_av1'}
+    valid_keys = {'h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'libx264', 'libx265', 'libsvtav1', 'libaom_av1'}
     for k in valid_keys:
         if k in settings:
             vis[k] = bool(settings[k])
@@ -463,3 +452,57 @@ def update_worker_concurrency(concurrency: int):
     env_vars['WORKER_CONCURRENCY'] = str(concurrency)
     write_env_file(env_vars)
     os.environ['WORKER_CONCURRENCY'] = str(concurrency)
+
+
+def get_daemon_port() -> str:
+    """Get daemon address/port setting"""
+    env_vars = read_env_file()
+    try:
+        return os.getenv('DAEMON_PORT', env_vars.get('DAEMON_PORT', '8000'))
+    except Exception:
+        return '8000'
+
+
+def update_daemon_port(address: str):
+    """Update daemon port/address setting in .env file"""
+    address_str = str(address).strip()
+    if not address_str:
+        raise ValueError("Invalid address")
+    
+    env_vars = read_env_file()
+    env_vars['DAEMON_PORT'] = address_str
+    write_env_file(env_vars)
+    os.environ['DAEMON_PORT'] = address_str
+
+
+# ---------------------------------------------------------------------------
+# Output filename format settings
+# ---------------------------------------------------------------------------
+def get_filename_settings() -> Dict[str, Any]:
+    """Get output filename format settings.
+
+    Returns dict with:
+        tag: str          - Branding tag inserted into output name (default '8mb.local').
+                            Empty string means no tag.
+        include_id: bool  - Whether to append the first 8 chars of the task ID.
+    """
+    data = _ensure_defaults()
+    fn = data.get('filename_format', {})
+    return {
+        'tag': fn.get('tag', '8mb.local'),
+        'include_id': fn.get('include_id', True),
+    }
+
+
+def update_filename_settings(tag: Optional[str] = None, include_id: Optional[bool] = None):
+    """Update output filename format settings."""
+    data = _ensure_defaults()
+    fn = data.get('filename_format', {'tag': '8mb.local', 'include_id': True})
+    if tag is not None:
+        # Sanitize: strip whitespace, remove path separators
+        clean = str(tag).strip().replace('/', '').replace('\\', '')
+        fn['tag'] = clean
+    if include_id is not None:
+        fn['include_id'] = bool(include_id)
+    data['filename_format'] = fn
+    _write_settings(data)

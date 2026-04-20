@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import os
 import time
-import time
-from datetime import datetime, timedelta
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from .config import settings
 from . import settings_manager
@@ -14,15 +11,14 @@ UPLOADS_DIR = "/app/uploads"
 OUTPUTS_DIR = "/app/outputs"
 
 
-async def cleanup_files() -> None:
+def cleanup_files() -> None:
     """Delete upload and output files older than the configured retention period."""
     # Use dynamic retention from settings.json if present
     try:
         retention = settings_manager.get_retention_hours()
     except Exception:
         retention = settings.FILE_RETENTION_HOURS
-    cutoff = datetime.utcnow() - timedelta(hours=retention)
-    cutoff_ts = cutoff.timestamp()
+    cutoff_ts = time.time() - (retention * 3600)
     for base in (UPLOADS_DIR, OUTPUTS_DIR):
         if not os.path.isdir(base):
             continue
@@ -38,7 +34,7 @@ async def cleanup_files() -> None:
 
 def start_scheduler() -> None:
     """Run the periodic cleanup job on a fixed interval."""
-    scheduler = AsyncIOScheduler()
+    scheduler = BackgroundScheduler()
     # run every 15 minutes
-    scheduler.add_job(lambda: asyncio.create_task(cleanup_files()), 'interval', minutes=15)
+    scheduler.add_job(cleanup_files, 'interval', minutes=15)
     scheduler.start()

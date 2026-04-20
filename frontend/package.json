@@ -1,5 +1,5 @@
 {
-  "name": "8mblocal-frontend",
+  "name": "8mb.local-frontend",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,9 +14,6 @@
   "devDependencies": {
     "vite": "^6.3.0",
     "@sveltejs/adapter-static": "^3.0.0",
-    "tailwindcss": "^3.4.13",
-    "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.47",
     "svelte-check": "^3.8.6",
     "@types/node": "^20.11.30",
     "typescript": "^5.4.5"

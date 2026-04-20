@@ -34,7 +34,7 @@ async def health():
 @router.get("/api/version")
 async def api_version():
     """Return application version baked at build time."""
-    ver = os.getenv("APP_VERSION", "136")
+    ver = os.getenv("APP_VERSION", "200")
     return {"version": ver}
 
 
@@ -96,6 +96,7 @@ async def get_available_codecs() -> AvailableCodecsResponse:
             'av1_nvenc': codec_settings.get('av1_nvenc', True),
             'libx264': codec_settings.get('libx264', True),
             'libx265': codec_settings.get('libx265', True),
+            'libsvtav1': codec_settings.get('libsvtav1', True),
             'libaom-av1': codec_settings.get('libaom_av1', True),
         }
         for codec, is_enabled in codec_map.items():
@@ -119,7 +120,7 @@ async def get_available_codecs() -> AvailableCodecsResponse:
         return AvailableCodecsResponse(
             hardware_type="cpu",
             available_encoders={"h264": "libx264", "hevc": "libx265", "av1": "libaom-av1"},
-            enabled_codecs=["libx264", "libx265", "libaom-av1"],
+            enabled_codecs=["libx264", "libx265", "libsvtav1", "libaom-av1"],
         )
 
 
@@ -144,7 +145,7 @@ async def system_encoder_tests():
 
     test_codecs = [
         "h264_nvenc","hevc_nvenc","av1_nvenc",
-        "libx264","libx265","libaom-av1",
+        "libx264","libx265","libsvtav1","libaom-av1",
     ]
 
     results = []
@@ -298,3 +299,55 @@ async def gpu_diagnostics():
     }
 
     return {"summary": summary, "checks": checks}
+
+
+@router.get("/api/system/daemon-status")
+async def daemon_status():
+    """Check if the native macOS VideoToolbox daemon is reachable."""
+    import asyncio
+    
+    daemon_url = os.environ.get("DAEMON_URL", "").strip()
+    daemon_address = settings_manager.get_daemon_port()
+    
+    if not daemon_url:
+        address_str = str(daemon_address).strip()
+        if address_str.isdigit():
+            daemon_url = f"http://host.docker.internal:{address_str}"
+        else:
+            if "://" not in address_str:
+                daemon_url = f"http://{address_str}"
+            else:
+                daemon_url = address_str
+
+    health_url = f"{daemon_url.rstrip('/')}/health"
+    try:
+        # Use a short timeout to avoid blocking
+        import urllib.request
+        import urllib.error
+
+        loop = asyncio.get_event_loop()
+        def _check():
+            req = urllib.request.Request(health_url, method="GET")
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                body = json.loads(resp.read().decode())
+                return body
+
+        result = await loop.run_in_executor(None, _check)
+        return {
+            "enabled": True,
+            "connected": True,
+            "url": daemon_url,
+            "status": result.get("status"),
+            "codecs": result.get("codecs", []),
+            "platform": result.get("platform"),
+            "host_cpu": result.get("cpu"),
+            "host_memory": result.get("memory"),
+            "host_gpus": result.get("gpus", []),
+        }
+    except Exception as e:
+        return {
+            "enabled": True,
+            "connected": False,
+            "url": daemon_url,
+            "error": str(e),
+        }

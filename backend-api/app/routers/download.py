@@ -102,7 +102,7 @@ async def download(task_id: str, wait: float | None = None):
             stem = Path(uploaded_name).stem
             if len(stem) > 37 and len(stem) >= 37 and stem[36] == '_':
                 stem = stem[37:]
-            output_name = stem + "_8mblocal" + ext
+            output_name = stem + "_8mb.local" + ext
             candidate = OUTPUTS_DIR / output_name
             if candidate.is_file():
                 filename = os.path.basename(candidate)
@@ -166,5 +166,5 @@ async def download_batch_zip(batch_id: str):
             seen_names.add(arcname)
             archive.write(src, arcname=arcname)
 
-    filename = f"8mblocal_batch_{batch_id[:8]}.zip"
+    filename = f"8mb.local_batch_{batch_id[:8]}.zip"
     return FileResponse(str(zip_path), filename=filename, media_type="application/zip")

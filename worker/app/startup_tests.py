@@ -15,29 +15,7 @@ from typing import Any, Dict, List, Tuple
 logger = logging.getLogger(__name__)
 
 
-def get_gpu_env() -> dict[str, str]:
-    """Get environment with NVIDIA GPU variables and library paths."""
-    env = os.environ.copy()
-    env["NVIDIA_VISIBLE_DEVICES"] = env.get("NVIDIA_VISIBLE_DEVICES", "all")
-    env["NVIDIA_DRIVER_CAPABILITIES"] = env.get(
-        "NVIDIA_DRIVER_CAPABILITIES", "compute,video,utility"
-    )
-    lib_paths = [
-        "/usr/local/nvidia/lib64",
-        "/usr/local/nvidia/lib",
-        "/usr/local/cuda/lib64",
-        "/usr/local/cuda/lib",
-        "/usr/lib/wsl/lib",
-        "/usr/lib/x86_64-linux-gnu",
-    ]
-    existing = env.get("LD_LIBRARY_PATH", "")
-    add = ":".join(p for p in lib_paths if p)
-    env["LD_LIBRARY_PATH"] = (
-        (existing + (":" if existing and add else "") + add)
-        if (existing or add)
-        else ""
-    )
-    return env
+from .utils import get_gpu_env
 
 
 def _ffmpeg_has_nvenc(env: dict[str, str]) -> bool:
@@ -160,14 +138,16 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
 def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
     """Test if encoder can actually be initialized."""
     try:
-        common_args = [
+        common_args = hw_flags + [
             "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
             "-c:v", encoder_name, "-t", "0.1", "-frames:v", "3",
-            "-f", "null", "-",
+        ] + (["-crf", "30"] if encoder_name == "libsvtav1" else []) + [
+            "-f", "null", "-"
         ]
-        cmd = ["ffmpeg", "-hide_banner", *common_args]
+        cmd = ["ffmpeg", "-hide_banner"] + common_args
+        eval_timeout = 30 if encoder_name == "libx265" else 8
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=8, env=get_gpu_env()
+            cmd, capture_output=True, text=True, timeout=eval_timeout, env=get_gpu_env()
         )
 
         if result is None:
@@ -283,7 +263,7 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
             "av1_nvenc": ("av1", ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]),
         }
 
-    test_codecs.extend(["libx264", "libx265", "libaom-av1"])
+    test_codecs.extend(["libx264", "libx265", "libsvtav1", "libaom-av1"])
 
     logger.info(f"  Testing {len(test_codecs)} encoder(s)...")
     logger.info("-" * 70)

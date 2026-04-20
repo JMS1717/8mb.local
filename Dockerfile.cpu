@@ -1,0 +1,121 @@
+# Multi-stage CPU-only 8mb.local container
+# Supports both amd64 and arm64 (Apple Silicon native via OrbStack/Docker Desktop)
+# No NVIDIA/CUDA dependencies — uses software encoders only.
+
+# Stage 1: Build FFmpeg with CPU encoders + SVT-AV1
+FROM ubuntu:22.04 AS ffmpeg-build
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    build-essential yasm nasm cmake pkg-config git wget ca-certificates \
+    libnuma-dev libx264-dev libx265-dev libvpx-dev libopus-dev \
+    libaom-dev libdav1d-dev meson ninja-build
+
+WORKDIR /build
+
+# Build SVT-AV1 from source for latest performance improvements
+# (Ubuntu 22.04 ships 0.9.0 which is very old; current releases are 20-50x faster)
+RUN git clone --depth 1 --branch v2.3.0 https://gitlab.com/AOMediaCodec/SVT-AV1.git && \
+    cd SVT-AV1 && \
+    cd Build && \
+    cmake .. -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DNATIVE=ON -DBUILD_APPS=OFF -DBUILD_DEC=OFF && \
+    make -j$(nproc) && make install && ldconfig && \
+    cd /build && rm -rf SVT-AV1
+
+# Build FFmpeg with CPU encoders (no NVENC)
+RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
+        tar xf ffmpeg-6.1.1.tar.xz && cd ffmpeg-6.1.1 && \
+                ./configure \
+      --enable-gpl \
+      --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus \
+      --enable-libaom --enable-libdav1d --enable-libsvtav1 \
+      --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages && \
+    make -j$(nproc) && make install && ldconfig && \
+    # Strip binaries to reduce size
+    strip --strip-all /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    # Clean up build artifacts
+        cd .. && rm -rf ffmpeg-6.1.1 ffmpeg-6.1.1.tar.xz /build
+
+# Stage 2: Build Frontend
+FROM node:20-alpine AS frontend-build
+
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
+
+COPY frontend/ ./
+# Build with empty backend URL (same-origin deployment)
+ENV PUBLIC_BACKEND_URL=""
+RUN npm run build && \
+    # Remove source maps and unnecessary files to reduce size
+    find build -name "*.map" -delete && \
+    find build -name "*.ts" -delete
+
+# Stage 3: Runtime with all services (CPU-only, multi-arch)
+FROM ubuntu:22.04
+
+# Build-time version (can be overridden)
+ARG BUILD_VERSION=200
+ENV APP_VERSION=${BUILD_VERSION}
+ARG BUILD_COMMIT=unknown
+ENV BUILD_COMMIT=${BUILD_COMMIT}
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev gcc supervisor redis-server \
+    libopus0 libx264-163 libx265-199 libvpx7 libnuma1 \
+    libaom3 libdav1d5 \
+    && apt-get clean && rm -rf /tmp/*
+
+# Copy FFmpeg from build stage (only what we need)
+COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg-build /usr/local/bin/ffprobe /usr/local/bin/ffprobe
+# Copy FFmpeg and SVT-AV1 libraries
+COPY --from=ffmpeg-build /usr/local/lib/ /usr/local/lib/
+RUN ldconfig
+
+WORKDIR /app
+
+# Install Python dependencies directly (Docker container = isolation; no venv needed)
+COPY requirements.txt /app/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install -r /app/requirements.txt && \
+    rm /app/requirements.txt && \
+    # Verify critical packages installed successfully
+    python3 -c "import uvicorn; import celery; print('✓ uvicorn + celery OK')"
+
+# Copy application code
+COPY backend-api/app /app/backend
+COPY worker/app /app/worker
+
+# Copy pre-built frontend
+COPY --from=frontend-build /frontend/build /app/frontend-build
+
+# Embed build metadata for runtime introspection
+RUN echo "Version: ${APP_VERSION}" > /app/VERSION && \
+    echo "Commit: ${BUILD_COMMIT}" >> /app/VERSION && \
+    echo -n "Built: " >> /app/VERSION && date -u +%FT%TZ >> /app/VERSION && \
+    echo "FFmpeg: $(ffmpeg -version | head -n1)" >> /app/VERSION && \
+    echo "Platform: $(uname -m)" >> /app/VERSION
+
+# Create necessary directories
+RUN mkdir -p /app/uploads /app/outputs /var/log/supervisor /var/lib/redis /var/log/redis
+
+# Configure supervisord
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Container entrypoint
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+EXPOSE 8001
+
+ENTRYPOINT ["/app/entrypoint.sh"]

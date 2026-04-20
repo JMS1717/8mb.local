@@ -5,7 +5,7 @@ from .config import settings
 REDIS_URL = settings.REDIS_URL
 
 celery_app = Celery(
-    "8mblocal",
+    "8mb.local",
     broker=REDIS_URL,
     backend=REDIS_URL,
 )
