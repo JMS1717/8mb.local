@@ -1,7 +1,10 @@
 # 8mb.local – Video Compressor
 
 > [!CAUTION]
-> **IMPORTANT DISCLAIMER:** This software is provided "as is" without warranty of any kind. It is a heavily modified fork of https://github.com/JMS1717/8mb.local
+> **IMPORTANT DISCLAIMER:** This software is provided "as is" without warranty of any kind.
+>
+> This is a heavily modified fork of https://github.com/JMS1717/8mb.local
+>
 > Whilst hardware support has been kept the same, with native ARM64 and MacOS support built up, outside of this scope, it has not been tested directly with Nvidia/AMD/Intel
 > Support will not be provided, as it has been purpose built to run in a Container with a native Dameon in MacOS for Hardware Accel.
 
@@ -23,6 +26,19 @@
 - **Ultra-lightweight Frontend**: Native CSS SvelteKit implementation yielding instantaneous Node compilation.
 - **Batch processing** — compress multiple files in a single operation
 - **Job history** and **Auto-download** workflows included
+
+</details>
+
+<details>
+<summary><b>📸 Screenshots</b></summary>
+<br>
+
+| | | |
+| :---: | :---: | :---: |
+| <img src="docs/media/1.png" width="250"><br>Home | <img src="docs/media/2.png" width="250"><br>Advanced | <img src="docs/media/3.png" width="250"><br>Batch |
+| <img src="docs/media/4.png" width="250"><br>Queue | <img src="docs/media/5.png" width="250"><br>History | <img src="docs/media/6.png" width="250"><br>Settings - System Options |
+| <img src="docs/media/7.png" width="250"><br>Settings - System Options | <img src="docs/media/8.png" width="250"><br>Settings - App Management | <img src="docs/media/9.png" width="250"><br>Settings - Defaults & Options |
+| <img src="docs/media/10.png" width="250"><br>Settings - Defaults & Options | <img src="docs/media/11.png" width="250"><br>Settings - Security | <img src="docs/media/12.png" width="250"><br>API |
 
 </details>
 
