@@ -4,6 +4,9 @@
   import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion, getBatchStatus, batchZipDownloadUrl } from '$lib/api';
   import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
 
+  /** Header badge default; bump with each release. API `/api/version` overrides when available. */
+  const DEFAULT_APP_VERSION = '137';
+
   let file: File | null = null;
   let uploadInput: HTMLInputElement | null = null; // reference to clear file input
   let uploadedFileName: string | null = null; // Track what file was uploaded
@@ -201,8 +204,8 @@
   function toggleSupport(){ showSupport = !showSupport; }
   function closeSupport(){ showSupport = false; }
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeSupport(); };
-  // App version (subtle badge)
-  let appVersion: string | null = null;
+  // App version (subtle badge); starts at release default, then replaced by API if different
+  let appVersion: string = DEFAULT_APP_VERSION;
 
   // Available codecs from backend
   let availableCodecs: Array<{value: string, label: string, group: string}> = [];
@@ -299,11 +302,13 @@
       encoderTests = (tests?.results || []);
     } catch {}
 
-    // Fetch app version
+    // Fetch app version (e.g. Docker ENV APP_VERSION / settings.APP_VERSION)
     try {
       const v = await getVersion();
-      appVersion = v?.version || null;
-    } catch {}
+      appVersion = (v?.version && String(v.version).trim()) || DEFAULT_APP_VERSION;
+    } catch {
+      appVersion = DEFAULT_APP_VERSION;
+    }
 
     // Load preset profiles and size buttons
     try {
