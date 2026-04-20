@@ -58,6 +58,7 @@ docker run -d \
   --gpus all \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
   -p 8001:8001 \
+  -v ./data:/app/data \
   -v ./uploads:/app/uploads \
   -v ./outputs:/app/outputs \
   xesurient/8mb.local:latest
@@ -89,6 +90,7 @@ The daemon runs natively on macOS. The Docker container will automatically bridg
 docker run -d \
   --name 8mb.local \
   -p 8001:8001 \
+  -v ./data:/app/data \
   -v ./uploads:/app/uploads \
   -v ./outputs:/app/outputs \
   xesurient/8mb.local:latest
