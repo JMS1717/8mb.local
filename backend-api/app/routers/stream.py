@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import sys
 import time
 from typing import AsyncGenerator
 
@@ -38,14 +37,15 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
                 if msg.get("type") != "message":
                     continue
                 data = msg.get("data")
-                logger.info(f"[SSE {task_id[:8]}] Received Redis message: {data[:100] if isinstance(data, str) else data}")
-                sys.stdout.flush()
+                # Per-message trace is extremely noisy (ffmpeg progress lines every ~100ms).
+                if logger.isEnabledFor(logging.DEBUG):
+                    preview = data[:120] if isinstance(data, str) else data
+                    logger.debug("[SSE %s] redis: %s", task_id[:8], preview)
                 await queue.put(str(data))
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error(f"[SSE {task_id[:8]}] pubsub error: {e}")
-            sys.stdout.flush()
+            logger.error("[SSE %s] pubsub error: %s", task_id[:8], e)
             try:
                 await queue.put(orjson.dumps({"type": "error", "message": f"[SSE] pubsub error: {e}"}).decode())
             except Exception:
@@ -65,13 +65,18 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
     reader_task = asyncio.create_task(reader())
     hb_task = asyncio.create_task(heartbeater())
     try:
-        logger.info(f"[SSE {task_id[:8]}] Stream started")
+        logger.info("[SSE %s] stream opened", task_id[:8])
         while True:
             data = await queue.get()
-            logger.info(f"[SSE {task_id[:8]}] Yielding: {data[:100] if len(data) > 100 else data}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[SSE %s] yield %s",
+                    task_id[:8],
+                    data[:120] if len(data) > 120 else data,
+                )
             yield f"data: {data}\n\n".encode()
     finally:
-        logger.info(f"[SSE {task_id[:8]}] Stream closing")
+        logger.info("[SSE %s] stream closed", task_id[:8])
         reader_task.cancel()
         hb_task.cancel()
         with contextlib.suppress(Exception):

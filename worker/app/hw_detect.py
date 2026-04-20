@@ -172,12 +172,21 @@ def map_codec_to_hw(
     """
     # CPU encoders -- honor directly
     if requested_codec in (LIBX264, LIBX265, LIBSVTAV1, LIBAOM_AV1):
-        encoder = requested_codec if requested_codec != LIBSVTAV1 else LIBAOM_AV1
+        encoder = requested_codec
         flags: list[str] = []
         if encoder == LIBX264:
             flags = ["-pix_fmt", "yuv420p", "-profile:v", "high"]
         elif encoder == LIBX265:
             flags = ["-pix_fmt", "yuv420p"]
+        elif encoder == LIBSVTAV1:
+            # SVT-AV1 requires yuv420p input; supports 10-bit but default 8-bit for size
+            flags = ["-pix_fmt", "yuv420p"]
+        elif encoder == LIBAOM_AV1:
+            flags = ["-pix_fmt", "yuv420p"]
+        logger.debug(
+            "map_codec_to_hw: CPU codec requested=%s -> encoder=%s flags=%s",
+            requested_codec, encoder, flags,
+        )
         return encoder, flags, []
 
     # Explicit NVENC selection
@@ -213,7 +222,13 @@ def map_codec_to_hw(
         flags = ["-pix_fmt", "yuv420p", "-profile:v", "high"]
     elif encoder == LIBX265:
         flags = ["-pix_fmt", "yuv420p"]
+    elif encoder in (LIBSVTAV1, LIBAOM_AV1):
+        flags = ["-pix_fmt", "yuv420p"]
 
+    logger.debug(
+        "map_codec_to_hw: resolved requested=%s base=%s encoder=%s flags=%s",
+        requested_codec, base, encoder, flags,
+    )
     return encoder, flags, []
 
 
@@ -225,7 +240,13 @@ def get_hw_info() -> Dict[str, Any]:
     """Get cached hardware info (computed once per process)."""
     global _HW_CACHE
     if _HW_CACHE is None:
+        logger.debug("get_hw_info: cache miss — running detect_hw_accel()")
         _HW_CACHE = detect_hw_accel()
+        logger.info(
+            "get_hw_info: detected type=%s device=%s encoders=%s",
+            _HW_CACHE.get("type"), _HW_CACHE.get("device"),
+            list((_HW_CACHE.get("available_encoders") or {}).keys()),
+        )
     return _HW_CACHE
 
 

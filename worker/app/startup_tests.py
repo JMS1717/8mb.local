@@ -99,7 +99,9 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
         test_file = "/tmp/test_decode.mp4"
 
         if "av1" in decoder_name.lower():
-            encoder = "libaom-av1"
+            # Prefer SVT-AV1 for the tiny test encode — ~10-50× faster than libaom
+            # at generating a few seed frames on container boot.
+            encoder = "libsvtav1" if is_encoder_available("libsvtav1") else "libaom-av1"
         elif "hevc" in decoder_name.lower() or "265" in decoder_name.lower():
             encoder = "libx265"
         else:
@@ -112,7 +114,10 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
         ]
         if encoder == "libaom-av1":
             create_cmd.extend(["-cpu-used", "8", "-row-mt", "1"])
+        elif encoder == "libsvtav1":
+            create_cmd.extend(["-preset", "12"])
         create_cmd.append(test_file)
+        logger.debug("test_decoder: seed-encode cmd = %s", " ".join(create_cmd))
         subprocess.run(create_cmd, capture_output=True, timeout=10, env=get_gpu_env())
 
         cmd = ["ffmpeg", "-hide_banner"]
@@ -283,7 +288,7 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
             "av1_nvenc": ("av1", ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]),
         }
 
-    test_codecs.extend(["libx264", "libx265", "libaom-av1"])
+    test_codecs.extend(["libx264", "libx265", "libsvtav1", "libaom-av1"])
 
     logger.info(f"  Testing {len(test_codecs)} encoder(s)...")
     logger.info("-" * 70)
@@ -293,8 +298,8 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
         try:
             actual_encoder, v_flags, init_hw_flags = map_codec_to_hw(codec, hw_info)
 
-            if actual_encoder in ("libx264", "libx265", "libaom-av1"):
-                if codec not in ("libx264", "libx265", "libaom-av1"):
+            if actual_encoder in ("libx264", "libx265", "libsvtav1", "libaom-av1"):
+                if codec not in ("libx264", "libx265", "libsvtav1", "libaom-av1"):
                     logger.info(
                         f"  [{codec:15s}] SKIPPED - Maps to CPU fallback: {actual_encoder}"
                     )

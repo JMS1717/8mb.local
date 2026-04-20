@@ -7,7 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    build-essential yasm cmake pkg-config git wget ca-certificates \
+    build-essential nasm yasm cmake pkg-config git wget ca-certificates \
     libnuma-dev libx264-dev libx265-dev libvpx-dev libopus-dev \
     libaom-dev libdav1d-dev
 
@@ -18,13 +18,25 @@ WORKDIR /build
 RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
     cd nv-codec-headers && git checkout sdk/12.1 && make install && cd ..
 
+# SVT-AV1: Ubuntu 22.04's libsvtav1 (0.9.x) is too old for FFmpeg 6.1's libsvtav1 glue
+# (e.g. EbSvtAv1EncConfiguration.force_key_frames). Build a current release from source.
+# Canonical upstream is on GitLab (the GitHub mirror has no release tags).
+# Must match FFmpeg's bundled libsvtav1.c: FFmpeg 6.1.x targets SVT-AV1 2.x API;
+# SVT 3.x changed ``svt_av1_enc_init_handle`` and breaks the build.
+ARG SVTAV1_VERSION=v2.2.1
+RUN git clone --depth 1 --branch ${SVTAV1_VERSION} https://gitlab.com/AOMediaCodec/SVT-AV1.git && \
+    cd SVT-AV1/Build && \
+    cmake .. -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    cmake --build . -j"$(nproc)" && cmake --install . && ldconfig && \
+    cd /build && rm -rf SVT-AV1
+
 # Build FFmpeg with NVIDIA NVENC + CPU encoders
 RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
         tar xf ffmpeg-6.1.1.tar.xz && cd ffmpeg-6.1.1 && \
                 ./configure \
       --enable-nonfree --enable-gpl \
       --enable-cuda-nvcc --enable-libnpp --enable-nvenc \
-      --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus --enable-libaom --enable-libdav1d \
+      --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus --enable-libaom --enable-libsvtav1 --enable-libdav1d \
       --extra-cflags=-I/usr/local/cuda/include \
       --extra-ldflags=-L/usr/local/cuda/lib64 \
       --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages && \
@@ -55,7 +67,7 @@ RUN npm run build && \
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
 # Build-time version (can be overridden)
-ARG BUILD_VERSION=136
+ARG BUILD_VERSION=137
 ENV APP_VERSION=${BUILD_VERSION}
 ARG BUILD_COMMIT=unknown
 ENV BUILD_COMMIT=${BUILD_COMMIT}
@@ -75,6 +87,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Copy FFmpeg from build stage (only what we need)
 COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg-build /usr/local/bin/ffprobe /usr/local/bin/ffprobe
+# SVT-AV1 is built from source in ffmpeg-build (not Ubuntu packages)
+COPY --from=ffmpeg-build /usr/local/lib/libSvtAv1Enc.so* /usr/local/lib/
 # Copy only FFmpeg libraries (not entire /usr/local/lib)
 COPY --from=ffmpeg-build /usr/local/lib/libavcodec.so* /usr/local/lib/
 COPY --from=ffmpeg-build /usr/local/lib/libavformat.so* /usr/local/lib/

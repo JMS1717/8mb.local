@@ -1,12 +1,16 @@
 # CPU-only stack (no GPU request) — macOS, hosts without NVIDIA Container Toolkit, or when the default compose fails.
 #   docker compose -f docker-compose.cpu.yml up -d --build
+#
+# BEFORE FIRST RUN: make sure `.env` is a FILE on the host, not a directory:
+#   cp .env.example .env     # or: touch .env
+# See the comment in docker-compose.yml for the `.env`-as-directory footgun.
 services:
   8mblocal:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "136"
+        BUILD_VERSION: "137"
     image: jms1717/8mblocal:latest
     container_name: 8mblocal
     ports:
@@ -14,7 +18,12 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
-      - ./.env:/app/.env  # optional custom settings
+      - type: bind
+        source: ./.env
+        target: /app/.env
+        bind:
+          create_host_path: false
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-4}
     restart: unless-stopped

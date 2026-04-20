@@ -8,7 +8,7 @@
   let uploadInput: HTMLInputElement | null = null; // reference to clear file input
   let uploadedFileName: string | null = null; // Track what file was uploaded
   let isAnalyzing: boolean = false; // Track analysis state for UI feedback
-  let targetMB = 25;
+  let targetMB = 9.7;
   /** 'size' = target output file size (MB); 'bitrate' = fixed video bitrate (kbps). */
   let targetMode: 'size' | 'bitrate' = 'size';
   let targetVideoKbps = 2500;
@@ -94,6 +94,8 @@
   })();
 
   $: containerNote = (container === 'mp4' && audioCodec === 'libopus' && !audioOnly) ? 'MP4 does not support Opus; audio will be encoded as AAC automatically.' : null;
+  /** NVENC exposes a separate `-tune` (HQ vs latency); CPU paths use preset only. */
+  $: nvencTuneApplies = videoCodec.endsWith('_nvenc');
   $: estimated = jobInfo ? {
     duration_s: effectiveDuration,
     total_kbps: effectiveDuration > 0
@@ -1301,14 +1303,25 @@
       {/if}
     </div>
     <div>
-      <label class="block mb-1 text-sm">Quality preset</label>
-      <select class="input w-full" bind:value={preset}>
+      <label class="block mb-1 text-sm">Encoder preset (speed ↔ quality)</label>
+      <select class="input w-full" bind:value={preset} title="Encoder effort: faster presets spend less time per frame; slower presets often look better at the same file size.">
         <option value="p1">Fast (P1)</option>
         <option value="p5">Balanced (P5)</option>
         <option value="p6">Default (P6)</option>
         <option value="p7">Best Quality (P7)</option>
-        <option value="extraquality">🌟 Extra Quality</option>
+        <option value="extraquality">Extra Quality (constant quality — CQ)</option>
       </select>
+      {#if preset === 'extraquality' && targetMode === 'bitrate'}
+        <p class="text-xs text-amber-200/95 mt-1 rounded border border-amber-700/40 bg-amber-950/35 px-2 py-1.5">
+          Extra Quality uses <strong>constant quality</strong>, which does not match <strong>fixed video bitrate</strong>. The encoder will use <strong>P6</strong> instead (same as the server log: Extra Quality is not applied in bitrate mode).
+        </p>
+      {:else if preset === 'extraquality'}
+        <p class="text-xs text-sky-100/90 mt-1 rounded border border-sky-800/50 bg-sky-950/30 px-2 py-1.5">
+          <strong>Extra Quality</strong> switches to <strong>constant quality</strong> (CRF/CQ): the output is encoded at a fixed visual-quality level, so <strong>file size is not guaranteed to match your target MB</strong> — it varies with content. Encoding is slower than P7 (e.g. NVENC <code class="text-[11px]">-cq:v</code>, x264/x265 <code class="text-[11px]">-crf</code> at veryslow-style settings).
+        </p>
+      {:else}
+        <p class="text-xs opacity-70 mt-1">How much work the encoder does per frame at your target size (or bitrate). P1–P7 aim at your target; this is independent of “NVENC tuning” in Advanced Options.</p>
+      {/if}
     </div>
   </div>
 
@@ -1353,15 +1366,27 @@
         </div>
         <div>
           <label class="block mb-1 text-sm flex items-center gap-1">
-            Tune <span class="text-[11px] opacity-70">(what to prioritize)</span>
+            NVENC tuning <span class="text-[11px] opacity-70">(NVIDIA only)</span>
           </label>
-          <select class="input w-full" bind:value={tune} title="Tune tells the encoder what to optimize for.">
-            <option value="hq">Best Quality (HQ)</option>
-            <option value="ll">Low Latency (faster)</option>
-            <option value="ull">Ultra‑Low Latency (fastest)</option>
-            <option value="lossless">Lossless (no quality loss)</option>
-          </select>
-          <p class="mt-1 text-xs opacity-70">Quality = best visuals. Low/Ultra‑low latency = faster encodes (good for screen/streams). Lossless = huge files.</p>
+          {#if nvencTuneApplies}
+            <select
+              class="input w-full"
+              bind:value={tune}
+              title="NVIDIA NVENC: HQ for normal files; low latency for screen/live; lossless ignores small size targets."
+            >
+              <option value="hq">High quality (default for files)</option>
+              <option value="ll">Low latency (screen / live)</option>
+              <option value="ull">Ultra-low latency</option>
+              <option value="lossless">Lossless (very large files)</option>
+            </select>
+            <p class="mt-1 text-xs opacity-70">
+              Separate from the P-preset above: chooses quality vs turnaround for NVENC. For typical uploads, leave on High quality.
+            </p>
+          {:else}
+            <p class="text-xs opacity-70 rounded border border-gray-700 bg-gray-900/50 px-2 py-2">
+              Not used for this codec. CPU / software encoders follow the encoder preset only (no separate NVENC tune).
+            </p>
+          {/if}
         </div>
         <div class="sm:col-span-2 lg:col-span-4">
           <label class="block mb-1 text-sm">Max frame rate</label>
@@ -1385,7 +1410,7 @@
                 <option value={p.name}>{p.name}</option>
               {/each}
             </select>
-            <p class="mt-1 text-xs opacity-70">Profiles adjust size, audio, and container. Codec and quality preset remain as chosen above.</p>
+            <p class="mt-1 text-xs opacity-70">Profiles adjust target size, audio, and container. Applying one may also load its saved encoder preset and NVENC tuning.</p>
           </div>
         </div>
       {/if}

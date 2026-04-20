@@ -69,7 +69,7 @@ class PasswordChange(BaseModel):
     new_password: str
 
 class DefaultPresets(BaseModel):
-    target_mb: float = 25
+    target_mb: float = 9.7
     video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
@@ -93,7 +93,8 @@ class CodecVisibilitySettings(BaseModel):
     # CPU
     libx264: bool = True
     libx265: bool = True
-    libaom_av1: bool = True
+    libsvtav1: bool = True
+    libaom_av1: bool = False
 
 
 class PresetProfile(BaseModel):

@@ -5,6 +5,7 @@ All routers import from here rather than reaching into ``main`` so that
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -51,42 +52,130 @@ VIDEO_EXTENSIONS: set[str] = {
 # Caches (populated lazily, invalidated only on explicit refresh)
 # ---------------------------------------------------------------------------
 HW_INFO_CACHE: dict | None = None
+HW_INFO_CACHE_TS: float = 0.0
 SYSTEM_CAPS_CACHE: dict | None = None
+
+# TTL after which get_hw_info_cached() will trigger a fresh worker probe in the
+# background. Short enough to pick up hardware changes (GPU driver reload,
+# encoder tests re-run) without hammering Celery on every hw-info request.
+HW_INFO_TTL_SECONDS: int = 60
+
+# Guard against multiple concurrent refreshes kicked off by the same burst of
+# requests. Populated lazily on the first async call so the lock attaches to
+# the running event loop.
+_hw_info_refresh_lock: asyncio.Lock | None = None
 
 
 # ---------------------------------------------------------------------------
 # Hardware info helpers
 # ---------------------------------------------------------------------------
-def get_hw_info_cached() -> dict:
-    """Return hardware info from cache or compute once via worker."""
-    global HW_INFO_CACHE
-    if HW_INFO_CACHE is not None:
-        try:
-            if isinstance(HW_INFO_CACHE, dict) and "preferred" in HW_INFO_CACHE:
-                return HW_INFO_CACHE
-            fresh = get_hw_info_fresh(timeout=2)
-            HW_INFO_CACHE = fresh or HW_INFO_CACHE
-            return HW_INFO_CACHE
-        except Exception:
-            return HW_INFO_CACHE
+def _fetch_hw_info_blocking(timeout: int = 5) -> dict:
+    """Synchronously call the Celery ``get_hardware_info`` task.
+
+    Blocks the caller for up to ``timeout`` seconds; never call this directly
+    from an async endpoint — wrap it in ``asyncio.to_thread`` or use
+    ``get_hw_info_cached_async``. Falls back to a safe default on error.
+    """
+    t0 = time.time()
     try:
+        logger.debug("hw-info: sending celery task (timeout=%ss)", timeout)
         result = celery_app.send_task("worker.worker.get_hardware_info")
-        HW_INFO_CACHE = result.get(timeout=5) or {"type": "cpu", "available_encoders": {}}
-    except Exception:
-        HW_INFO_CACHE = {"type": "cpu", "available_encoders": {}}
-    return HW_INFO_CACHE
+        info = result.get(timeout=timeout) or {"type": "cpu", "available_encoders": {}}
+        logger.debug(
+            "hw-info: celery task returned in %.2fs: type=%s encoders=%s",
+            time.time() - t0, info.get("type"), list((info.get("available_encoders") or {}).keys()),
+        )
+        return info
+    except Exception as e:
+        logger.warning("hw-info: celery task failed after %.2fs: %s", time.time() - t0, e)
+        return {"type": "cpu", "available_encoders": {}}
+
+
+def get_hw_info_cached() -> dict:
+    """Return cached hardware info, refreshing synchronously on first miss.
+
+    SAFE TO CALL FROM SYNC CONTEXTS ONLY (startup hooks, worker helpers).
+    For async endpoints prefer ``get_hw_info_cached_async`` which never blocks
+    the event loop.
+    """
+    global HW_INFO_CACHE, HW_INFO_CACHE_TS
+    now = time.time()
+    if HW_INFO_CACHE is not None and (now - HW_INFO_CACHE_TS) < HW_INFO_TTL_SECONDS:
+        logger.debug("hw-info: cache HIT (age=%.1fs)", now - HW_INFO_CACHE_TS)
+        return HW_INFO_CACHE
+
+    logger.debug(
+        "hw-info: cache MISS (have_cache=%s age=%.1fs ttl=%ss) — refreshing",
+        HW_INFO_CACHE is not None, now - HW_INFO_CACHE_TS, HW_INFO_TTL_SECONDS,
+    )
+    fresh = _fetch_hw_info_blocking(timeout=5)
+    if fresh:
+        HW_INFO_CACHE = fresh
+        HW_INFO_CACHE_TS = now
+    return HW_INFO_CACHE or {"type": "cpu", "available_encoders": {}}
+
+
+async def get_hw_info_cached_async() -> dict:
+    """Async variant — never blocks the event loop on the celery RPC.
+
+    Returns the cached value immediately if fresh. On a miss, offloads the
+    blocking celery call to a worker thread and holds a lock so N concurrent
+    requests share a single refresh.
+    """
+    global HW_INFO_CACHE, HW_INFO_CACHE_TS, _hw_info_refresh_lock
+    now = time.time()
+    if HW_INFO_CACHE is not None and (now - HW_INFO_CACHE_TS) < HW_INFO_TTL_SECONDS:
+        return HW_INFO_CACHE
+
+    if _hw_info_refresh_lock is None:
+        _hw_info_refresh_lock = asyncio.Lock()
+
+    async with _hw_info_refresh_lock:
+        # Another coroutine may have refreshed while we waited for the lock.
+        now = time.time()
+        if HW_INFO_CACHE is not None and (now - HW_INFO_CACHE_TS) < HW_INFO_TTL_SECONDS:
+            return HW_INFO_CACHE
+        logger.debug("hw-info: async refresh starting (offloading celery.get to thread)")
+        fresh = await asyncio.to_thread(_fetch_hw_info_blocking, 5)
+        if fresh:
+            HW_INFO_CACHE = fresh
+            HW_INFO_CACHE_TS = time.time()
+    return HW_INFO_CACHE or {"type": "cpu", "available_encoders": {}}
 
 
 def get_hw_info_fresh(timeout: int = 10) -> dict:
-    """Force-refresh hardware info from worker, updating cache if successful."""
-    global HW_INFO_CACHE
-    try:
-        result = celery_app.send_task("worker.worker.get_hardware_info")
-        info = result.get(timeout=timeout) or {"type": "cpu", "available_encoders": {}}
+    """Force-refresh hardware info from worker, updating cache if successful.
+
+    Synchronous helper — do not call from an async endpoint (use the async
+    variant below). Preserved for back-compat with sync callers such as the
+    startup ``sync_codec_settings_from_tests`` bootstrap loop.
+    """
+    global HW_INFO_CACHE, HW_INFO_CACHE_TS
+    info = _fetch_hw_info_blocking(timeout=timeout)
+    if info:
         HW_INFO_CACHE = info
+        HW_INFO_CACHE_TS = time.time()
         return info
-    except Exception:
-        return HW_INFO_CACHE or {"type": "cpu", "available_encoders": {}}
+    return HW_INFO_CACHE or {"type": "cpu", "available_encoders": {}}
+
+
+async def get_hw_info_fresh_async(timeout: int = 10) -> dict:
+    """Async force-refresh; offloads the Celery RPC to a worker thread."""
+    global HW_INFO_CACHE, HW_INFO_CACHE_TS
+    info = await asyncio.to_thread(_fetch_hw_info_blocking, timeout)
+    if info:
+        HW_INFO_CACHE = info
+        HW_INFO_CACHE_TS = time.time()
+        return info
+    return HW_INFO_CACHE or {"type": "cpu", "available_encoders": {}}
+
+
+def invalidate_hw_info_cache() -> None:
+    """Drop the cached hw-info so the next access performs a fresh probe."""
+    global HW_INFO_CACHE, HW_INFO_CACHE_TS
+    logger.debug("hw-info: cache invalidated")
+    HW_INFO_CACHE = None
+    HW_INFO_CACHE_TS = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -325,10 +414,12 @@ async def sync_codec_settings_from_tests(timeout_s: int = 60) -> None:
 
         from . import settings_manager as _sm
 
+        # Omit libaom_av1: visibility is user-controlled (Settings). Hardware sync
+        # should not re-enable the slow libaom-av1 path; SVT-AV1 is the default CPU AV1.
         payload: dict[str, bool] = {
             "libx264": True,
             "libx265": True,
-            "libaom_av1": True,
+            "libsvtav1": True,
             "h264_nvenc": False,
             "hevc_nvenc": False,
             "av1_nvenc": False,
@@ -405,15 +496,17 @@ def _ensure_default_preset_matches_hardware(_sm, visibility: dict[str, bool]) ->
         vis_key = current_codec
         if current_codec == 'libaom-av1':
             vis_key = 'libaom_av1'
-        if vis_key and visibility.get(vis_key, True):
+        _vis_def = False if vis_key == 'libaom_av1' else True
+        if vis_key and visibility.get(vis_key, _vis_def):
             return
 
         codec_priority = ['av1_nvenc', 'hevc_nvenc', 'h264_nvenc',
-                          'libaom_av1', 'libx265', 'libx264']
+                          'libsvtav1', 'libaom_av1', 'libx265', 'libx264']
         codec_to_vis = {'libaom-av1': 'libaom_av1'}
         for codec in codec_priority:
             vk = codec_to_vis.get(codec, codec)
-            if not visibility.get(vk, True):
+            _vk_def = False if vk == 'libaom_av1' else True
+            if not visibility.get(vk, _vk_def):
                 continue
             for p in profiles:
                 if p.get('video_codec') == codec:

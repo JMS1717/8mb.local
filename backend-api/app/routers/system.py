@@ -1,6 +1,7 @@
 """System, hardware, codec, and diagnostics route handlers."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -13,8 +14,11 @@ from ..celery_app import celery_app
 from ..config import settings
 from ..deps import (
     get_hw_info_cached,
+    get_hw_info_cached_async,
     get_hw_info_fresh,
+    get_hw_info_fresh_async,
     get_system_capabilities,
+    invalidate_hw_info_cache,
     redis,
     sync_codec_settings_from_tests,
 )
@@ -34,7 +38,7 @@ async def health():
 @router.get("/api/version")
 async def api_version():
     """Return application version baked at build time."""
-    ver = os.getenv("APP_VERSION", "136")
+    ver = os.getenv("APP_VERSION", "137")
     return {"version": ver}
 
 
@@ -63,11 +67,18 @@ async def startup_info():
 
 @router.get("/api/hardware")
 async def get_hardware_info():
-    """Get available hardware acceleration info from worker."""
+    """Get available hardware acceleration info from worker.
+
+    Uses the short-TTL cached value to avoid firing a Celery RPC on every
+    page load. Forcing a fresh probe is handled by the re-run encoder tests
+    endpoint, which calls ``invalidate_hw_info_cache`` after running.
+    """
+    logger.debug("/api/hardware called")
     try:
-        info = get_hw_info_fresh(timeout=5) or get_hw_info_cached()
-    except Exception:
-        info = get_hw_info_cached()
+        info = await get_hw_info_cached_async()
+    except Exception as e:
+        logger.warning("/api/hardware: cached lookup failed: %s", e)
+        info = {"type": "cpu", "available_encoders": {}}
 
     try:
         from worker.hw_detect import choose_best_codec
@@ -75,8 +86,9 @@ async def get_hardware_info():
         if preferred:
             info = dict(info or {})
             info["preferred"] = preferred
-    except Exception:
-        pass
+            logger.debug("/api/hardware: preferred codec = %s", preferred)
+    except Exception as e:
+        logger.debug("/api/hardware: choose_best_codec failed: %s", e)
 
     return info
 
@@ -84,8 +96,9 @@ async def get_hardware_info():
 @router.get("/api/codecs/available")
 async def get_available_codecs() -> AvailableCodecsResponse:
     """Get available codecs based on hardware detection, user settings, and encoder tests."""
+    logger.debug("/api/codecs/available called")
     try:
-        hw_info = get_hw_info_cached()
+        hw_info = await get_hw_info_cached_async()
 
         codec_settings = settings_manager.get_codec_visibility_settings()
         
@@ -96,6 +109,7 @@ async def get_available_codecs() -> AvailableCodecsResponse:
             'av1_nvenc': codec_settings.get('av1_nvenc', True),
             'libx264': codec_settings.get('libx264', True),
             'libx265': codec_settings.get('libx265', True),
+            'libsvtav1': codec_settings.get('libsvtav1', True),
             'libaom-av1': codec_settings.get('libaom_av1', True),
         }
         for codec, is_enabled in codec_map.items():
@@ -118,8 +132,8 @@ async def get_available_codecs() -> AvailableCodecsResponse:
     except Exception as e:
         return AvailableCodecsResponse(
             hardware_type="cpu",
-            available_encoders={"h264": "libx264", "hevc": "libx265", "av1": "libaom-av1"},
-            enabled_codecs=["libx264", "libx265", "libaom-av1"],
+            available_encoders={"h264": "libx264", "hevc": "libx265", "av1": "libsvtav1"},
+            enabled_codecs=["libx264", "libx265", "libsvtav1", "libaom-av1"],
         )
 
 
@@ -128,23 +142,28 @@ async def system_capabilities():
     """Return detailed system capabilities including CPU, memory, GPUs and worker HW type."""
     from .. import deps as _deps_mod
     if _deps_mod.SYSTEM_CAPS_CACHE is None:
-        caps = get_system_capabilities()
-        caps["hardware"] = get_hw_info_cached()
+        # get_system_capabilities() shells out to nvidia-smi and reads procfs;
+        # offload to a thread so we don't block the event loop on cold start.
+        caps = await asyncio.to_thread(get_system_capabilities)
+        caps["hardware"] = await get_hw_info_cached_async()
         _deps_mod.SYSTEM_CAPS_CACHE = caps
+        logger.debug("system_capabilities: cached fresh snapshot")
     return _deps_mod.SYSTEM_CAPS_CACHE
 
 
 @router.get("/api/system/encoder-tests")
 async def system_encoder_tests():
     """Return encoder startup test results and a simple summary."""
+    logger.debug("/api/system/encoder-tests called")
     try:
-        hw_info = get_hw_info_cached()
-    except Exception:
+        hw_info = await get_hw_info_cached_async()
+    except Exception as e:
+        logger.warning("encoder-tests: cached hw_info lookup failed: %s", e)
         hw_info = {"type": "cpu", "available_encoders": {}}
 
     test_codecs = [
         "h264_nvenc","hevc_nvenc","av1_nvenc",
-        "libx264","libx265","libaom-av1",
+        "libx264","libx265","libsvtav1","libaom-av1",
     ]
 
     results = []
@@ -223,15 +242,28 @@ async def system_encoder_tests():
 
 @router.post("/api/system/encoder-tests/rerun", dependencies=[Depends(basic_auth)])
 async def rerun_encoder_tests():
-    """Trigger a fresh run of encoder/decoder startup tests on the worker and return updated results."""
+    """Trigger a fresh run of encoder/decoder startup tests on the worker and return updated results.
+
+    Offloads the blocking ``task.get(timeout=90)`` to a thread so the API
+    worker's event loop remains responsive while the ~minute-long hardware
+    validation runs on the Celery worker.
+    """
+    logger.info("encoder-tests/rerun: dispatching worker.run_hardware_tests")
     try:
         task = celery_app.send_task("worker.worker.run_hardware_tests")
-        try:
-            _ = task.get(timeout=90)
-        except Exception:
-            pass
+
+        def _wait() -> None:
+            try:
+                task.get(timeout=90)
+            except Exception as e:
+                logger.warning("rerun_encoder_tests: task.get raised: %s", e)
+
+        await asyncio.to_thread(_wait)
+        invalidate_hw_info_cache()
+        logger.info("encoder-tests/rerun: completed")
         return await system_encoder_tests()
     except Exception as e:
+        logger.error("encoder-tests/rerun failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -247,10 +279,20 @@ async def sync_codecs_from_hardware():
 
 @router.get("/api/diagnostics/gpu", dependencies=[Depends(basic_auth)])
 async def gpu_diagnostics():
-    """Run basic GPU checks inside the container to validate NVIDIA and NVENC."""
+    """Run basic GPU checks inside the container to validate NVIDIA and NVENC.
+
+    All subprocess work is executed inside ``asyncio.to_thread`` so the API
+    event loop continues serving SSE progress streams while the checks run.
+    """
+    logger.debug("/api/diagnostics/gpu called")
+
     def run_cmd(cmd: list[str], timeout: int = 6):
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            logger.debug(
+                "diagnostics cmd=%s rc=%s stderr_len=%d",
+                cmd[0], p.returncode, len(p.stderr or ""),
+            )
             return {
                 "cmd": " ".join(cmd),
                 "rc": p.returncode,
@@ -263,6 +305,9 @@ async def gpu_diagnostics():
             return {"cmd": " ".join(cmd), "rc": 124, "stdout": "", "stderr": "timeout"}
         except Exception as e:
             return {"cmd": " ".join(cmd), "rc": 1, "stdout": "", "stderr": str(e)}
+
+    async def run_async(cmd: list[str], timeout: int = 6):
+        return await asyncio.to_thread(run_cmd, cmd, timeout)
 
     checks: dict = {}
 
@@ -277,16 +322,24 @@ async def gpu_diagnostics():
     except Exception:
         checks["device_files"] = []
 
-    checks["nvidia_smi_L"] = run_cmd(["nvidia-smi", "-L"], timeout=4)
-    checks["ffmpeg_hwaccels"] = run_cmd(["ffmpeg", "-hide_banner", "-hwaccels"], timeout=4)
-    checks["ffmpeg_encoders"] = run_cmd(["ffmpeg", "-hide_banner", "-encoders"], timeout=6)
-
-    nvenc_test = run_cmd([
-        "ffmpeg", "-hide_banner", "-v", "error",
-        "-f", "lavfi", "-i", "color=c=black:s=1280x720:d=0.1",
-        "-c:v", "h264_nvenc",
-        "-f", "null", "-",
-    ], timeout=8)
+    # Run the checks concurrently; each lives in a thread so they don't stall
+    # the event loop collectively.
+    (
+        checks["nvidia_smi_L"],
+        checks["ffmpeg_hwaccels"],
+        checks["ffmpeg_encoders"],
+        nvenc_test,
+    ) = await asyncio.gather(
+        run_async(["nvidia-smi", "-L"], 4),
+        run_async(["ffmpeg", "-hide_banner", "-hwaccels"], 4),
+        run_async(["ffmpeg", "-hide_banner", "-encoders"], 6),
+        run_async([
+            "ffmpeg", "-hide_banner", "-v", "error",
+            "-f", "lavfi", "-i", "color=c=black:s=1280x720:d=0.1",
+            "-c:v", "h264_nvenc",
+            "-f", "null", "-",
+        ], 8),
+    )
     checks["nvenc_smoke_test"] = nvenc_test
 
     summary = {

@@ -27,15 +27,27 @@ router = APIRouter(tags=["compress"])
 
 @router.post("/api/compress", dependencies=[Depends(basic_auth)])
 async def compress(req: CompressRequest):
+    logger.debug(
+        "compress: job_id=%s filename=%s target_mb=%s codec=%s preset=%s audio=%s/%skbps "
+        "container=%s audio_only=%s max_wh=%s/%s fps_cap=%s",
+        req.job_id, req.filename, req.target_size_mb, req.video_codec, req.preset,
+        req.audio_codec, req.audio_bitrate_kbps, req.container,
+        bool(req.audio_only), req.max_width, req.max_height, req.max_output_fps,
+    )
     input_path = UPLOADS_DIR / safe_filename(req.filename)
     if not input_path.exists():
+        logger.warning("compress: input missing: %s", input_path)
         raise HTTPException(status_code=404, detail="Input not found")
 
     task_id = str(uuid.uuid4())
 
     output_name = build_output_name(input_path, task_id, req.container, bool(req.audio_only or False))
     output_path = OUTPUTS_DIR / output_name
-    
+
+    logger.info(
+        "compress: dispatching task_id=%s codec=%s target=%sMB in=%s out=%s",
+        task_id, req.video_codec, req.target_size_mb, input_path.name, output_path.name,
+    )
     task = celery_app.send_task(
         "worker.worker.compress_video",
         task_id=task_id,
@@ -76,15 +88,18 @@ async def compress(req: CompressRequest):
 @router.post("/api/jobs/{task_id}/cancel")
 async def cancel_job(task_id: str):
     """Signal a running job to cancel and attempt to stop ffmpeg."""
+    logger.info("cancel_job: task_id=%s", task_id)
     try:
         await redis.set(f"cancel:{task_id}", "1", ex=3600)
         await redis.publish(f"progress:{task_id}", orjson.dumps({"type":"log","message":"Cancellation requested"}).decode())
         try:
             celery_app.control.revoke(task_id, terminate=True)
-        except Exception:
-            pass
+            logger.debug("cancel_job: celery revoke sent for %s", task_id)
+        except Exception as e:
+            logger.warning("cancel_job: celery revoke failed for %s: %s", task_id, e)
         return {"status": "cancellation_requested"}
     except Exception as e:
+        logger.exception("cancel_job failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

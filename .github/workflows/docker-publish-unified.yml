@@ -26,7 +26,7 @@ jobs:
         id: vars
         run: |
           # Stable application version baked into image; also keep sha tag for traceability
-          APP_VERSION=136
+          APP_VERSION=137
           echo "app_version=${APP_VERSION}" >> $GITHUB_OUTPUT
           SHA_TAG=sha-${GITHUB_SHA::7}
           echo "sha_tag=${SHA_TAG}" >> $GITHUB_OUTPUT

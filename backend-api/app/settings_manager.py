@@ -53,7 +53,8 @@ def _ensure_defaults() -> Dict[str, Any]:
             {"name": "H264 8MB (NVENC)", "target_mb": 8, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
             {"name": "HEVC 50MB HQ (NVENC)", "target_mb": 50, "video_codec": "hevc_nvenc", "audio_codec": "aac", "preset": "p7", "audio_kbps": 192, "container": "mp4", "tune": "hq"},
             {"name": "H264 25MB Fast (NVENC)", "target_mb": 25, "video_codec": "h264_nvenc", "audio_codec": "aac", "preset": "p3", "audio_kbps": 128, "container": "mp4", "tune": "ll"},
-            {"name": "AV1 8MB (CPU)", "target_mb": 8, "video_codec": "libaom-av1", "audio_codec": "libopus", "preset": "4", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
+            {"name": "AV1 9.7MB (SVT-AV1, CPU)", "target_mb": 9.7, "video_codec": "libsvtav1", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
+            {"name": "AV1 9.7MB (libaom, slow)", "target_mb": 9.7, "video_codec": "libaom-av1", "audio_codec": "libopus", "preset": "p4", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
         ]
         changed = True
     try:
@@ -84,9 +85,20 @@ def _ensure_defaults() -> Dict[str, Any]:
             'av1_nvenc': True,
             'libx264': True,
             'libx265': True,
-            'libaom_av1': True,
+            'libsvtav1': True,
+            # libaom-av1 is opt-in (slow); SVT-AV1 is the default CPU AV1 path.
+            'libaom_av1': False,
         }
         changed = True
+    else:
+        # Backfill libsvtav1 visibility for configs that pre-date SVT-AV1 support.
+        if 'libsvtav1' not in data['codec_visibility']:
+            data['codec_visibility']['libsvtav1'] = True
+            changed = True
+        # libaom was historically default-on; new default is off — only backfill when absent.
+        if 'libaom_av1' not in data['codec_visibility']:
+            data['codec_visibility']['libaom_av1'] = False
+            changed = True
     if 'retention_hours' not in data:
         env_vars = read_env_file()
         try:
@@ -331,7 +343,8 @@ def get_codec_visibility_settings() -> dict:
         'av1_nvenc': vis.get('av1_nvenc', True),
         'libx264': vis.get('libx264', True),
         'libx265': vis.get('libx265', True),
-        'libaom_av1': vis.get('libaom_av1', True),
+        'libsvtav1': vis.get('libsvtav1', True),
+        'libaom_av1': vis.get('libaom_av1', False),
     }
 
 
@@ -339,11 +352,12 @@ def update_codec_visibility_settings(settings: dict):
     """Update codec visibility in settings.json."""
     data = _ensure_defaults()
     vis = data.get('codec_visibility', {})
-    valid_keys = {'h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'libx264', 'libx265', 'libaom_av1'}
+    valid_keys = {'h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'libx264', 'libx265', 'libsvtav1', 'libaom_av1'}
     for k in valid_keys:
         if k in settings:
             vis[k] = bool(settings[k])
     data['codec_visibility'] = vis
+    logger.debug("update_codec_visibility_settings: stored=%s", vis)
     _write_settings(data)
 
 

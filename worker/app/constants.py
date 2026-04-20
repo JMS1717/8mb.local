@@ -28,7 +28,11 @@ LIBAOM_AV1 = "libaom-av1"
 # ---------------------------------------------------------------------------
 H264_PRIORITY: list[str] = [H264_NVENC, LIBX264]
 HEVC_PRIORITY: list[str] = [HEVC_NVENC, LIBX265]
-AV1_PRIORITY: list[str] = [AV1_NVENC, LIBAOM_AV1]
+# SVT-AV1 is preferred on CPU because it is 10×–50× faster than libaom-av1 at
+# comparable quality and has better rate-control for strict target-size / ABR
+# encoding (which is the core product use case).  libaom-av1 is kept as a
+# final fallback for builds that lack libsvtav1.
+AV1_PRIORITY: list[str] = [AV1_NVENC, LIBSVTAV1, LIBAOM_AV1]
 
 CODEC_PRIORITY: dict[str, list[str]] = {
     "h264": H264_PRIORITY,
@@ -42,7 +46,7 @@ CODEC_PRIORITY: dict[str, list[str]] = {
 CPU_FALLBACK: dict[str, str] = {
     H264_NVENC: LIBX264,
     HEVC_NVENC: LIBX265,
-    AV1_NVENC: LIBAOM_AV1,
+    AV1_NVENC: LIBSVTAV1,
 }
 
 # All known hardware encoder names (for quick membership checks)

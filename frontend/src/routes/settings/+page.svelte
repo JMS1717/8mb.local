@@ -18,6 +18,7 @@
 	av1_nvenc: boolean;
 	libx264: boolean;
 	libx265: boolean;
+	libsvtav1: boolean;
 	libaom_av1: boolean;
   };
 
@@ -36,7 +37,7 @@
   let confirmPassword = '';
 
   // Presets
-  let targetMB = 25;
+  let targetMB = 9.7;
   let videoCodec = 'av1_nvenc';
   let audioCodec = 'libopus';
   let preset = 'p6';
@@ -53,7 +54,8 @@
 	av1_nvenc: true,
 	libx264: true,
 	libx265: true,
-	libaom_av1: true,
+	libsvtav1: true,
+	libaom_av1: false,
   };
 
 	// New settings state
@@ -100,7 +102,8 @@
 			av1_nvenc: !!c.av1_nvenc,
 			libx264: !!c.libx264,
 			libx265: !!c.libx265,
-			libaom_av1: !!c.libaom_av1,
+			libsvtav1: c.libsvtav1 !== undefined ? !!c.libsvtav1 : true,
+			libaom_av1: c.libaom_av1 !== undefined ? !!c.libaom_av1 : false,
 		};
 	  }
 	  if (historyRes.ok) {
@@ -468,8 +471,12 @@
 	  <h3 style="color:#9ca3af; font-weight:600; font-size:15px; margin-bottom:8px">CPU (Software Encoding)</h3>
 	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
 		<div class="switch">
+		  <input id="libsvtav1" type="checkbox" bind:checked={codecSettings.libsvtav1} />
+		  <label class="label" for="libsvtav1" style="margin:0">AV1 (SVT-AV1, fast)</label>
+		</div>
+		<div class="switch">
 		  <input id="libaom_av1" type="checkbox" bind:checked={codecSettings.libaom_av1} />
-		  <label class="label" for="libaom_av1" style="margin:0">AV1 (Highest Quality)</label>
+		  <label class="label" for="libaom_av1" style="margin:0">AV1 (libaom, slow)</label>
 		</div>
 		<div class="switch">
 		  <input id="libx265" type="checkbox" bind:checked={codecSettings.libx265} />
@@ -706,7 +713,8 @@
 			<option value="h264_nvenc">H.264 (NVENC)</option>
 		  </optgroup>
 		  <optgroup label="CPU (Software)">
-			<option value="libaom-av1">AV1 (CPU)</option>
+			<option value="libsvtav1">AV1 (SVT-AV1, CPU, fast)</option>
+			<option value="libaom-av1">AV1 (libaom, CPU, slow)</option>
 			<option value="libx265">HEVC / H.265 (CPU)</option>
 			<option value="libx264">H.264 (CPU)</option>
 		  </optgroup>
@@ -724,7 +732,7 @@
 
 	<div class="row" style="margin-top:12px">
 	  <div>
-		<label class="label" for="preset">Speed / quality</label>
+		<label class="label" for="preset">Encoder preset (speed ↔ quality)</label>
 		<select id="preset" class="select" bind:value={preset}>
 		  <option value="p1">P1 (Fastest)</option>
 		  <option value="p2">P2</option>
@@ -734,6 +742,7 @@
 		  <option value="p6">P6 (Balanced)</option>
 		  <option value="p7">P7 (Best quality)</option>
 		</select>
+		<p class="label" style="margin-top:6px; font-size:12px; color:#9ca3af">How much effort the encoder spends per frame. Separate from NVENC tuning (NVIDIA only).</p>
 	  </div>
 	  <div>
 		<label class="label" for="kbps">Audio bitrate (kbps)</label>
@@ -757,13 +766,14 @@
 		</select>
 	  </div>
 	  <div>
-		<label class="label" for="tune">Tune <span style="color:#6b7280; font-size:12px">(NVENC only)</span></label>
+		<label class="label" for="tune">NVENC tuning <span style="color:#6b7280; font-size:12px">(NVIDIA only)</span></label>
 		<select id="tune" class="select" bind:value={tune}>
-		  <option value="hq">High Quality</option>
-		  <option value="ll">Low Latency</option>
-		  <option value="ull">Ultra Low Latency</option>
+		  <option value="hq">High quality (files)</option>
+		  <option value="ll">Low latency</option>
+		  <option value="ull">Ultra-low latency</option>
 		  <option value="lossless">Lossless</option>
 		</select>
+		<p class="label" style="margin-top:6px; font-size:12px; color:#9ca3af">Quality vs turnaround for NVENC; ignored when the default codec is CPU-only.</p>
 	  </div>
 	</div>
 

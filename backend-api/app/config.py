@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     HISTORY_ENABLED: bool = Field(default=True)
 
     # --- Version (baked at build time) ---
-    APP_VERSION: str = Field(default="136")
+    APP_VERSION: str = Field(default="137")
 
     # --- Logging ---
     LOG_LEVEL: str = Field(default="INFO")
@@ -62,11 +62,40 @@ def configure_logging() -> None:
 
     Call this once at application startup (before importing route modules) so
     that all ``logging.getLogger(__name__)`` calls use the desired level.
+
+    Recognised environment variables:
+      * ``LOG_LEVEL``         — root level (default ``INFO``).
+      * ``LOG_LEVEL_APP``     — override for the ``app.*`` / ``worker.*``
+                                namespace; use ``DEBUG`` to get per-request,
+                                per-job, and per-ffmpeg tracing without
+                                flooding noisy 3rd-party loggers.
+      * ``LOG_LEVEL_UVICORN`` — override for ``uvicorn.access`` (access log).
     """
     level_name = settings.LOG_LEVEL.upper()
     numeric_level = getattr(logging, level_name, logging.INFO)
     logging.basicConfig(
         level=numeric_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        # %(name)s includes the dotted logger path (e.g. app.routers.system)
+        # which makes grepping per-subsystem trivial.
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
         force=True,
+    )
+
+    app_level = os.getenv("LOG_LEVEL_APP", level_name).upper()
+    app_numeric = getattr(logging, app_level, numeric_level)
+    for ns in ("app", "worker"):
+        logging.getLogger(ns).setLevel(app_numeric)
+
+    uvicorn_level = os.getenv("LOG_LEVEL_UVICORN", "WARNING").upper()
+    uvicorn_numeric = getattr(logging, uvicorn_level, logging.WARNING)
+    logging.getLogger("uvicorn.access").setLevel(uvicorn_numeric)
+
+    # Very chatty 3rd-party loggers — quiet unless operator opts in.
+    for noisy in ("urllib3", "asyncio", "celery.redirected"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    logging.getLogger(__name__).info(
+        "logging configured: root=%s app=%s uvicorn.access=%s",
+        level_name, app_level, uvicorn_level,
     )
