@@ -1,10 +1,10 @@
 """System, hardware, codec, and diagnostics route handlers."""
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,11 +14,8 @@ from ..celery_app import celery_app
 from ..config import settings
 from ..deps import (
     get_hw_info_cached,
-    get_hw_info_cached_async,
     get_hw_info_fresh,
-    get_hw_info_fresh_async,
     get_system_capabilities,
-    invalidate_hw_info_cache,
     redis,
     sync_codec_settings_from_tests,
 )
@@ -38,7 +35,8 @@ async def health():
 @router.get("/api/version")
 async def api_version():
     """Return application version baked at build time."""
-    return {"version": settings.APP_VERSION}
+    ver = os.getenv("APP_VERSION", "136")
+    return {"version": ver}
 
 
 @router.get("/api/startup/info")
@@ -66,18 +64,11 @@ async def startup_info():
 
 @router.get("/api/hardware")
 async def get_hardware_info():
-    """Get available hardware acceleration info from worker.
-
-    Uses the short-TTL cached value to avoid firing a Celery RPC on every
-    page load. Forcing a fresh probe is handled by the re-run encoder tests
-    endpoint, which calls ``invalidate_hw_info_cache`` after running.
-    """
-    logger.debug("/api/hardware called")
+    """Get available hardware acceleration info from worker."""
     try:
-        info = await get_hw_info_cached_async()
-    except Exception as e:
-        logger.warning("/api/hardware: cached lookup failed: %s", e)
-        info = {"type": "cpu", "available_encoders": {}}
+        info = get_hw_info_fresh(timeout=5) or get_hw_info_cached()
+    except Exception:
+        info = get_hw_info_cached()
 
     try:
         from worker.hw_detect import choose_best_codec
@@ -85,9 +76,8 @@ async def get_hardware_info():
         if preferred:
             info = dict(info or {})
             info["preferred"] = preferred
-            logger.debug("/api/hardware: preferred codec = %s", preferred)
-    except Exception as e:
-        logger.debug("/api/hardware: choose_best_codec failed: %s", e)
+    except Exception:
+        pass
 
     return info
 
@@ -95,9 +85,8 @@ async def get_hardware_info():
 @router.get("/api/codecs/available")
 async def get_available_codecs() -> AvailableCodecsResponse:
     """Get available codecs based on hardware detection, user settings, and encoder tests."""
-    logger.debug("/api/codecs/available called")
     try:
-        hw_info = await get_hw_info_cached_async()
+        hw_info = get_hw_info_cached()
 
         codec_settings = settings_manager.get_codec_visibility_settings()
         
@@ -106,10 +95,15 @@ async def get_available_codecs() -> AvailableCodecsResponse:
             'h264_nvenc': codec_settings.get('h264_nvenc', True),
             'hevc_nvenc': codec_settings.get('hevc_nvenc', True),
             'av1_nvenc': codec_settings.get('av1_nvenc', True),
+            'h264_qsv': codec_settings.get('h264_qsv', True),
+            'hevc_qsv': codec_settings.get('hevc_qsv', True),
+            'av1_qsv': codec_settings.get('av1_qsv', True),
+            'h264_vaapi': codec_settings.get('h264_vaapi', True),
+            'hevc_vaapi': codec_settings.get('hevc_vaapi', True),
+            'av1_vaapi': codec_settings.get('av1_vaapi', True),
             'libx264': codec_settings.get('libx264', True),
             'libx265': codec_settings.get('libx265', True),
             'libsvtav1': codec_settings.get('libsvtav1', True),
-            'libaom-av1': codec_settings.get('libaom_av1', True),
         }
         for codec, is_enabled in codec_map.items():
             if is_enabled:
@@ -132,7 +126,7 @@ async def get_available_codecs() -> AvailableCodecsResponse:
         return AvailableCodecsResponse(
             hardware_type="cpu",
             available_encoders={"h264": "libx264", "hevc": "libx265", "av1": "libsvtav1"},
-            enabled_codecs=["libx264", "libx265", "libsvtav1", "libaom-av1"],
+            enabled_codecs=["libx264", "libx265", "libsvtav1"],
         )
 
 
@@ -141,28 +135,25 @@ async def system_capabilities():
     """Return detailed system capabilities including CPU, memory, GPUs and worker HW type."""
     from .. import deps as _deps_mod
     if _deps_mod.SYSTEM_CAPS_CACHE is None:
-        # get_system_capabilities() shells out to nvidia-smi and reads procfs;
-        # offload to a thread so we don't block the event loop on cold start.
-        caps = await asyncio.to_thread(get_system_capabilities)
-        caps["hardware"] = await get_hw_info_cached_async()
+        caps = get_system_capabilities()
+        caps["hardware"] = get_hw_info_cached()
         _deps_mod.SYSTEM_CAPS_CACHE = caps
-        logger.debug("system_capabilities: cached fresh snapshot")
     return _deps_mod.SYSTEM_CAPS_CACHE
 
 
 @router.get("/api/system/encoder-tests")
 async def system_encoder_tests():
     """Return encoder startup test results and a simple summary."""
-    logger.debug("/api/system/encoder-tests called")
     try:
-        hw_info = await get_hw_info_cached_async()
-    except Exception as e:
-        logger.warning("encoder-tests: cached hw_info lookup failed: %s", e)
+        hw_info = get_hw_info_cached()
+    except Exception:
         hw_info = {"type": "cpu", "available_encoders": {}}
 
     test_codecs = [
         "h264_nvenc","hevc_nvenc","av1_nvenc",
-        "libx264","libx265","libsvtav1","libaom-av1",
+        "h264_qsv","hevc_qsv","av1_qsv",
+        "h264_vaapi","hevc_vaapi","av1_vaapi",
+        "libx264","libx265","libsvtav1",
     ]
 
     results = []
@@ -212,7 +203,7 @@ async def system_encoder_tests():
                 "decode_message": decode_msg,
             })
             
-            is_hardware = actual_encoder.endswith("_nvenc")
+            is_hardware = actual_encoder.endswith("_nvenc") or actual_encoder.endswith("_qsv") or actual_encoder.endswith("_vaapi")
             if overall_passed and is_hardware:
                 any_hw_passed = True
 
@@ -222,6 +213,10 @@ async def system_encoder_tests():
                 return True
             if hw_type == "nvidia":
                 return c.endswith("_nvenc")
+            if hw_type == "qsv":
+                return c.endswith("_qsv") or c.endswith("_vaapi")
+            if hw_type == "vaapi":
+                return c.endswith("_vaapi")
             return False
         filtered = [r for r in results if _matches_hw(r["codec"])]
 
@@ -241,28 +236,15 @@ async def system_encoder_tests():
 
 @router.post("/api/system/encoder-tests/rerun", dependencies=[Depends(basic_auth)])
 async def rerun_encoder_tests():
-    """Trigger a fresh run of encoder/decoder startup tests on the worker and return updated results.
-
-    Offloads the blocking ``task.get(timeout=90)`` to a thread so the API
-    worker's event loop remains responsive while the ~minute-long hardware
-    validation runs on the Celery worker.
-    """
-    logger.info("encoder-tests/rerun: dispatching worker.run_hardware_tests")
+    """Trigger a fresh run of encoder/decoder startup tests on the worker and return updated results."""
     try:
         task = celery_app.send_task("worker.worker.run_hardware_tests")
-
-        def _wait() -> None:
-            try:
-                task.get(timeout=90)
-            except Exception as e:
-                logger.warning("rerun_encoder_tests: task.get raised: %s", e)
-
-        await asyncio.to_thread(_wait)
-        invalidate_hw_info_cache()
-        logger.info("encoder-tests/rerun: completed")
+        try:
+            _ = task.get(timeout=90)
+        except Exception:
+            pass
         return await system_encoder_tests()
     except Exception as e:
-        logger.error("encoder-tests/rerun failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -278,20 +260,10 @@ async def sync_codecs_from_hardware():
 
 @router.get("/api/diagnostics/gpu", dependencies=[Depends(basic_auth)])
 async def gpu_diagnostics():
-    """Run basic GPU checks inside the container to validate NVIDIA and NVENC.
-
-    All subprocess work is executed inside ``asyncio.to_thread`` so the API
-    event loop continues serving SSE progress streams while the checks run.
-    """
-    logger.debug("/api/diagnostics/gpu called")
-
+    """Run basic GPU checks inside the container to validate NVIDIA and NVENC."""
     def run_cmd(cmd: list[str], timeout: int = 6):
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-            logger.debug(
-                "diagnostics cmd=%s rc=%s stderr_len=%d",
-                cmd[0], p.returncode, len(p.stderr or ""),
-            )
             return {
                 "cmd": " ".join(cmd),
                 "rc": p.returncode,
@@ -304,9 +276,6 @@ async def gpu_diagnostics():
             return {"cmd": " ".join(cmd), "rc": 124, "stdout": "", "stderr": "timeout"}
         except Exception as e:
             return {"cmd": " ".join(cmd), "rc": 1, "stdout": "", "stderr": str(e)}
-
-    async def run_async(cmd: list[str], timeout: int = 6):
-        return await asyncio.to_thread(run_cmd, cmd, timeout)
 
     checks: dict = {}
 
@@ -321,32 +290,196 @@ async def gpu_diagnostics():
     except Exception:
         checks["device_files"] = []
 
-    # Run the checks concurrently; each lives in a thread so they don't stall
-    # the event loop collectively.
-    (
-        checks["nvidia_smi_L"],
-        checks["ffmpeg_hwaccels"],
-        checks["ffmpeg_encoders"],
-        nvenc_test,
-    ) = await asyncio.gather(
-        run_async(["nvidia-smi", "-L"], 4),
-        run_async(["ffmpeg", "-hide_banner", "-hwaccels"], 4),
-        run_async(["ffmpeg", "-hide_banner", "-encoders"], 6),
-        run_async([
-            "ffmpeg", "-hide_banner", "-v", "error",
-            "-f", "lavfi", "-i", "color=c=black:s=1280x720:d=0.1",
-            "-c:v", "h264_nvenc",
-            "-f", "null", "-",
-        ], 8),
-    )
+    checks["nvidia_smi_L"] = run_cmd(["nvidia-smi", "-L"], timeout=4)
+    checks["ffmpeg_hwaccels"] = run_cmd(["ffmpeg", "-hide_banner", "-hwaccels"], timeout=4)
+    checks["ffmpeg_encoders"] = run_cmd(["ffmpeg", "-hide_banner", "-encoders"], timeout=6)
+
+    # VAAPI diagnostics
+    checks["vainfo"] = run_cmd(["vainfo", "--display", "drm", "--device", "/dev/dri/renderD128"], timeout=6)
+    checks["dri_devices"] = run_cmd(["ls", "-la", "/dev/dri/"], timeout=2)
+
+    nvenc_test = run_cmd([
+        "ffmpeg", "-hide_banner", "-v", "error",
+        "-f", "lavfi", "-i", "color=c=black:s=1280x720:d=0.1",
+        "-c:v", "h264_nvenc",
+        "-f", "null", "-",
+    ], timeout=8)
     checks["nvenc_smoke_test"] = nvenc_test
+
+    # VAAPI smoke test
+    vaapi_test = run_cmd([
+        "ffmpeg", "-hide_banner", "-v", "error",
+        "-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128",
+        "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.1",
+        "-vf", "format=nv12|vaapi,hwupload",
+        "-c:v", "h264_vaapi", "-frames:v", "1",
+        "-f", "null", "-",
+    ], timeout=10)
+    checks["vaapi_smoke_test"] = vaapi_test
 
     summary = {
         "nvidia_device_present": any(x.get("exists") for x in checks.get("device_files", [])),
         "nvidia_smi_ok": checks["nvidia_smi_L"]["rc"] == 0 and bool(checks["nvidia_smi_L"].get("stdout")),
         "ffmpeg_sees_cuda": "cuda" in (checks["ffmpeg_hwaccels"].get("stdout", "") + checks["ffmpeg_hwaccels"].get("stderr", "")).lower(),
+        "ffmpeg_sees_vaapi": "vaapi" in (checks["ffmpeg_hwaccels"].get("stdout", "") + checks["ffmpeg_hwaccels"].get("stderr", "")).lower(),
         "ffmpeg_has_nvenc": any(tok in checks["ffmpeg_encoders"].get("stdout", "") for tok in ["h264_nvenc", "hevc_nvenc", "av1_nvenc"]),
+        "ffmpeg_has_qsv": any(tok in checks["ffmpeg_encoders"].get("stdout", "") for tok in ["h264_qsv", "hevc_qsv", "av1_qsv"]),
+        "ffmpeg_has_vaapi": any(tok in checks["ffmpeg_encoders"].get("stdout", "") for tok in ["h264_vaapi", "hevc_vaapi", "av1_vaapi"]),
         "nvenc_encode_ok": nvenc_test["rc"] == 0 and "error" not in (nvenc_test.get("stderr", "").lower()),
+        "vaapi_encode_ok": vaapi_test["rc"] == 0 and "error" not in (vaapi_test.get("stderr", "").lower()),
+        "vainfo_ok": checks["vainfo"]["rc"] == 0,
+        "dri_device_present": os.path.exists("/dev/dri/renderD128"),
     }
 
     return {"summary": summary, "checks": checks}
+
+
+# ---------------------------------------------------------------------------
+# FFmpeg Management (Jellyfin FFmpeg)
+# ---------------------------------------------------------------------------
+
+JELLYFIN_FFMPEG_DIR = "/usr/lib/jellyfin-ffmpeg"
+JELLYFIN_REPO_BASE = "https://repo.jellyfin.org/files/ffmpeg/ubuntu/latest-7.x/amd64/"
+
+
+def _get_installed_ffmpeg_version() -> dict:
+    """Get currently installed Jellyfin FFmpeg version."""
+    try:
+        # Prefer dpkg for accurate version (ffmpeg banner shows "7.1.3-Jellyfin"
+        # which the regex truncates to "7.1.3-", missing the build number like "-5")
+        dpkg_ver = None
+        try:
+            dpkg = subprocess.run(
+                ["dpkg-query", "-W", "-f", "${Version}", "jellyfin-ffmpeg7"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if dpkg.returncode == 0 and dpkg.stdout.strip():
+                # Strip distro suffix: "7.1.3-5-jammy" -> "7.1.3-5"
+                dpkg_ver = re.sub(r"-(jammy|focal|bullseye|bookworm)$", "", dpkg.stdout.strip())
+        except Exception:
+            pass
+
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True, text=True, timeout=5,
+        )
+        first_line = (result.stdout or "").split("\n")[0]
+
+        if not dpkg_ver:
+            # Fallback: parse banner, ensure trailing dash is stripped
+            m = re.search(r"version\s+([\d.\-]+[0-9])", first_line)
+            dpkg_ver = m.group(1) if m else "unknown"
+
+        return {"version": dpkg_ver, "full": first_line, "path": JELLYFIN_FFMPEG_DIR}
+    except Exception as e:
+        return {"version": "unknown", "full": str(e), "path": JELLYFIN_FFMPEG_DIR}
+
+
+def _get_latest_jellyfin_ffmpeg() -> dict:
+    """Check the Jellyfin repo for the latest FFmpeg 7.x .deb filename and version."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(JELLYFIN_REPO_BASE, headers={"User-Agent": "8mb.local/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        # Find all .deb links like jellyfin-ffmpeg7_7.1.3-5-jammy_amd64.deb
+        pattern = r'href="(jellyfin-ffmpeg7_([^"]+)-jammy_amd64\.deb)"'
+        matches = re.findall(pattern, html)
+        if not matches:
+            return {"error": "No .deb packages found on Jellyfin repo", "url": JELLYFIN_REPO_BASE}
+        # Sort by version string (last entry = latest)
+        matches.sort(key=lambda m: m[1])
+        latest_filename, latest_version = matches[-1]
+        return {
+            "version": latest_version,
+            "filename": latest_filename,
+            "url": JELLYFIN_REPO_BASE + latest_filename,
+        }
+    except Exception as e:
+        return {"error": str(e), "url": JELLYFIN_REPO_BASE}
+
+
+@router.get("/api/system/ffmpeg-version")
+async def ffmpeg_version():
+    """Return installed FFmpeg version and check for updates."""
+    installed = _get_installed_ffmpeg_version()
+    latest = _get_latest_jellyfin_ffmpeg()
+
+    update_available = False
+    if "error" not in latest and installed.get("version") != "unknown":
+        update_available = latest.get("version", "") != installed.get("version", "")
+
+    return {
+        "installed": installed,
+        "latest": latest,
+        "update_available": update_available,
+    }
+
+
+@router.post("/api/system/ffmpeg-update", dependencies=[Depends(basic_auth)])
+async def ffmpeg_update():
+    """Download and install the latest Jellyfin FFmpeg package.
+
+    This replaces the FFmpeg binaries in-place inside the running container.
+    A container restart is recommended afterwards.
+    """
+    latest = _get_latest_jellyfin_ffmpeg()
+    if "error" in latest:
+        raise HTTPException(status_code=502, detail=f"Cannot reach Jellyfin repo: {latest['error']}")
+
+    url = latest["url"]
+    deb_path = "/tmp/jellyfin-ffmpeg-update.deb"
+
+    try:
+        # Download
+        dl = subprocess.run(
+            ["wget", "-q", "-O", deb_path, url],
+            capture_output=True, text=True, timeout=120,
+        )
+        if dl.returncode != 0:
+            raise HTTPException(status_code=502, detail=f"Download failed: {dl.stderr[:500]}")
+
+        # Install
+        inst = subprocess.run(
+            ["dpkg", "-i", deb_path],
+            capture_output=True, text=True, timeout=60,
+        )
+        # Fix any missing deps
+        if inst.returncode != 0:
+            subprocess.run(
+                ["apt-get", "install", "-y", "-f"],
+                capture_output=True, text=True, timeout=60,
+            )
+
+        # Ensure symlinks are up-to-date
+        subprocess.run(
+            ["ln", "-sf", f"{JELLYFIN_FFMPEG_DIR}/ffmpeg", "/usr/local/bin/ffmpeg"],
+            capture_output=True, timeout=5,
+        )
+        subprocess.run(
+            ["ln", "-sf", f"{JELLYFIN_FFMPEG_DIR}/ffprobe", "/usr/local/bin/ffprobe"],
+            capture_output=True, timeout=5,
+        )
+
+        # Cleanup
+        try:
+            os.remove(deb_path)
+        except OSError:
+            pass
+
+        new_version = _get_installed_ffmpeg_version()
+        return {
+            "status": "success",
+            "message": f"Updated to FFmpeg {new_version['version']}. Restart recommended.",
+            "installed": new_version,
+            "restart_required": True,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        try:
+            os.remove(deb_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")

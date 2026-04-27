@@ -41,39 +41,14 @@ router = APIRouter(tags=["upload"])
 
 
 @router.post("/api/upload", response_model=UploadResponse, dependencies=[Depends(basic_auth)])
-async def upload(file: UploadFile = File(...), target_size_mb: float = 9.7, audio_bitrate_kbps: int = 128):
+async def upload(file: UploadFile = File(...), target_size_mb: float = 25.0, audio_bitrate_kbps: int = 128):
     job_id = str(uuid.uuid4())
     safe_name = safe_filename(file.filename)
     dest = UPLOADS_DIR / f"{job_id}_{safe_name}"
-    logger.info(
-        "upload: job_id=%s filename=%r size=%s bytes target_mb=%s audio_kbps=%s",
-        job_id, file.filename,
-        getattr(getattr(file, "file", None), "tell", lambda: "?")()
-        if hasattr(file, "file") else "?",
-        target_size_mb, audio_bitrate_kbps,
-    )
     await save_upload_file(file, dest)
-
-    try:
-        saved_bytes = dest.stat().st_size
-    except OSError:
-        saved_bytes = -1
-    logger.debug("upload: saved %s (%d bytes) — probing with ffprobe", dest.name, saved_bytes)
-
+    
     info = ffprobe(dest)
-    logger.debug(
-        "upload: ffprobe job_id=%s duration=%.2fs %sx%s v_kbps=%s a_kbps=%s fps=%s",
-        job_id, info.get("duration", 0.0),
-        info.get("width"), info.get("height"),
-        info.get("video_bitrate_kbps"), info.get("audio_bitrate_kbps"),
-        info.get("video_fps"),
-    )
     total_kbps, video_kbps, warn = calc_bitrates(target_size_mb, info["duration"], audio_bitrate_kbps)
-    if warn:
-        logger.warning(
-            "upload: low-quality warning for job_id=%s target_mb=%s duration=%.2fs -> total=%.1fkbps video=%.1fkbps",
-            job_id, target_size_mb, info["duration"], total_kbps, video_kbps,
-        )
     return UploadResponse(
         job_id=job_id,
         filename=dest.name,
@@ -92,7 +67,7 @@ async def upload(file: UploadFile = File(...), target_size_mb: float = 9.7, audi
 @router.post("/api/batches/upload", response_model=BatchCreateResponse, dependencies=[Depends(basic_auth)])
 async def upload_batch(
     files: list[UploadFile] = File(...),
-    target_size_mb: float = Form(9.7),
+    target_size_mb: float = Form(25.0),
     video_codec: str = Form("av1_nvenc"),
     audio_codec: str = Form("libopus"),
     audio_bitrate_kbps: int = Form(128),

@@ -13,16 +13,19 @@
 	tune: string;
   };
   type CodecVisibilitySettings = {
-	h264_nvenc: boolean;
-	hevc_nvenc: boolean;
-	av1_nvenc: boolean;
-	libx264: boolean;
-	libx265: boolean;
-	libsvtav1: boolean;
-	libaom_av1: boolean;
-  };
-
-  let saving = false;
+        h264_nvenc: boolean;
+        hevc_nvenc: boolean;
+        av1_nvenc: boolean;
+        h264_qsv: boolean;
+        hevc_qsv: boolean;
+        av1_qsv: boolean;
+        h264_vaapi: boolean;
+        hevc_vaapi: boolean;
+        av1_vaapi: boolean;
+        libx264: boolean;
+        libx265: boolean;
+        libsvtav1: boolean;
+  };  let saving = false;
   let message = '';
   let error = '';
 	// History toggle
@@ -37,7 +40,7 @@
   let confirmPassword = '';
 
   // Presets
-  let targetMB = 9.7;
+  let targetMB = 25;
   let videoCodec = 'av1_nvenc';
   let audioCodec = 'libopus';
   let preset = 'p6';
@@ -49,16 +52,19 @@
 
   // Codec visibility - individual codecs
   let codecSettings: CodecVisibilitySettings = {
-	h264_nvenc: true,
-	hevc_nvenc: true,
-	av1_nvenc: true,
-	libx264: true,
-	libx265: true,
-	libsvtav1: true,
-	libaom_av1: false,
-  };
-
-	// New settings state
+        h264_nvenc: true,
+        hevc_nvenc: true,
+        av1_nvenc: true,
+        h264_qsv: true,
+        hevc_qsv: true,
+        av1_qsv: true,
+        h264_vaapi: true,
+        hevc_vaapi: true,
+        av1_vaapi: true,
+        libx264: true,
+        libx265: true,
+        libsvtav1: true,
+  };	// New settings state
 	let sizeButtons: number[] = [];
 	let newSizeValue: number | null = null;
 	let presetProfiles: any[] = [];
@@ -66,12 +72,19 @@
 	let newPresetName: string = '';
 	let retentionHours: number = 1;
 	let workerConcurrency: number = 4;
-	  // Hardware tests state
-	  let hwTests: Array<any> = [];
-	  let hwTestsLoading: boolean = false;
-	  let hwTestsError: string = '';
+          // Hardware tests state
+          let hwTests: Array<any> = [];
+          let hwTestsLoading: boolean = false;
+          let hwTestsError: string = '';
 
-	  onMount(async () => {
+          // FFmpeg management state
+          let ffmpegInstalled: string = '';
+          let ffmpegLatest: string = '';
+          let ffmpegUpdateAvailable: boolean = false;
+          let ffmpegChecking: boolean = false;
+          let ffmpegUpdating: boolean = false;
+          let ffmpegError: string = '';
+          let ffmpegRestartRequired: boolean = false;	  onMount(async () => {
 	try {
 			  const [authRes, presetsRes, codecsRes, historyRes] = await Promise.all([
 		fetch('/api/settings/auth'),
@@ -101,9 +114,14 @@
 			hevc_nvenc: !!c.hevc_nvenc,
 			av1_nvenc: !!c.av1_nvenc,
 			libx264: !!c.libx264,
+			h264_qsv: !!c.h264_qsv,
+			hevc_qsv: !!c.hevc_qsv,
+			av1_qsv: !!c.av1_qsv,
+			h264_vaapi: !!c.h264_vaapi,
+			hevc_vaapi: !!c.hevc_vaapi,
+			av1_vaapi: !!c.av1_vaapi,
 			libx265: !!c.libx265,
-			libsvtav1: c.libsvtav1 !== undefined ? !!c.libsvtav1 : true,
-			libaom_av1: c.libaom_av1 !== undefined ? !!c.libaom_av1 : false,
+			libsvtav1: !!c.libsvtav1,
 		};
 	  }
 	  if (historyRes.ok) {
@@ -128,16 +146,25 @@
 		if (wc.ok) { const js = await wc.json(); workerConcurrency = js.concurrency ?? 4; }
 	  } catch {}
 
-			// Load initial hardware test results (best-effort)
-			try {
-				const t = await fetch('/api/system/encoder-tests');
-				if (t.ok) {
-					const js = await t.json();
-					hwTests = js.results || [];
-				}
-			} catch {}
+                        // Load initial hardware test results (best-effort)
+                        try {
+                                const t = await fetch('/api/system/encoder-tests');
+                                if (t.ok) {
+                                        const js = await t.json();
+                                        hwTests = js.results || [];
+                                }
+                        } catch {}
 
-      // Startup info for first-boot banner
+                        // Load FFmpeg version info
+                        try {
+                                const f = await fetch('/api/system/ffmpeg-version');
+                                if (f.ok) {
+                                        const js = await f.json();
+                                        ffmpegInstalled = js.installed?.version || 'unknown';
+                                        ffmpegLatest = js.latest?.version || 'unknown';
+                                        ffmpegUpdateAvailable = !!js.update_available;
+                                }
+                        } catch {}      // Startup info for first-boot banner
       try {
         const si = await fetch('/api/startup/info');
         if (si.ok) {
@@ -156,27 +183,74 @@
 	}
   });
 
-	async function rerunHardwareTests(){
-		hwTestsError = '';
-		hwTestsLoading = true;
-		try {
-			const res = await fetch('/api/system/encoder-tests/rerun', { method: 'POST' });
-			if (res.ok) {
-				const js = await res.json();
-				hwTests = js.results || [];
-				message = 'Hardware tests re-ran successfully';
-			} else {
-				const d = await res.json().catch(()=>({}));
-				hwTestsError = d.detail || 'Failed to re-run hardware tests';
-			}
-		} catch (e) {
-			hwTestsError = 'Failed to re-run hardware tests';
-		} finally {
-			hwTestsLoading = false;
-		}
-	}
+        async function rerunHardwareTests(){
+                hwTestsError = '';
+                hwTestsLoading = true;
+                try {
+                        const res = await fetch('/api/system/encoder-tests/rerun', { method: 'POST' });
+                        if (res.ok) {
+                                const js = await res.json();
+                                hwTests = js.results || [];
+                                message = 'Hardware tests re-ran successfully';
+                        } else {
+                                const d = await res.json().catch(()=>({}));
+                                hwTestsError = d.detail || 'Failed to re-run hardware tests';
+                        }
+                } catch (e) {
+                        hwTestsError = 'Failed to re-run hardware tests';
+                } finally {
+                        hwTestsLoading = false;
+                }
+        }
 
-  async function saveAuth() {
+        async function checkFfmpegUpdate() {
+                ffmpegError = '';
+                ffmpegChecking = true;
+                try {
+                        const res = await fetch('/api/system/ffmpeg-version');
+                        if (res.ok) {
+                                const js = await res.json();
+                                ffmpegInstalled = js.installed?.version || 'unknown';
+                                ffmpegLatest = js.latest?.version || 'unknown';
+                                ffmpegUpdateAvailable = !!js.update_available;
+                                if (js.latest?.error) {
+                                        ffmpegError = js.latest.error;
+                                } else if (!ffmpegUpdateAvailable) {
+                                        message = 'FFmpeg is up to date';
+                                } else {
+                                        message = `FFmpeg update available: ${ffmpegLatest}`;
+                                }
+                        } else {
+                                ffmpegError = 'Failed to check FFmpeg version';
+                        }
+                } catch {
+                        ffmpegError = 'Failed to check FFmpeg version';
+                } finally {
+                        ffmpegChecking = false;
+                }
+        }
+
+        async function updateFfmpeg() {
+                ffmpegError = '';
+                ffmpegUpdating = true;
+                try {
+                        const res = await fetch('/api/system/ffmpeg-update', { method: 'POST' });
+                        if (res.ok) {
+                                const js = await res.json();
+                                ffmpegInstalled = js.installed?.version || ffmpegInstalled;
+                                ffmpegUpdateAvailable = false;
+                                ffmpegRestartRequired = !!js.restart_required;
+                                message = js.message || 'FFmpeg updated successfully';
+                        } else {
+                                const d = await res.json().catch(() => ({}));
+                                ffmpegError = d.detail || 'Failed to update FFmpeg';
+                        }
+                } catch {
+                        ffmpegError = 'Failed to update FFmpeg';
+                } finally {
+                        ffmpegUpdating = false;
+                }
+        }  async function saveAuth() {
 	error = '';
 	message = '';
 	if (authEnabled && !username.trim()) {
@@ -443,8 +517,8 @@
   <div class="card">
 	<div class="title">Available Codecs</div>
 	<p class="label" style="margin-bottom:16px; color:#9ca3af">
-	  Select which codecs appear in the compression page dropdown. GPU options use NVIDIA NVENC; software options use the CPU.
-	  <a href="/gpu-support" style="color:#3b82f6; text-decoration:underline">View NVIDIA encoding support →</a>
+	  Select which codecs appear in the compression page dropdown. GPU options use NVIDIA NVENC, Intel QSV, or VAAPI; software options use the CPU.
+	  <a href="/gpu-support" style="color:#3b82f6; text-decoration:underline">View hardware encoding support →</a>
 	</p>
 
 	<!-- NVIDIA Section -->
@@ -466,17 +540,51 @@
 	  </div>
 	</div>
 
+
+        <!-- Intel QSV Section -->
+        <div style="margin-bottom:20px">
+          <h3 style="color:#60a5fa; font-weight:600; font-size:15px; margin-bottom:8px">Intel QSV (via VAAPI)</h3>
+          <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
+                <div class="switch">
+                  <input id="av1_qsv" type="checkbox" bind:checked={codecSettings.av1_qsv} />
+                  <label class="label" for="av1_qsv" style="margin:0">AV1 (Arc, 12th Gen+)</label>
+                </div>
+                <div class="switch">
+                  <input id="hevc_qsv" type="checkbox" bind:checked={codecSettings.hevc_qsv} />
+                  <label class="label" for="hevc_qsv" style="margin:0">HEVC (H.265)</label>
+                </div>
+                <div class="switch">
+                  <input id="h264_qsv" type="checkbox" bind:checked={codecSettings.h264_qsv} />
+                  <label class="label" for="h264_qsv" style="margin:0">H.264</label>
+                </div>
+          </div>
+        </div>
+
+        <!-- VAAPI Section -->
+        <div style="margin-bottom:20px">
+          <h3 style="color:#f59e0b; font-weight:600; font-size:15px; margin-bottom:8px">VAAPI (Intel / AMD)</h3>
+          <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
+                <div class="switch">
+                  <input id="av1_vaapi" type="checkbox" bind:checked={codecSettings.av1_vaapi} />
+                  <label class="label" for="av1_vaapi" style="margin:0">AV1</label>
+                </div>
+                <div class="switch">
+                  <input id="hevc_vaapi" type="checkbox" bind:checked={codecSettings.hevc_vaapi} />
+                  <label class="label" for="hevc_vaapi" style="margin:0">HEVC (H.265)</label>
+                </div>
+                <div class="switch">
+                  <input id="h264_vaapi" type="checkbox" bind:checked={codecSettings.h264_vaapi} />
+                  <label class="label" for="h264_vaapi" style="margin:0">H.264</label>
+                </div>
+          </div>
+        </div>
 	<!-- CPU Section -->
 	<div style="margin-bottom:20px">
 	  <h3 style="color:#9ca3af; font-weight:600; font-size:15px; margin-bottom:8px">CPU (Software Encoding)</h3>
 	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
 		<div class="switch">
 		  <input id="libsvtav1" type="checkbox" bind:checked={codecSettings.libsvtav1} />
-		  <label class="label" for="libsvtav1" style="margin:0">AV1 (SVT-AV1, fast)</label>
-		</div>
-		<div class="switch">
-		  <input id="libaom_av1" type="checkbox" bind:checked={codecSettings.libaom_av1} />
-		  <label class="label" for="libaom_av1" style="margin:0">AV1 (libaom, slow)</label>
+		  <label class="label" for="libsvtav1" style="margin:0">AV1 (SVT-AV1)</label>
 		</div>
 		<div class="switch">
 		  <input id="libx265" type="checkbox" bind:checked={codecSettings.libx265} />
@@ -493,6 +601,47 @@
 	  <button class="btn" on:click={saveCodecs} disabled={saving}>{saving ? 'Saving…' : 'Save codec settings'}</button>
 	</div>
   </div>
+
+	<!-- FFmpeg Management -->
+	<div class="card">
+		<div class="title">🎬 FFmpeg Management</div>
+		<p class="label" style="margin-bottom:12px; color:#9ca3af">
+			Powered by <a href="https://jellyfin.org" target="_blank" rel="noopener noreferrer" style="color:#3b82f6; text-decoration:underline">Jellyfin FFmpeg</a>.
+			Check for updates and install new versions without rebuilding the container.
+		</p>
+
+		{#if ffmpegError}
+			<div class="msg err">{ffmpegError}</div>
+		{/if}
+
+		{#if ffmpegRestartRequired}
+			<div class="banner" style="background:rgba(245,158,11,.12); border-color:#f59e0b; color:#fde68a">
+				<div>⚠️ FFmpeg updated. Restart the container to apply changes.</div>
+			</div>
+		{/if}
+
+		<div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:16px">
+			<div style="background:#1f2937; border:1px solid #374151; border-radius:8px; padding:12px">
+				<div style="font-size:12px; color:#9ca3af; margin-bottom:4px">Installed Version</div>
+				<div style="font-size:16px; font-weight:600; color:#e5e7eb">{ffmpegInstalled || '—'}</div>
+			</div>
+			<div style="background:#1f2937; border:1px solid #374151; border-radius:8px; padding:12px">
+				<div style="font-size:12px; color:#9ca3af; margin-bottom:4px">Latest Available</div>
+				<div style="font-size:16px; font-weight:600; color:{ffmpegUpdateAvailable ? '#f59e0b' : '#10b981'}">{ffmpegLatest || '—'}</div>
+			</div>
+		</div>
+
+		<div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
+			<button class="btn" style="background:#374151" on:click={checkFfmpegUpdate} disabled={ffmpegChecking || ffmpegUpdating}>
+				{ffmpegChecking ? 'Checking…' : 'Check for updates'}
+			</button>
+			{#if ffmpegUpdateAvailable}
+				<button class="btn" style="background:#f59e0b; color:#000" on:click={updateFfmpeg} disabled={ffmpegUpdating}>
+					{ffmpegUpdating ? 'Updating…' : `Update to ${ffmpegLatest}`}
+				</button>
+			{/if}
+		</div>
+	</div>
 
 	<!-- Hardware Tests -->
 	<div class="card">
@@ -712,9 +861,18 @@
 			<option value="hevc_nvenc">HEVC / H.265 (NVENC)</option>
 			<option value="h264_nvenc">H.264 (NVENC)</option>
 		  </optgroup>
+                  <optgroup label="Intel QSV (Hardware)">
+                        <option value="av1_qsv">AV1 (QSV)</option>
+                        <option value="hevc_qsv">HEVC / H.265 (QSV)</option>
+                        <option value="h264_qsv">H.264 (QSV)</option>
+                  </optgroup>
+                  <optgroup label="VAAPI (Intel / AMD)">
+                        <option value="av1_vaapi">AV1 (VAAPI)</option>
+                        <option value="hevc_vaapi">HEVC / H.265 (VAAPI)</option>
+                        <option value="h264_vaapi">H.264 (VAAPI)</option>
+                  </optgroup>
 		  <optgroup label="CPU (Software)">
-			<option value="libsvtav1">AV1 (SVT-AV1, CPU, fast)</option>
-			<option value="libaom-av1">AV1 (libaom, CPU, slow)</option>
+			<option value="libsvtav1">AV1 (CPU)</option>
 			<option value="libx265">HEVC / H.265 (CPU)</option>
 			<option value="libx264">H.264 (CPU)</option>
 		  </optgroup>
@@ -725,6 +883,8 @@
 		<select id="acodec" class="select" bind:value={audioCodec}>
 		  <option value="libopus">Opus</option>
 		  <option value="aac">AAC</option>
+              <option value="eac3">EAC3 (Dolby Digital+)</option>
+              <option value="eac3">EAC3 (Dolby Digital+)</option>
 		  <option value="none">No audio</option>
 		</select>
 	  </div>
@@ -732,7 +892,7 @@
 
 	<div class="row" style="margin-top:12px">
 	  <div>
-		<label class="label" for="preset">Encoder preset (speed ↔ quality)</label>
+		<label class="label" for="preset">Speed / quality</label>
 		<select id="preset" class="select" bind:value={preset}>
 		  <option value="p1">P1 (Fastest)</option>
 		  <option value="p2">P2</option>
@@ -742,7 +902,6 @@
 		  <option value="p6">P6 (Balanced)</option>
 		  <option value="p7">P7 (Best quality)</option>
 		</select>
-		<p class="label" style="margin-top:6px; font-size:12px; color:#9ca3af">How much effort the encoder spends per frame. Separate from NVENC tuning (NVIDIA only).</p>
 	  </div>
 	  <div>
 		<label class="label" for="kbps">Audio bitrate (kbps)</label>
@@ -766,14 +925,13 @@
 		</select>
 	  </div>
 	  <div>
-		<label class="label" for="tune">NVENC tuning <span style="color:#6b7280; font-size:12px">(NVIDIA only)</span></label>
+		<label class="label" for="tune">Tune <span style="color:#6b7280; font-size:12px">(NVENC only)</span></label>
 		<select id="tune" class="select" bind:value={tune}>
-		  <option value="hq">High quality (files)</option>
-		  <option value="ll">Low latency</option>
-		  <option value="ull">Ultra-low latency</option>
+		  <option value="hq">High Quality</option>
+		  <option value="ll">Low Latency</option>
+		  <option value="ull">Ultra Low Latency</option>
 		  <option value="lossless">Lossless</option>
 		</select>
-		<p class="label" style="margin-top:6px; font-size:12px; color:#9ca3af">Quality vs turnaround for NVENC; ignored when the default codec is CPU-only.</p>
 	  </div>
 	</div>
 

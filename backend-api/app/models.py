@@ -20,8 +20,8 @@ class CompressRequest(BaseModel):
     target_size_mb: float
     # When set (>0), worker uses this video bitrate (kbps) instead of deriving from target_size_mb.
     target_video_bitrate_kbps: Optional[float] = Field(default=None, ge=0, le=2_000_000)
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
-    audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
+    audio_codec: Literal['libopus','aac','eac3','none'] = 'libopus'  # Added 'none' for mute
     audio_bitrate_kbps: int = 128
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
     container: Literal['mp4','mkv'] = 'mp4'
@@ -69,9 +69,9 @@ class PasswordChange(BaseModel):
     new_password: str
 
 class DefaultPresets(BaseModel):
-    target_mb: float = 9.7
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
-    audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
+    target_mb: float = 25
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
+    audio_codec: Literal['libopus','aac','eac3','none'] = 'libopus'  # Added 'none' for mute
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
     audio_kbps: Literal[64,96,128,160,192,256] = 128
     container: Literal['mp4','mkv'] = 'mp4'
@@ -80,7 +80,7 @@ class DefaultPresets(BaseModel):
 
 class AvailableCodecsResponse(BaseModel):
     """Response containing hardware-detected codecs and user-enabled codecs."""
-    hardware_type: str  # nvidia, cpu
+    hardware_type: str  # nvidia, qsv, vaapi, cpu
     available_encoders: dict  # {h264: "h264_nvenc", ...}
     enabled_codecs: list[str]  # ["h264_nvenc", "hevc_nvenc", ...]
     
@@ -90,18 +90,25 @@ class CodecVisibilitySettings(BaseModel):
     h264_nvenc: bool = True
     hevc_nvenc: bool = True
     av1_nvenc: bool = True
+    # Intel QSV (via VAAPI backend)
+    h264_qsv: bool = True
+    hevc_qsv: bool = True
+    av1_qsv: bool = True
+    # VAAPI (Intel iGPU, AMD)
+    h264_vaapi: bool = True
+    hevc_vaapi: bool = True
+    av1_vaapi: bool = True
     # CPU
     libx264: bool = True
     libx265: bool = True
     libsvtav1: bool = True
-    libaom_av1: bool = False
 
 
 class PresetProfile(BaseModel):
     name: str
     target_mb: float
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1']
-    audio_codec: Literal['libopus','aac','none']
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','libx264','libx265','libsvtav1','libaom-av1']
+    audio_codec: Literal['libopus','aac','eac3','none']
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality']
     audio_kbps: Literal[64,96,128,160,192,256]
     container: Literal['mp4','mkv']

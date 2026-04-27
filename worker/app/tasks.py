@@ -3,11 +3,8 @@ from __future__ import annotations
 import json
 import math
 import os
-import queue
 import shlex
-import signal
 import subprocess
-import threading
 import time
 import logging
 import sys
@@ -16,10 +13,6 @@ from typing import Dict, Optional
 from redis import Redis
 
 from .celery_app import celery_app
-from .constants import (
-    CPU_FALLBACK, CPU_ENCODERS, HW_ENCODERS,
-    LIBAOM_AV1, LIBSVTAV1, LIBX264, LIBX265,
-)
 from .utils import ffprobe_info, calc_bitrates
 from .auto_resolution import choose_auto_resolution
 from .hw_detect import get_hw_info, map_codec_to_hw, choose_best_codec
@@ -31,9 +24,8 @@ logger = logging.getLogger(__name__)
 REDIS = None
 # Cache encoder test results to avoid slow init tests on every job
 ENCODER_TEST_CACHE: Dict[str, bool] = {}
-
 # libsvtav1: SVT-AV1 uses LevelOfParallelism ``lp`` in ``-svtav1-params`` (indexed 0..6, not
-# “number of cores”). ``lp=0`` auto-picks a level and often leaves CPU partly idle on
+# "number of cores"). ``lp=0`` auto-picks a level and often leaves CPU partly idle on
 # high-core hosts; ``lp=6`` is the maximum parallelism level the library exposes.
 SVTAV1_PARAMS_MAX_LP = ["-svtav1-params", "lp=6"]
 
@@ -42,12 +34,11 @@ def _cpu_fallback_for(encoder: str) -> tuple[str, list[str]]:
     """Return (cpu_encoder, v_flags) to use when a hardware encoder fails.
 
     Uses CPU_FALLBACK from constants so AV1 falls back to SVT-AV1 (fast) rather
-    than libaom-av1 (10-50× slower). Callers can override if libsvtav1 is not
-    present in the ffmpeg build.
+    than libaom-av1 (10-50x slower).
     """
+    from .constants import CPU_FALLBACK, LIBSVTAV1, LIBX264, LIBX265
     fb = CPU_FALLBACK.get(encoder)
     if fb is None:
-        # Bare codec name fallbacks
         if "h264" in encoder:
             fb = LIBX264
         elif "hevc" in encoder or "h265" in encoder:
@@ -62,6 +53,24 @@ def _cpu_fallback_for(encoder: str) -> tuple[str, list[str]]:
         flags = ["-pix_fmt", "yuv420p"]
     logger.debug("_cpu_fallback_for(%s) -> (%s, %s)", encoder, fb, flags)
     return fb, flags
+
+
+def _force_stop_ffmpeg(proc: subprocess.Popen) -> None:
+    """Hard-stop ffmpeg. libsvtav1 can keep CPU busy until SIGKILL."""
+    if proc.poll() is not None:
+        return
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    if sys.platform != "win32" and proc.pid:
+        import signal as _sig
+        try:
+            os.killpg(os.getpgid(proc.pid), _sig.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+
+
 
 
 def get_gpu_env():
@@ -107,23 +116,6 @@ def _is_cancelled(task_id: str) -> bool:
         return False
 
 
-def _force_stop_ffmpeg(proc: subprocess.Popen) -> None:
-    """Hard-stop ffmpeg. libsvtav1 can keep CPU busy until SIGKILL if we only SIGTERM
-    from a loop that was blocked on stderr; also kill the process group on POSIX when
-    start_new_session was used."""
-    if proc.poll() is not None:
-        return
-    try:
-        proc.kill()
-    except Exception:
-        pass
-    if sys.platform != "win32" and proc.pid:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, OSError):
-            pass
-
-
 @celery_app.task(name="worker.worker.get_hardware_info")
 def get_hardware_info_task():
     """Return hardware acceleration info for the frontend."""
@@ -166,37 +158,15 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                    target_resolution: int | None = None, audio_only: bool = False,
                    target_video_bitrate_kbps: float | None = None,
                    max_output_fps: float | None = None):
-    logger.info(
-        "compress_video START task_id=%s job_id=%s codec=%s target_mb=%s preset=%s tune=%s "
-        "audio=%s@%skbps container=%s audio_only=%s auto_res=%s max_wh=%s/%s "
-        "target_res=%s fps_cap=%s force_hw_decode=%s fast_finalize=%s input=%s",
-        self.request.id, job_id, video_codec, target_size_mb, preset, tune,
-        audio_codec, audio_bitrate_kbps,
-        Path(output_path).suffix.lstrip("."), audio_only, auto_resolution,
-        max_width, max_height, target_resolution, max_output_fps,
-        force_hw_decode, fast_mp4_finalize, input_path,
-    )
-
     # Detect hardware acceleration
     _publish(self.request.id, {"type": "log", "message": "Initializing: detecting hardware…"})
     hw_info = get_hw_info()
-    logger.debug(
-        "compress_video hw_info: type=%s device=%s encoders=%s",
-        hw_info.get("type"), hw_info.get("device"),
-        list((hw_info.get("available_encoders") or {}).keys()),
-    )
     _publish(self.request.id, {"type": "log", "message": f"Hardware: {hw_info['type'].upper()} acceleration detected"})
     
     # Probe
     _publish(self.request.id, {"type": "log", "message": "Initializing: probing input file…"})
     info = ffprobe_info(input_path)
     duration = info.get("duration", 0.0)
-    logger.debug(
-        "compress_video ffprobe: duration=%.2fs %sx%s v_kbps=%s a_kbps=%s fps=%s rotation=%s",
-        duration, info.get("width"), info.get("height"),
-        info.get("video_bitrate_kbps"), info.get("audio_bitrate_kbps"),
-        info.get("video_fps"), info.get("rotation_degrees"),
-    )
     bitrate_mode = target_video_bitrate_kbps is not None and float(target_video_bitrate_kbps) > 0
     if bitrate_mode:
         video_kbps = float(target_video_bitrate_kbps)
@@ -221,22 +191,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             "Using software decode so FFmpeg can apply display orientation (GPU decode ignores this metadata)."
         )})
 
-    # Bitrate controls (VBV peak / buffer — x264-style multipliers)
+    # Bitrate controls
     maxrate = int(video_kbps * 1.2)
     bufsize = int(video_kbps * 2)
-
-    def abr_rate_control_args(enc: str) -> list[str]:
-        """Build rate-control + VBV args for target-bitrate encodes.
-
-        **libsvtav1:** SVT caps need CRF for maxrate; use ``-b:v`` only.
-
-        **NVENC / x264 / x265:** classic VBV-style **1.2×** peak and **2×** buffer vs average video kbps.
-        """
-        vb = int(video_kbps)
-        bvk = f"{vb}k"
-        if enc == LIBSVTAV1:
-            return ["-b:v", bvk]
-        return ["-b:v", bvk, "-maxrate", f"{maxrate}k", "-bufsize", f"{bufsize}k"]
 
     # Map requested codec to actual encoder and flags
     actual_encoder, v_flags, init_hw_flags = map_codec_to_hw(video_codec, hw_info)
@@ -244,14 +201,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Fallback to CPU only if startup tests explicitly marked encoder as unavailable.
     # If cache is empty (tests still running in background), attempt hardware and rely on runtime fallback below.
     original_encoder = actual_encoder
-    if actual_encoder not in CPU_ENCODERS:
+    if actual_encoder not in ("libx264", "libx265", "libaom-av1"):
         global ENCODER_TEST_CACHE
         cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
-        logger.debug(
-            "startup-test cache lookup: key=%s present=%s value=%s",
-            cache_key, cache_key in ENCODER_TEST_CACHE,
-            ENCODER_TEST_CACHE.get(cache_key),
-        )
         if cache_key in ENCODER_TEST_CACHE and not ENCODER_TEST_CACHE[cache_key]:
             _publish(self.request.id, {"type": "log", "message": f"⚠️ {actual_encoder} marked unavailable by startup tests, falling back to CPU"})
             _publish(self.request.id, {"type": "log", "message": (
@@ -260,12 +212,18 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 "the job will use a CPU encoder instead which is typically much slower and increases CPU usage. "
                 "To enable hardware encoding, ensure drivers/libraries are installed and run 'System → Run encoder tests' in the UI to refresh results."
             )})
-            actual_encoder, v_flags = _cpu_fallback_for(actual_encoder)
+            # Determine CPU fallback based on codec type
+            if "h264" in actual_encoder:
+                actual_encoder = "libx264"
+                v_flags = ["-pix_fmt", "yuv420p", "-profile:v", "high"]
+            elif "hevc" in actual_encoder or "h265" in actual_encoder:
+                actual_encoder = "libx265"
+                v_flags = ["-pix_fmt", "yuv420p"]
+            else:  # AV1
+                actual_encoder = "libaom-av1"
+                v_flags = ["-pix_fmt", "yuv420p"]
             init_hw_flags = []
-            logger.info(
-                "CPU fallback selected (startup-test cache): %s -> %s",
-                original_encoder, actual_encoder,
-            )
+            # Update hardware info display to show CPU fallback
             _publish(self.request.id, {"type": "log", "message": f"Encoder: CPU ({actual_encoder})"})
     
     _publish(self.request.id, {"type": "log", "message": f"Using encoder: {actual_encoder} (requested: {video_codec})"})
@@ -298,6 +256,10 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             idx = init_hw_flags.index("-hwaccel")
             dec = init_hw_flags[idx+1] if idx+1 < len(init_hw_flags) else "unknown"
             _publish(self.request.id, {"type": "log", "message": f"Decoder: using {dec}"})
+        elif any(x == "-init_hw_device" for x in init_hw_flags):
+            idx = init_hw_flags.index("-init_hw_device")
+            dec = init_hw_flags[idx+1] if idx+1 < len(init_hw_flags) else "unknown"
+            _publish(self.request.id, {"type": "log", "message": f"HW device: {dec}"})
     except Exception:
         pass
 
@@ -370,18 +332,6 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     preset_flags = []
     tune_flags = []
     
-    # SVT-AV1 uses numeric presets 0 (slowest/best) .. 13 (fastest). p-scale mapping:
-    # p1 fastest -> 12, p7 slowest -> 4, extraquality -> 2.
-    svt_preset_map = {
-        "p1": "12", "p2": "10", "p3": "9", "p4": "8",
-        "p5": "7", "p6": "6", "p7": "4",
-    }
-    # libaom-av1 uses -cpu-used 0 (slowest) .. 8 (fastest)
-    aom_cpu_used_map = {
-        "p1": "8", "p2": "7", "p3": "6", "p4": "5",
-        "p5": "4", "p6": "4", "p7": "2",
-    }
-
     # Handle "extraquality" preset (slowest, best quality) — not compatible with fixed target bitrate
     if preset_val == "extraquality" and not bitrate_mode:
         _publish(self.request.id, {"type": "log", "message": "Extra Quality mode enabled (slowest encoding, best quality)"})
@@ -396,30 +346,18 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 preset_flags += ["-crf", "18"]
             else:
                 preset_flags += ["-crf", "20"]
-        elif actual_encoder == "libsvtav1":
-            preset_flags = ["-preset", "2", "-crf", "22", *SVTAV1_PARAMS_MAX_LP]
         elif actual_encoder == "libaom-av1":
-            preset_flags = ["-cpu-used", "0", "-crf", "20"]
+            preset_flags = ["-cpu-used", "0"]
+            preset_flags += ["-crf", "20"]
     elif actual_encoder.endswith("_nvenc"):
-        # Honor UI preset/tune only — do not switch AV1 (or other NVENC) to faster presets
-        # based on target bitrate; low-bitrate jobs still use the user's quality choice.
         preset_flags = ["-preset", preset_val]
         tune_flags = ["-tune", tune_val]
-    elif actual_encoder in ("libx264", "libx265"):
+    elif actual_encoder in ("libx264", "libx265", "libsvtav1"):
+        # Software encoders
         cpu_preset_map = {"p1": "ultrafast", "p2": "superfast", "p3": "veryfast", "p4": "faster", "p5": "fast", "p6": "medium", "p7": "slow"}
         preset_flags = ["-preset", cpu_preset_map.get(preset_val, "medium")]
         if actual_encoder == "libx264":
             tune_flags = ["-tune", "film"]  # Better than 'hq' for CPU
-    elif actual_encoder == "libsvtav1":
-        preset_flags = ["-preset", svt_preset_map.get(preset_val, "8"), *SVTAV1_PARAMS_MAX_LP]
-    elif actual_encoder == "libaom-av1":
-        preset_flags = ["-cpu-used", aom_cpu_used_map.get(preset_val, "4"), "-row-mt", "1"]
-
-    logger.debug(
-        "preset/tune selection: encoder=%s preset_val=%s tune_val=%s bitrate_mode=%s "
-        "-> preset_flags=%s tune_flags=%s",
-        actual_encoder, preset_val, tune_val, bitrate_mode, preset_flags, tune_flags,
-    )
 
     # MP4 finalize behavior
     if output_path.lower().endswith(".mp4"):
@@ -649,11 +587,6 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             ip = f"{float(input_fps):.3g}"
             _publish(self.request.id, {"type": "log", "message": f"Frame rate: capping at {cap:g} fps (source ~{ip} fps)"})
 
-    # Note: We do not inject -extra_hw_frames here. Large values (e.g. 16) plus the
-    # default H.264 decoder thread count can exceed NVDEC's ~32 decode-surface budget and
-    # make cuvidCreateDecoder fail. Capping -threads to compensate then slowed decodes
-    # vs FFmpeg defaults — felt "way slower" than builds without those flags.
-
     # Construct command (decoder autorotate is left ON for SW decode — manual transpose was flipping some phone clips)
     cmd = [
         "ffmpeg", "-hide_banner", "-y",
@@ -669,7 +602,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         cmd += ["-vf", ",".join(vf_filters)]
     
     cmd += [
-        *abr_rate_control_args(actual_encoder),
+        "-b:v", f"{int(video_kbps)}k",
+        "-maxrate", f"{maxrate}k",
+        "-bufsize", f"{bufsize}k",
         *preset_flags,  # Encoder-specific preset
         *tune_flags,    # Encoder-specific tune (if supported)
     ]
@@ -688,22 +623,10 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
 
     # Log the full ffmpeg command for debugging
     cmd_str = ' '.join(cmd)
-    logger.info("ffmpeg exec task_id=%s cmd=%s", self.request.id, cmd_str)
     _publish(self.request.id, {"type": "log", "message": f"FFmpeg command: {cmd_str}"})
 
     def run_ffmpeg_and_stream(command: list) -> tuple[int, bool]:
-        logger.debug("ffmpeg Popen pid=launching args[0..5]=%s", command[:6])
-        _popen_kw: dict = {
-            "stderr": subprocess.PIPE,
-            "stdout": subprocess.DEVNULL,
-            "text": True,
-            "bufsize": 1,
-            "env": get_gpu_env(),
-        }
-        if sys.platform != "win32":
-            _popen_kw["start_new_session"] = True
-        proc_i = subprocess.Popen(command, **_popen_kw)
-        logger.debug("ffmpeg Popen pid=%s", proc_i.pid)
+        proc_i = subprocess.Popen(command, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, bufsize=1, env=get_gpu_env())
         local_stderr = []
         nonlocal last_progress
         nonlocal speed_ewma
@@ -724,33 +647,22 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         max_update_interval = 2.0  # Force update every 2 seconds
         try:
             assert proc_i.stderr is not None
-            # Read stderr on a thread so the main loop can poll cancel every ~250ms. A plain
-            # ``for line in proc_i.stderr`` blocks until a full line arrives — libsvtav1 can go
-            # long stretches without flushing stderr while pegging CPU, so Stop appeared broken.
-            _line_q: queue.Queue[Optional[str]] = queue.Queue()
-
-            def _stderr_reader() -> None:
-                try:
-                    for _ln in proc_i.stderr:
-                        _line_q.put(_ln)
-                except Exception:
-                    pass
-                finally:
-                    _line_q.put(None)
-
-            threading.Thread(target=_stderr_reader, daemon=True).start()
-
-            while True:
+            for line in proc_i.stderr:
+                # Check for cancellation between lines
                 if _is_cancelled(self.request.id):
                     cancelled = True
                     _publish(self.request.id, {"type": "log", "message": "Cancel received, stopping encoder..."})
-                    _force_stop_ffmpeg(proc_i)
-                    break
-                try:
-                    line = _line_q.get(timeout=0.25)
-                except queue.Empty:
-                    continue
-                if line is None:
+                    try:
+                        proc_i.terminate()
+                    except Exception:
+                        pass
+                    try:
+                        proc_i.wait(timeout=3)
+                    except Exception:
+                        try:
+                            proc_i.kill()
+                        except Exception:
+                            pass
                     break
                 line = line.strip()
                 if not line:
@@ -912,11 +824,6 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                     _publish(self.request.id, {"type": "log", "message": line})
             if not cancelled:
                 proc_i.wait()
-            else:
-                try:
-                    proc_i.wait(timeout=20)
-                except Exception:
-                    pass
             return (proc_i.returncode or 0, cancelled)
         finally:
             stderr_lines.extend(local_stderr)
@@ -957,7 +864,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         if sw_vf:
             retry_cmd += ["-vf", ",".join(sw_vf)]
         retry_cmd += [
-            *abr_rate_control_args(actual_encoder),
+            "-b:v", f"{int(video_kbps)}k",
+            "-maxrate", f"{maxrate}k",
+            "-bufsize", f"{bufsize}k",
             *preset_flags, *tune_flags,
         ]
         if chosen_audio_codec is None:
@@ -982,11 +891,13 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             "This can happen if drivers, device nodes, or libraries are missing or if the encoder is unsupported by the current ffmpeg build. "
             "Run the encoder diagnostic tests from the UI or check logs to investigate."
         )})
-        fb_encoder, fb_flags = _cpu_fallback_for(actual_encoder)
-        logger.info(
-            "Runtime CPU fallback after NVENC failure: %s -> %s (rc=%s)",
-            actual_encoder, fb_encoder, rc,
-        )
+        if "h264" in actual_encoder:
+            fb_encoder = "libx264"; fb_flags = ["-pix_fmt","yuv420p","-profile:v","high"]
+        elif "hevc" in actual_encoder or "h265" in actual_encoder:
+            fb_encoder = "libx265"; fb_flags = ["-pix_fmt","yuv420p"]
+        else:
+            fb_encoder = "libaom-av1"; fb_flags = ["-pix_fmt","yuv420p"]
+
         _publish(self.request.id, {"type": "log", "message": f"Encoder: CPU ({fb_encoder})"})
         actual_encoder = fb_encoder
 
@@ -1010,16 +921,15 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         ]
         if cpu_vf:
             cmd2 += ["-vf", ",".join(cpu_vf)]
-        cmd2 += abr_rate_control_args(fb_encoder)
+        cmd2 += [
+            "-b:v", f"{int(video_kbps)}k",
+            "-maxrate", f"{maxrate}k",
+            "-bufsize", f"{bufsize}k",
+        ]
         if fb_encoder == "libx264":
             cmd2 += ["-preset","medium","-tune","film"]
         elif fb_encoder == "libx265":
             cmd2 += ["-preset","medium"]
-        elif fb_encoder == LIBSVTAV1:
-            cmd2 += [
-                "-preset", svt_preset_map.get(preset_val, "8"),
-                *SVTAV1_PARAMS_MAX_LP,
-            ]
         elif fb_encoder == "libaom-av1":
             cmd2 += ["-cpu-used","4"]
         if chosen_audio_codec is None:
@@ -1097,29 +1007,23 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     max_retries = 2  # Maximum 2 retry attempts
     
     if (not bitrate_mode) and size_overage_percent > 2.0 and final_size_mb > progress_target_mb and retry_attempt < max_retries:
-        # Re-scale video bitrate from measured output size vs target (works for
-        # huge NVENC overshoots). Old logic used max(0.5, 1 - overage/100 - 0.05)
-        # so e.g. +144% overage only halved bitrate — often still over target,
-        # forcing another full encode (2× wall time) and frustrating UX.
-        size_ratio = progress_target_mb / max(final_size_mb, 1e-6)
-        adjusted_video_kbps = int(float(video_kbps) * size_ratio * 0.94)
-        adjusted_video_kbps = max(48, adjusted_video_kbps)
-
-        if adjusted_video_kbps >= int(video_kbps * 0.985):
-            _publish(self.request.id, {"type": "log", "message": (
-                f"⚠️ File is {size_overage_percent:.1f}% over target — margin too small for a reliable re-encode; "
-                f"keeping {final_size_mb:.2f} MB output."
-            )})
+        # Calculate if retry is feasible
+        # If we need to reduce bitrate below 50%, it's probably impossible
+        reduction_factor = max(0.5, 1.0 - (size_overage_percent / 100.0) - 0.05)
+        
+        if reduction_factor < 0.5:
+            _publish(self.request.id, {"type": "log", "message": f"⚠️ File is {size_overage_percent:.1f}% over target, but further reduction would compromise quality too much."})
+            _publish(self.request.id, {"type": "log", "message": f"📊 Final size: {final_size_mb:.2f} MB (target was {progress_target_mb:.2f} MB). Consider adjusting target size or resolution."})
         else:
-            # File is too large — retry once or twice with a proportional cut
+            # File is too large! Notify user and retry
             _publish(self.request.id, {"type": "log", "message": f"⚠️ File is {size_overage_percent:.1f}% over target ({final_size_mb:.2f} MB vs {progress_target_mb:.2f} MB)"})
-            _publish(self.request.id, {"type": "log", "message": f"🔄 Retry attempt {retry_attempt + 1}/{max_retries} with optimized bitrate..."})
-            _publish(self.request.id, {"type": "retry", "message": f"File too large ({final_size_mb:.2f} MB), re-encoding with optimized bitrate (attempt {retry_attempt + 1}/{max_retries})", "overage_percent": round(size_overage_percent, 1)})
-
-            _publish(self.request.id, {"type": "log", "message": (
-                f"Adjusted video bitrate: {int(video_kbps)} → {adjusted_video_kbps} kbps "
-                f"(size ratio {size_ratio:.3f}×, −{100 * (1 - adjusted_video_kbps / max(video_kbps, 1e-9)):.1f}%)"
-            )})
+            _publish(self.request.id, {"type": "log", "message": f"🔄 Retry attempt {retry_attempt + 1}/{max_retries} with reduced bitrate..."})
+            _publish(self.request.id, {"type": "retry", "message": f"File too large ({final_size_mb:.2f} MB), retrying to fit {progress_target_mb:.2f} MB target (attempt {retry_attempt + 1}/{max_retries})", "overage_percent": round(size_overage_percent, 1)})
+            
+            # Calculate adjusted bitrate
+            adjusted_video_kbps = int(video_kbps * reduction_factor)
+            
+            _publish(self.request.id, {"type": "log", "message": f"Adjusted video bitrate: {video_kbps} → {adjusted_video_kbps} kbps (reduction: {(1-reduction_factor)*100:.1f}%)"})
             
             # Delete the oversized file
             try:
@@ -1136,9 +1040,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 pass
             
             # Re-run the encoding with adjusted bitrate by modifying cmd
-            # Match abr_rate_control_args: 1.2× maxrate, 2× bufsize (all VBV encoders)
-            _retry_maxrate_mul = 1.2
-            _retry_buf_mul = 2.0
+            # Find and replace the bitrate values in the original command
             retry_cmd = []
             i = 0
             while i < len(cmd):
@@ -1148,11 +1050,11 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                     i += 2
                 elif cmd[i] == "-maxrate":
                     retry_cmd.append(cmd[i])
-                    retry_cmd.append(f"{int(adjusted_video_kbps * _retry_maxrate_mul)}k")
+                    retry_cmd.append(f"{int(adjusted_video_kbps * 1.2)}k")
                     i += 2
                 elif cmd[i] == "-bufsize":
                     retry_cmd.append(cmd[i])
-                    retry_cmd.append(f"{int(adjusted_video_kbps * _retry_buf_mul)}k")
+                    retry_cmd.append(f"{int(adjusted_video_kbps * 2)}k")
                     i += 2
                 else:
                     retry_cmd.append(cmd[i])
@@ -1212,9 +1114,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         # Default ON if variable not set
         history_enabled = os.getenv('HISTORY_ENABLED', 'true').lower() in ('true', '1', 'yes')
         if history_enabled:
-            # Import here to avoid circular dependency (``sys`` is module-global; do not re-import
-            # inside ``compress_video`` or nested functions break: NameError on ``sys.platform``).
-            sys.path.insert(0, '/app')
+            # Import here to avoid circular dependency
             import importlib
             hm = importlib.import_module('backend.history_manager')
             
@@ -1260,10 +1160,5 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         self.update_state(state="SUCCESS", meta={"output_path": output_path, "progress": 100.0, "detail": "done", **stats})
     except Exception:
         pass
-    logger.info(
-        "compress_video DONE task_id=%s encoder=%s final=%sMB target=%sMB elapsed=%.1fs",
-        self.request.id, actual_encoder, final_size_mb, target_size_mb,
-        max(time.time() - start_ts, 0),
-    )
     _publish(self.request.id, {"type": "done", "stats": stats})
     return stats

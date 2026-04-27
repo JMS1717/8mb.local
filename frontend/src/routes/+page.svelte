@@ -4,19 +4,16 @@
   import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion, getBatchStatus, batchZipDownloadUrl } from '$lib/api';
   import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
 
-  /** Header badge default; bump with each release. API `/api/version` overrides when available. */
-  const DEFAULT_APP_VERSION = '137';
-
   let file: File | null = null;
   let uploadInput: HTMLInputElement | null = null; // reference to clear file input
   let uploadedFileName: string | null = null; // Track what file was uploaded
   let isAnalyzing: boolean = false; // Track analysis state for UI feedback
-  let targetMB = 9.7;
+  let targetMB = 25;
   /** 'size' = target output file size (MB); 'bitrate' = fixed video bitrate (kbps). */
   let targetMode: 'size' | 'bitrate' = 'size';
   let targetVideoKbps = 2500;
   let videoCodec: string = 'av1_nvenc';
-  let audioCodec: 'libopus' | 'aac' | 'none' = 'libopus';
+  let audioCodec: 'libopus' | 'aac' | 'eac3' | 'none' = 'libopus';
   let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p6';
   let audioKbps: 32|48|64|96|128|160|192|256 = 128;
   // Auto audio bitrate control: downshift audio for extreme compressions
@@ -47,6 +44,8 @@
   let autoDownload = true;
   let warnText: string | null = null;
   let resolutionSuggestText: string | null = null;
+  // Sync select dropdown with explicitHeight
+  $: resolutionSelectValue = explicitHeight ? String(explicitHeight) : '';
   let resolutionSuggestHeight: 2160|1440|1080|720|480|360|240|null = null;
   
   // Helper function to parse time string to seconds
@@ -97,8 +96,6 @@
   })();
 
   $: containerNote = (container === 'mp4' && audioCodec === 'libopus' && !audioOnly) ? 'MP4 does not support Opus; audio will be encoded as AAC automatically.' : null;
-  /** NVENC exposes a separate `-tune` (HQ vs latency); CPU paths use preset only. */
-  $: nvencTuneApplies = videoCodec.endsWith('_nvenc');
   $: estimated = jobInfo ? {
     duration_s: effectiveDuration,
     total_kbps: effectiveDuration > 0
@@ -204,11 +201,11 @@
   function toggleSupport(){ showSupport = !showSupport; }
   function closeSupport(){ showSupport = false; }
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeSupport(); };
-  // App version (subtle badge); starts at release default, then replaced by API if different
-  let appVersion: string = DEFAULT_APP_VERSION;
+  // App version (subtle badge)
+  let appVersion: string | null = null;
 
   // Available codecs from backend
-  let availableCodecs: Array<{value: string, label: string, group: string}> = [];
+  let availableCodecs: Array<{value: string, label: string, group: string, failed: boolean}> = [];
   let hardwareType = 'cpu';
   let sysCaps: any = null;
   let sysCapsError: string | null = null;
@@ -260,7 +257,8 @@
         targetMB = presets.target_mb;
         videoCodec = presets.video_codec;
         audioCodec = presets.audio_codec;
-        preset = presets.preset;
+        const validPresets = ['p1','p2','p3','p4','p5','p6','p7','extraquality'];
+        preset = validPresets.includes(presets.preset) ? presets.preset : 'p6';
         audioKbps = presets.audio_kbps;
         container = presets.container;
         tune = presets.tune;
@@ -280,7 +278,7 @@
       availableCodecs = [
         { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
         { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
-        { value: 'libaom-av1', label: 'AV1 (CPU)', group: 'cpu' },
+        { value: 'libsvtav1', label: 'AV1 (CPU)', group: 'cpu' },
         { value: 'libsvtav1', label: 'AV1 (CPU - SVT-AV1)', group: 'cpu' },
       ];
     }
@@ -300,15 +298,20 @@
       const tests = await getEncoderTestResults();
       gpuOk = !!tests?.any_hardware_passed;
       encoderTests = (tests?.results || []);
+      // Rebuild codec list now that we have test results for greying out failed codecs
+      if (encoderTests.length > 0) {
+        try {
+          const codecData = await getAvailableCodecs();
+          availableCodecs = buildCodecList(codecData);
+        } catch {}
+      }
     } catch {}
 
-    // Fetch app version (e.g. Docker ENV APP_VERSION / settings.APP_VERSION)
+    // Fetch app version
     try {
       const v = await getVersion();
-      appVersion = (v?.version && String(v.version).trim()) || DEFAULT_APP_VERSION;
-    } catch {
-      appVersion = DEFAULT_APP_VERSION;
-    }
+      appVersion = v?.version || null;
+    } catch {}
 
     // Load preset profiles and size buttons
     try {
@@ -368,8 +371,8 @@
     }
   }
 
-  function buildCodecList(codecData: any): Array<{value: string, label: string, group: string}> {
-    const list: Array<{value: string, label: string, group: string}> = [];
+  function buildCodecList(codecData: any): Array<{value: string, label: string, group: string, failed: boolean}> {
+    const list: Array<{value: string, label: string, group: string, failed: boolean}> = [];
     const enabledCodecs = codecData.enabled_codecs || [];
     
     // Build list of all possible codecs with labels
@@ -378,8 +381,15 @@
       { value: 'av1_nvenc', label: 'AV1 (NVIDIA - RTX 40/50 series)', group: 'nvidia' },
       { value: 'hevc_nvenc', label: 'HEVC (H.265, NVIDIA)', group: 'nvidia' },
       { value: 'h264_nvenc', label: 'H.264 (NVIDIA)', group: 'nvidia' },
+      // Intel QSV (via VAAPI backend)
+      { value: 'av1_qsv', label: 'AV1 (Intel QSV)', group: 'qsv' },
+      { value: 'hevc_qsv', label: 'HEVC (H.265, Intel QSV)', group: 'qsv' },
+      { value: 'h264_qsv', label: 'H.264 (Intel QSV)', group: 'qsv' },
+      // VAAPI (Intel iGPU, AMD)
+      { value: 'av1_vaapi', label: 'AV1 (VAAPI)', group: 'vaapi' },
+      { value: 'hevc_vaapi', label: 'HEVC (H.265, VAAPI)', group: 'vaapi' },
+      { value: 'h264_vaapi', label: 'H.264 (VAAPI)', group: 'vaapi' },
       // CPU / software
-      { value: 'libaom-av1', label: 'AV1 (CPU - Highest Quality)', group: 'cpu' },
       { value: 'libsvtav1', label: 'AV1 (CPU - SVT-AV1)', group: 'cpu' },
       { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
       { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
@@ -388,7 +398,10 @@
     // Filter to only include codecs that are enabled in settings
     for (const codec of codecDefinitions) {
       if (enabledCodecs.includes(codec.value)) {
-        list.push(codec);
+        // Check if this codec failed the encoder test
+        const testResult = encoderTests.find((t: any) => t.codec === codec.value);
+        const failed = testResult ? !testResult.passed : false;
+        list.push({ ...codec, failed });
       }
     }
     
@@ -1014,6 +1027,15 @@
     try {
       await cancelJob(taskId);
       logLines = ['Cancellation requested…', ...logLines].slice(0, 500);
+      // Give server 3s to send 'canceled' SSE event, then force-reset UI
+      setTimeout(() => {
+        if (isCompressing) {
+          isCompressing = false;
+          isFinalizing = false;
+          logLines = ['🚫 Job canceled (timeout)', ...logLines];
+          try { esRef?.close(); } catch {}
+        }
+      }, 3000);
     } catch (e:any) {
       errorText = e?.message || 'Failed to cancel';
     } finally {
@@ -1253,8 +1275,8 @@
       <label class="block mb-1 text-sm">Video Codec</label>
       <select class="input w-full codec-select" bind:value={videoCodec}>
         {#each availableCodecs as codec}
-          <option value={codec.value} data-group={codec.group}>
-            {getCodecIcon(codec.group)} {codec.label}
+          <option value={codec.value} data-group={codec.group} class:codec-failed={codec.failed}>
+            {getCodecIcon(codec.group)} {codec.label}{codec.failed ? ' ✗' : ''}
           </option>
         {/each}
       </select>
@@ -1278,7 +1300,8 @@
       <label class="block mb-1 text-sm">Resolution</label>
       <div class="flex items-center gap-2">
         <select class="input w-full" disabled={audioOnly || autoResolution}
-          on:change={(e:any)=>{ const v = e.target.value; explicitHeight = parseExplicitHeight(v); }}>
+          bind:value={resolutionSelectValue}
+          on:change={() => { explicitHeight = parseExplicitHeight(resolutionSelectValue); }}>
           <option value="">Original</option>
           <option value="2160">2160p (4K)</option>
           <option value="1440">1440p</option>
@@ -1293,14 +1316,14 @@
       <div class="mt-2 flex items-center gap-3">
         <label class="flex items-center gap-2 text-xs cursor-pointer">
           <input type="checkbox" bind:checked={autoResolution} disabled={audioOnly} />
-          <span>Auto (won’t go below</span>
-          <select class="input h-7 py-0 px-2 text-xs w-20" bind:value={minAutoHeight} disabled={audioOnly || !autoResolution}>
+          <span>Auto (min)</span>
+          <select class="input h-7 py-0 px-1 text-xs min-w-[4rem]" bind:value={minAutoHeight} disabled={audioOnly || !autoResolution}>
             <option value={240}>240p</option>
             <option value={360}>360p</option>
             <option value={480}>480p</option>
             <option value={720}>720p</option>
           </select>
-          <span>)</span>
+          
         </label>
       </div>
       {#if jobInfo?.original_width && jobInfo?.original_height}
@@ -1308,25 +1331,14 @@
       {/if}
     </div>
     <div>
-      <label class="block mb-1 text-sm">Encoder preset (speed ↔ quality)</label>
-      <select class="input w-full" bind:value={preset} title="Encoder effort: faster presets spend less time per frame; slower presets often look better at the same file size.">
+      <label class="block mb-1 text-sm">Quality preset</label>
+      <select class="input w-full" bind:value={preset}>
         <option value="p1">Fast (P1)</option>
         <option value="p5">Balanced (P5)</option>
         <option value="p6">Default (P6)</option>
         <option value="p7">Best Quality (P7)</option>
-        <option value="extraquality">Extra Quality (constant quality — CQ)</option>
+        <option value="extraquality">🌟 Extra Quality</option>
       </select>
-      {#if preset === 'extraquality' && targetMode === 'bitrate'}
-        <p class="text-xs text-amber-200/95 mt-1 rounded border border-amber-700/40 bg-amber-950/35 px-2 py-1.5">
-          Extra Quality uses <strong>constant quality</strong>, which does not match <strong>fixed video bitrate</strong>. The encoder will use <strong>P6</strong> instead (same as the server log: Extra Quality is not applied in bitrate mode).
-        </p>
-      {:else if preset === 'extraquality'}
-        <p class="text-xs text-sky-100/90 mt-1 rounded border border-sky-800/50 bg-sky-950/30 px-2 py-1.5">
-          <strong>Extra Quality</strong> switches to <strong>constant quality</strong> (CRF/CQ): the output is encoded at a fixed visual-quality level, so <strong>file size is not guaranteed to match your target MB</strong> — it varies with content. Encoding is slower than P7 (e.g. NVENC <code class="text-[11px]">-cq:v</code>, x264/x265 <code class="text-[11px]">-crf</code> at veryslow-style settings).
-        </p>
-      {:else}
-        <p class="text-xs opacity-70 mt-1">How much work the encoder does per frame at your target size (or bitrate). P1–P7 aim at your target; this is independent of “NVENC tuning” in Advanced Options.</p>
-      {/if}
     </div>
   </div>
 
@@ -1341,6 +1353,7 @@
           <select class="input w-full" bind:value={audioCodec}>
             <option value="libopus">Opus (Default)</option>
             <option value="aac">AAC</option>
+              <option value="eac3">EAC3 (Dolby Digital+)</option>
             <option value="none">🔇 None (Mute)</option>
           </select>
         </div>
@@ -1371,27 +1384,15 @@
         </div>
         <div>
           <label class="block mb-1 text-sm flex items-center gap-1">
-            NVENC tuning <span class="text-[11px] opacity-70">(NVIDIA only)</span>
+            Tune <span class="text-[11px] opacity-70">(what to prioritize)</span>
           </label>
-          {#if nvencTuneApplies}
-            <select
-              class="input w-full"
-              bind:value={tune}
-              title="NVIDIA NVENC: HQ for normal files; low latency for screen/live; lossless ignores small size targets."
-            >
-              <option value="hq">High quality (default for files)</option>
-              <option value="ll">Low latency (screen / live)</option>
-              <option value="ull">Ultra-low latency</option>
-              <option value="lossless">Lossless (very large files)</option>
-            </select>
-            <p class="mt-1 text-xs opacity-70">
-              Separate from the P-preset above: chooses quality vs turnaround for NVENC. For typical uploads, leave on High quality.
-            </p>
-          {:else}
-            <p class="text-xs opacity-70 rounded border border-gray-700 bg-gray-900/50 px-2 py-2">
-              Not used for this codec. CPU / software encoders follow the encoder preset only (no separate NVENC tune).
-            </p>
-          {/if}
+          <select class="input w-full" bind:value={tune} title="Tune tells the encoder what to optimize for.">
+            <option value="hq">Best Quality (HQ)</option>
+            <option value="ll">Low Latency (faster)</option>
+            <option value="ull">Ultra‑Low Latency (fastest)</option>
+            <option value="lossless">Lossless (no quality loss)</option>
+          </select>
+          <p class="mt-1 text-xs opacity-70">Quality = best visuals. Low/Ultra‑low latency = faster encodes (good for screen/streams). Lossless = huge files.</p>
         </div>
         <div class="sm:col-span-2 lg:col-span-4">
           <label class="block mb-1 text-sm">Max frame rate</label>
@@ -1415,7 +1416,7 @@
                 <option value={p.name}>{p.name}</option>
               {/each}
             </select>
-            <p class="mt-1 text-xs opacity-70">Profiles adjust target size, audio, and container. Applying one may also load its saved encoder preset and NVENC tuning.</p>
+            <p class="mt-1 text-xs opacity-70">Profiles adjust size, audio, and container. Codec and quality preset remain as chosen above.</p>
           </div>
         </div>
       {/if}
@@ -1582,6 +1583,10 @@
         {#if encodeMethod}
           {#if /_nvenc$/.test(encodeMethod)}
             <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: NVIDIA NVENC</span>
+          {:else if /_qsv$/.test(encodeMethod)}
+            <span class="text-xs px-2 py-1 rounded bg-blue-900/40 text-blue-300 border border-blue-700/40">Encoder: Intel QSV</span>
+          {:else if /_vaapi$/.test(encodeMethod)}
+            <span class="text-xs px-2 py-1 rounded bg-amber-900/40 text-amber-300 border border-amber-700/40">Encoder: VAAPI</span>
           {:else}
             <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-200 border border-slate-600/40">Encoder: CPU ({encodeMethod})</span>
           {/if}
@@ -1739,5 +1744,19 @@
   }
   .codec-select option[data-group="cpu"] {
     color: #9ca3af;
+  }
+  .codec-select option[data-group="qsv"] {
+    color: #60a5fa;
+    font-weight: 500;
+  }
+  .codec-select option[data-group="vaapi"] {
+    color: #fbbf24;
+    font-weight: 500;
+  }
+  /* Grey out codecs that failed encoder tests */
+  .codec-select :global(option.codec-failed) {
+    color: #6b7280 !important;
+    font-weight: 400 !important;
+    font-style: italic;
   }
 </style>

@@ -99,9 +99,7 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
         test_file = "/tmp/test_decode.mp4"
 
         if "av1" in decoder_name.lower():
-            # Prefer SVT-AV1 for the tiny test encode — ~10-50× faster than libaom
-            # at generating a few seed frames on container boot.
-            encoder = "libsvtav1" if is_encoder_available("libsvtav1") else "libaom-av1"
+            encoder = "libsvtav1"
         elif "hevc" in decoder_name.lower() or "265" in decoder_name.lower():
             encoder = "libx265"
         else:
@@ -112,12 +110,11 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
             "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
             "-c:v", encoder, "-t", "0.1", "-frames:v", "3",
         ]
-        if encoder == "libaom-av1":
-            create_cmd.extend(["-cpu-used", "8", "-row-mt", "1"])
-        elif encoder == "libsvtav1":
+        if encoder == "libsvtav1":
             create_cmd.extend(["-preset", "12"])
+        elif encoder == "libaom-av1":
+            create_cmd.extend(["-cpu-used", "8", "-row-mt", "1"])
         create_cmd.append(test_file)
-        logger.debug("test_decoder: seed-encode cmd = %s", " ".join(create_cmd))
         subprocess.run(create_cmd, capture_output=True, timeout=10, env=get_gpu_env())
 
         cmd = ["ffmpeg", "-hide_banner"]
@@ -163,16 +160,46 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
 
 
 def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
-    """Test if encoder can actually be initialized."""
+    """Test if encoder can actually be initialized.
+
+    For VAAPI/QSV encoders, uses the correct hwaccel init and filter chain.
+    """
     try:
-        common_args = [
-            "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
-            "-c:v", encoder_name, "-t", "0.1", "-frames:v", "3",
-            "-f", "null", "-",
-        ]
-        cmd = ["ffmpeg", "-hide_banner", *common_args]
+        vaapi_device = os.environ.get("VAAPI_DEVICE", "/dev/dri/renderD128")
+
+        if "_vaapi" in encoder_name:
+            # VAAPI: init device + filter_hw_device, CPU decode, hwupload to VAAPI
+            cmd = [
+                "ffmpeg", "-hide_banner", "-y",
+                "-init_hw_device", f"vaapi=va:{vaapi_device}",
+                "-filter_hw_device", "va",
+                "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
+                "-vf", "format=nv12,hwupload",
+                "-c:v", encoder_name, "-frames:v", "1",
+                "-f", "null", "-",
+            ]
+        elif "_qsv" in encoder_name:
+            # QSV: init device + filter_hw_device, CPU decode, hwupload to QSV
+            cmd = [
+                "ffmpeg", "-hide_banner", "-y",
+                "-init_hw_device", f"qsv=qsv:{vaapi_device}",
+                "-filter_hw_device", "qsv",
+                "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
+                "-vf", "format=nv12,hwupload=extra_hw_frames=64",
+                "-c:v", encoder_name, "-frames:v", "1",
+                "-f", "null", "-",
+            ]
+        else:
+            # NVENC / CPU: simple test (original logic)
+            cmd = [
+                "ffmpeg", "-hide_banner",
+                "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
+                "-c:v", encoder_name, "-t", "0.1", "-frames:v", "3",
+                "-f", "null", "-",
+            ]
+
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=8, env=get_gpu_env()
+            cmd, capture_output=True, text=True, timeout=15, env=get_gpu_env()
         )
 
         if result is None:
@@ -242,9 +269,34 @@ def is_encoder_available(encoder_name: str) -> bool:
         return False
 
 
+def _flush_encoder_test_cache() -> None:
+    """Delete stale encoder_test:* keys from Redis before re-testing.
+
+    This prevents old (possibly wrong) cached results from a previous
+    container start from masking freshly-detected hardware capabilities.
+    """
+    try:
+        from redis import Redis
+        redis_url = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/0')
+        rc = Redis.from_url(redis_url, decode_responses=True)
+        prefixes = ('encoder_test:', 'encoder_test_json:', 'encoder_test_decode_json:')
+        deleted = 0
+        for prefix in prefixes:
+            for key in rc.scan_iter(match=f'{prefix}*'):
+                rc.delete(key)
+                deleted += 1
+        if deleted:
+            logger.info(f'Flushed {deleted} stale encoder-test key(s) from Redis')
+    except Exception as e:
+        logger.warning(f'Could not flush encoder test cache: {e}')
+
+
 def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
-    """Run encoder initialization tests for NVIDIA and CPU encoders."""
+    """Run encoder initialization tests for NVIDIA, QSV, VAAPI, and CPU encoders."""
     from .hw_detect import map_codec_to_hw
+
+    # Always flush old encoder test results before re-testing
+    _flush_encoder_test_cache()
 
     logger.info("GPU Environment Check:")
     logger.info(
@@ -254,6 +306,8 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
         f"  NVIDIA_DRIVER_CAPABILITIES: {os.environ.get('NVIDIA_DRIVER_CAPABILITIES', 'NOT SET')}"
     )
     logger.info(f"  LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', 'NOT SET')}")
+    logger.info(f"  VAAPI_DEVICE: {os.environ.get('VAAPI_DEVICE', 'NOT SET')}")
+    logger.info(f"  LIBVA_DRIVER_NAME: {os.environ.get('LIBVA_DRIVER_NAME', 'NOT SET')}")
     logger.info("")
 
     _wait_for_nv_runtime_ready(timeout_s=30.0, interval_s=2.0)
@@ -288,7 +342,20 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
             "av1_nvenc": ("av1", ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]),
         }
 
-    test_codecs.extend(["libx264", "libx265", "libsvtav1", "libaom-av1"])
+    vaapi_device = hw_info.get("vaapi_device", "/dev/dri/renderD128")
+    if hw_type_lower in ("qsv", "vaapi") or os.path.exists(vaapi_device):
+        test_codecs.extend(["h264_qsv", "hevc_qsv", "av1_qsv"])
+        test_codecs.extend(["h264_vaapi", "hevc_vaapi", "av1_vaapi"])
+        hw_decoders.update({
+            "h264_qsv": ("h264", ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device]),
+            "hevc_qsv": ("hevc", ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device]),
+            "av1_qsv": ("av1", ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device]),
+            "h264_vaapi": ("h264", ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device]),
+            "hevc_vaapi": ("hevc", ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device]),
+            "av1_vaapi": ("av1", ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device]),
+        })
+
+    test_codecs.extend(["libx264", "libx265", "libsvtav1"])
 
     logger.info(f"  Testing {len(test_codecs)} encoder(s)...")
     logger.info("-" * 70)

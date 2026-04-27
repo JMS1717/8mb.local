@@ -1,36 +1,46 @@
-# GPU is enabled by default (`gpus: all`). Requires NVIDIA Container Toolkit on the host.
-# If `docker compose up` fails because no GPU is available, use `docker-compose.cpu.yml` instead.
+# 8mb.local — Jellyfin FFmpeg Edition
+# Supports: Intel QSV/VAAPI, NVIDIA NVENC, CPU fallback
 #
-# BEFORE FIRST RUN: make sure `.env` is a FILE on the host, not a directory:
-#   cp .env.example .env     # or: touch .env
-# Otherwise Docker will auto-create an empty `.env` directory and settings
-# persistence will silently break. `create_host_path: false` below makes
-# Docker fail loudly instead of silently creating a directory if the file is
-# missing; the entrypoint also detects+recovers an empty directory.
+# Usage:
+#   Intel only:   docker compose up -d
+#   NVIDIA only:  Uncomment deploy section + NVIDIA env vars
+#   Both:         Uncomment deploy section + NVIDIA env vars (with /dev/dri present)
+#   CPU only:     Set NO_QSV=true, NO_VAAPI=true and remove devices section
+
 services:
   8mblocal:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "137"
-    image: jms1717/8mblocal:latest
+        BUILD_VERSION: "136"
+    image: 8mblocal-jellyfin:latest
     container_name: 8mblocal
     ports:
       - "8001:8001"
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
-      - type: bind
-        source: ./.env
-        target: /app/.env
-        bind:
-          create_host_path: false
-    gpus: all
+    # Intel QSV/VAAPI — mount GPU render device
+    devices:
+      - /dev/dri:/dev/dri
+    # NVIDIA GPU support — uncomment if you have an NVIDIA GPU
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu, video]
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
-      # Parallel encode jobs (each runs FFmpeg). Raise to use more CPU/RAM; watch GPU VRAM if using NVENC.
-      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-4}
+      # Intel QSV/VAAPI
+      - VAAPI_DEVICE=/dev/dri/renderD128
+      - LIBVA_DRIVER_NAME=iHD            # iHD (Gen8+) or i965 (older)
+      # NVIDIA (uncomment if using NVIDIA GPU)
+      # - NVIDIA_VISIBLE_DEVICES=all
+      # - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      # Disable specific HW encoders if needed
+      # - NO_QSV=true
+      # - NO_VAAPI=true
     restart: unless-stopped
