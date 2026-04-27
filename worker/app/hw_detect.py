@@ -1,10 +1,15 @@
 """Hardware acceleration detection and codec mapping.
 
-Supported hardware: NVIDIA NVENC only. All other GPU vendors fall back to CPU.
-
+Supported hardware: NVIDIA NVENC, Intel QSV (via VAAPI), VAAPI.
 Each encoder is tested by actually encoding at least 1 frame (not just checking
 ``ffmpeg -encoders``). This prevents false positives from encoders that are
 merely *listed* by FFmpeg but cannot run on the current GPU.
+
+Environment variables:
+- VAAPI_DEVICE: Path to VAAPI device (default: /dev/dri/renderD128)
+- LIBVA_DRIVER_NAME: Force specific VAAPI driver (iHD, i965, or auto-detect)
+- NO_QSV: Disable QSV encoder (default: false)
+- NO_VAAPI: Disable VAAPI encoder (default: false)
 """
 from __future__ import annotations
 
@@ -14,14 +19,137 @@ import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
 from .constants import (
-    AV1_NVENC, CODEC_PRIORITY, CPU_ENCODERS, CPU_FALLBACK, HW_ENCODERS,
-    H264_NVENC, HEVC_NVENC,
-    LIBAOM_AV1, LIBSVTAV1, LIBX264, LIBX265,
+    AV1_NVENC, AV1_QSV, AV1_VAAPI, CODEC_PRIORITY, CPU_ENCODERS, CPU_FALLBACK, HW_ENCODERS,
+    H264_NVENC, H264_QSV, H264_VAAPI, HEVC_NVENC, HEVC_QSV, HEVC_VAAPI,
+    LIBAOM_AV1, LIBSVTAV1, LIBX264, LIBX265, QSV_ENCODERS, VAAPI_ENCODERS,
 )
 
 logger = logging.getLogger(__name__)
 
 _HW_CACHE: Optional[Dict[str, Any]] = None
+
+# Environment configuration for VAAPI/QSV
+VAAPI_DEVICE: str = os.environ.get("VAAPI_DEVICE", "/dev/dri/renderD128")
+_NO_QSV: bool = os.environ.get("NO_QSV", "false").lower() == "true"
+_NO_VAAPI: bool = os.environ.get("NO_VAAPI", "false").lower() == "true"
+
+
+# ---------------------------------------------------------------------------
+# VAAPI/QSV Helper functions
+# ---------------------------------------------------------------------------
+
+def _detect_vaapi_driver(device: str) -> str:
+    """Auto-detect best VAAPI driver (iHD → i965 → system-default)."""
+    # Respect user override
+    if "LIBVA_DRIVER_NAME" in os.environ:
+        return os.environ["LIBVA_DRIVER_NAME"]
+
+    for driver in ("iHD", "i965", ""):
+        env = os.environ.copy()
+        if driver:
+            env["LIBVA_DRIVER_NAME"] = driver
+
+        # Try vainfo first
+        try:
+            result = subprocess.run(
+                ["vainfo", "--display", "drm", "--device", device],
+                capture_output=True, timeout=5, env=env,
+            )
+            if result.returncode == 0:
+                if driver:
+                    os.environ["LIBVA_DRIVER_NAME"] = driver
+                    logger.info(f"VAAPI driver detected: {driver}")
+                return driver
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # Fallback: FFmpeg test
+        try:
+            result = subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-hwaccel", "vaapi", "-hwaccel_device", device,
+                "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1:r=1",
+                "-vf", "format=nv12|vaapi,hwupload",
+                "-c:v", "h264_vaapi", "-frames:v", "1", "-f", "null", "-",
+            ], capture_output=True, timeout=10, env=env)
+            if result.returncode == 0:
+                if driver:
+                    os.environ["LIBVA_DRIVER_NAME"] = driver
+                    logger.info(f"VAAPI driver detected: {driver}")
+                return driver
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    return ""
+
+
+def _test_qsv(encoder_name: str) -> bool:
+    """Test QSV via VAAPI-Backend (the correct way for Intel GPUs).
+
+    Uses: -init_hw_device vaapi=va:device -init_hw_device qsv=qs@va
+    instead of libmfx directly (which fails on many systems).
+    """
+    if _NO_QSV or not os.path.exists(VAAPI_DEVICE):
+        return False
+
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-init_hw_device", f"vaapi=va:{VAAPI_DEVICE}",
+        "-init_hw_device", "qsv=qs@va",
+        "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1:r=1",
+        "-vf", "hwmap=derive_device=qsv,format=qsv",
+        "-c:v", encoder_name,
+        "-frames:v", "1",
+        "-f", "null", "-",
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=25)
+        success = result.returncode == 0
+        if success:
+            logger.info(f"Encoder {encoder_name} (QSV) passed initialization test")
+        else:
+            stderr = result.stderr.decode(errors="replace").strip()
+            logger.warning(f"QSV {encoder_name} failed: {stderr[:200]}")
+        return success
+    except subprocess.TimeoutExpired:
+        logger.warning(f"QSV {encoder_name} timed out")
+        return False
+    except Exception as e:
+        logger.warning(f"QSV {encoder_name} error: {e}")
+        return False
+
+
+def _test_vaapi(encoder_name: str) -> bool:
+    """Test VAAPI encoder with proper filter chain (format=nv12|vaapi,hwupload)."""
+    if _NO_VAAPI or not os.path.exists(VAAPI_DEVICE):
+        return False
+
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-hwaccel", "vaapi", "-hwaccel_device", VAAPI_DEVICE,
+        "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1:r=1",
+        "-vf", "format=nv12|vaapi,hwupload",
+        "-c:v", encoder_name,
+        "-frames:v", "1",
+        "-f", "null", "-",
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=20)
+        success = result.returncode == 0
+        if success:
+            logger.info(f"Encoder {encoder_name} (VAAPI) passed initialization test")
+        else:
+            stderr = result.stderr.decode(errors="replace").strip()
+            logger.warning(f"VAAPI {encoder_name} failed: {stderr[:200]}")
+        return success
+    except subprocess.TimeoutExpired:
+        logger.warning(f"VAAPI {encoder_name} timed out")
+        return False
+    except Exception as e:
+        logger.warning(f"VAAPI {encoder_name} error: {e}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +158,15 @@ _HW_CACHE: Optional[Dict[str, Any]] = None
 
 def test_encoder(encoder_name: str) -> bool:
     """Test if an encoder can actually initialize and encode on current hardware."""
+    # QSV: use special VAAPI-backend test
+    if encoder_name in QSV_ENCODERS:
+        return _test_qsv(encoder_name)
+
+    # VAAPI: use VAAPI-specific test
+    if encoder_name in VAAPI_ENCODERS:
+        return _test_vaapi(encoder_name)
+
+    # NVENC: standard test
     if "nvenc" in encoder_name:
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -38,26 +175,26 @@ def test_encoder(encoder_name: str) -> bool:
             "-frames:v", "1",
             "-f", "null", "-",
         ]
-    else:
-        return _encoder_in_list(encoder_name)
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=15)
+            success = result.returncode == 0
+            if success:
+                logger.info(f"Encoder {encoder_name} passed initialization test")
+            else:
+                stderr = result.stderr.decode(errors="replace").strip()
+                logger.warning(
+                    f"Warning: {encoder_name} failed initialization test: {stderr[:200]}"
+                )
+            return success
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Encoder {encoder_name} timed out during initialization test")
+            return False
+        except Exception as e:
+            logger.warning(f"Encoder {encoder_name} test error: {e}")
+            return False
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, timeout=15)
-        success = result.returncode == 0
-        if success:
-            logger.info(f"Encoder {encoder_name} passed initialization test")
-        else:
-            stderr = result.stderr.decode(errors="replace").strip()
-            logger.warning(
-                f"Warning: {encoder_name} failed initialization test: {stderr[:200]}"
-            )
-        return success
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Encoder {encoder_name} timed out during initialization test")
-        return False
-    except Exception as e:
-        logger.warning(f"Encoder {encoder_name} test error: {e}")
-        return False
+    # CPU encoders: just check if they're in ffmpeg list
+    return _encoder_in_list(encoder_name)
 
 
 def _encoder_in_list(encoder_name: str) -> bool:
@@ -80,9 +217,10 @@ def detect_hw_accel() -> Dict[str, Any]:
     """Detect available hardware acceleration by testing each encoder.
 
     Returns a dict with:
-    - ``type``: ``"nvidia"`` / ``"cpu"``
+    - ``type``: ``"nvidia"`` / ``"qsv"`` / ``"vaapi"`` / ``"cpu"``
     - ``available_encoders``: ``{"h264": "<best_encoder>", ...}``
     - ``tested_encoders``: ``{"h264_nvenc": True/False, ...}``
+    - ``vaapi_device``: Path to VAAPI device (if available)
     """
     result: Dict[str, Any] = {
         "type": "cpu",
@@ -90,13 +228,23 @@ def detect_hw_accel() -> Dict[str, Any]:
         "decode_method": None,
         "upload_method": None,
         "tested_encoders": {},
+        "vaapi_device": VAAPI_DEVICE if os.path.exists(VAAPI_DEVICE) else None,
     }
 
+    # Auto-detect VAAPI driver at startup
+    if os.path.exists(VAAPI_DEVICE):
+        _detect_vaapi_driver(VAAPI_DEVICE)
+
     has_nvidia = _check_nvidia()
+    has_vaapi_device = os.path.exists(VAAPI_DEVICE)
 
     candidates_to_test: List[str] = []
     if has_nvidia:
         candidates_to_test.extend([H264_NVENC, HEVC_NVENC, AV1_NVENC])
+    if has_vaapi_device and not _NO_QSV:
+        candidates_to_test.extend([H264_QSV, HEVC_QSV, AV1_QSV])
+    if has_vaapi_device and not _NO_VAAPI:
+        candidates_to_test.extend([H264_VAAPI, HEVC_VAAPI, AV1_VAAPI])
 
     tested: Dict[str, bool] = {}
     for enc in candidates_to_test:
@@ -112,13 +260,20 @@ def detect_hw_accel() -> Dict[str, Any]:
                 break
             if tested.get(enc):
                 result["available_encoders"][family] = enc
-                if best_type == "cpu" and "nvenc" in enc:
-                    best_type = "nvidia"
+                if best_type == "cpu":
+                    if "nvenc" in enc:
+                        best_type = "nvidia"
+                    elif "qsv" in enc:
+                        best_type = "qsv"
+                    elif "vaapi" in enc:
+                        best_type = "vaapi"
                 break
 
     result["type"] = best_type
     if best_type == "nvidia":
         result["decode_method"] = "cuda"
+    elif best_type in ("qsv", "vaapi"):
+        result["decode_method"] = "vaapi"
 
     return result
 
@@ -169,7 +324,10 @@ def map_codec_to_hw(
     """Map user-requested codec to appropriate hardware encoder.
 
     Returns ``(encoder_name, extra_flags, init_hw_flags)``.
+    init_hw_flags must come BEFORE -i in the ffmpeg command!
     """
+    dev = hw_info.get("vaapi_device", VAAPI_DEVICE)
+
     # CPU encoders -- honor directly
     if requested_codec in (LIBX264, LIBX265, LIBSVTAV1, LIBAOM_AV1):
         encoder = requested_codec if requested_codec != LIBSVTAV1 else LIBAOM_AV1
@@ -180,15 +338,36 @@ def map_codec_to_hw(
             flags = ["-pix_fmt", "yuv420p"]
         return encoder, flags, []
 
-    # Explicit NVENC selection
+    # Explicit encoder selection (including QSV/VAAPI)
     if requested_codec in HW_ENCODERS:
         encoder = requested_codec
-        flags = ["-pix_fmt", "yuv420p"]
-        if "h264" in encoder:
-            flags += ["-profile:v", "high"]
-        elif "hevc" in encoder:
-            flags += ["-profile:v", "main"]
-        return encoder, flags, []
+        init_flags: list[str] = []
+        flags: list[str] = []
+
+        # QSV: special init with VAAPI backend
+        if encoder in QSV_ENCODERS:
+            init_flags = [
+                "-init_hw_device", f"vaapi=va:{dev}",
+                "-init_hw_device", "qsv=qs@va",
+                "-hwaccel", "qsv",
+                "-hwaccel_device", "qs",
+                "-hwaccel_output_format", "qsv",
+            ]
+        # VAAPI: standard VAAPI hwaccel
+        elif encoder in VAAPI_ENCODERS:
+            init_flags = [
+                "-init_hw_device", f"vaapi=va:{dev}",
+                "-filter_hw_device", "va",
+            ]
+        # NVENC: standard NVENC flags
+        else:
+            flags = ["-pix_fmt", "yuv420p"]
+            if "h264" in encoder:
+                flags += ["-profile:v", "high"]
+            elif "hevc" in encoder:
+                flags += ["-profile:v", "main"]
+
+        return encoder, flags, init_flags
 
     # Legacy / bare codec name fallback
     if "h264" in requested_codec:
@@ -202,8 +381,22 @@ def map_codec_to_hw(
 
     encoder = hw_info.get("available_encoders", {}).get(base, LIBX264)
     flags = []
+    init_flags = []
 
-    if encoder.endswith("_nvenc"):
+    if encoder in QSV_ENCODERS:
+        init_flags = [
+            "-init_hw_device", f"vaapi=va:{dev}",
+            "-init_hw_device", "qsv=qs@va",
+            "-hwaccel", "qsv",
+            "-hwaccel_device", "qs",
+            "-hwaccel_output_format", "qsv",
+        ]
+    elif encoder in VAAPI_ENCODERS:
+        init_flags = [
+            "-init_hw_device", f"vaapi=va:{dev}",
+            "-filter_hw_device", "va",
+        ]
+    elif encoder.endswith("_nvenc"):
         flags = ["-pix_fmt", "yuv420p"]
         if base == "h264":
             flags += ["-profile:v", "high"]
@@ -214,7 +407,7 @@ def map_codec_to_hw(
     elif encoder == LIBX265:
         flags = ["-pix_fmt", "yuv420p"]
 
-    return encoder, flags, []
+    return encoder, flags, init_flags
 
 
 # ---------------------------------------------------------------------------

@@ -53,7 +53,7 @@ def _ensure_defaults() -> Dict[str, Any]:
             {"name": "H264 8MB (NVENC)", "target_mb": 8, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
             {"name": "HEVC 50MB HQ (NVENC)", "target_mb": 50, "video_codec": "hevc_nvenc", "audio_codec": "aac", "preset": "p7", "audio_kbps": 192, "container": "mp4", "tune": "hq"},
             {"name": "H264 25MB Fast (NVENC)", "target_mb": 25, "video_codec": "h264_nvenc", "audio_codec": "aac", "preset": "p3", "audio_kbps": 128, "container": "mp4", "tune": "ll"},
-            {"name": "AV1 8MB (CPU)", "target_mb": 8, "video_codec": "libaom-av1", "audio_codec": "libopus", "preset": "4", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
+            {"name": "AV1 8MB (CPU)", "target_mb": 8, "video_codec": "libaom-av1", "audio_codec": "libopus", "preset": "p4", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
         ]
         changed = True
     try:
@@ -82,6 +82,12 @@ def _ensure_defaults() -> Dict[str, Any]:
             'h264_nvenc': True,
             'hevc_nvenc': True,
             'av1_nvenc': True,
+            'h264_qsv': True,
+            'hevc_qsv': True,
+            'av1_qsv': True,
+            'h264_vaapi': True,
+            'hevc_vaapi': True,
+            'av1_vaapi': True,
             'libx264': True,
             'libx265': True,
             'libaom_av1': True,
@@ -322,24 +328,47 @@ def update_default_presets(
 
 
 def get_codec_visibility_settings() -> dict:
-    """Get codec visibility from settings.json (persists reliably)."""
+    """Get codec visibility from settings.json, with CODEC_* env var overrides."""
     data = _ensure_defaults()
     vis = data.get('codec_visibility', {})
-    return {
+    result = {
         'h264_nvenc': vis.get('h264_nvenc', True),
         'hevc_nvenc': vis.get('hevc_nvenc', True),
         'av1_nvenc': vis.get('av1_nvenc', True),
+        'h264_qsv': vis.get('h264_qsv', True),
+        'hevc_qsv': vis.get('hevc_qsv', True),
+        'av1_qsv': vis.get('av1_qsv', True),
+        'h264_vaapi': vis.get('h264_vaapi', True),
+        'hevc_vaapi': vis.get('hevc_vaapi', True),
+        'av1_vaapi': vis.get('av1_vaapi', True),
         'libx264': vis.get('libx264', True),
         'libx265': vis.get('libx265', True),
         'libaom_av1': vis.get('libaom_av1', True),
     }
+    # Allow CODEC_* environment variables to override (e.g. CODEC_H264_QSV=true)
+    env_map = {
+        'CODEC_H264_NVENC': 'h264_nvenc', 'CODEC_HEVC_NVENC': 'hevc_nvenc', 'CODEC_AV1_NVENC': 'av1_nvenc',
+        'CODEC_H264_QSV': 'h264_qsv', 'CODEC_HEVC_QSV': 'hevc_qsv', 'CODEC_AV1_QSV': 'av1_qsv',
+        'CODEC_H264_VAAPI': 'h264_vaapi', 'CODEC_HEVC_VAAPI': 'hevc_vaapi', 'CODEC_AV1_VAAPI': 'av1_vaapi',
+        'CODEC_LIBX264': 'libx264', 'CODEC_LIBX265': 'libx265', 'CODEC_LIBAOM_AV1': 'libaom_av1',
+    }
+    for env_key, settings_key in env_map.items():
+        val = os.environ.get(env_key)
+        if val is not None:
+            result[settings_key] = val.lower() in ('true', '1', 'yes')
+    return result
 
 
 def update_codec_visibility_settings(settings: dict):
     """Update codec visibility in settings.json."""
     data = _ensure_defaults()
     vis = data.get('codec_visibility', {})
-    valid_keys = {'h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'libx264', 'libx265', 'libaom_av1'}
+    valid_keys = {
+        'h264_nvenc', 'hevc_nvenc', 'av1_nvenc',
+        'h264_qsv', 'hevc_qsv', 'av1_qsv',
+        'h264_vaapi', 'hevc_vaapi', 'av1_vaapi',
+        'libx264', 'libx265', 'libaom_av1',
+    }
     for k in valid_keys:
         if k in settings:
             vis[k] = bool(settings[k])

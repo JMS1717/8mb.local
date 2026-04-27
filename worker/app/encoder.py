@@ -1,13 +1,13 @@
 """Encoder-aware FFmpeg command builder.
 
-Constructs FFmpeg commands with the correct flags for NVENC and CPU encoders.
+Constructs FFmpeg commands with the correct flags for NVENC, QSV, VAAPI, and CPU encoders.
 """
 from __future__ import annotations
 
 import logging
 from typing import Optional
 
-from .constants import CPU_PRESET_MAP
+from .constants import CPU_PRESET_MAP, QSV_PRESET_MAP, QSV_ENCODERS, VAAPI_ENCODERS
 
 logger = logging.getLogger(__name__)
 
@@ -110,15 +110,42 @@ def _build_video_filters(
     scale_width: Optional[int],
     scale_height: Optional[int],
 ) -> list[str]:
-    """Build the ``-vf`` filter chain for NVENC/CPU encoders."""
+    """Build the ``-vf`` filter chain for encoder-specific requirements.
+
+    QSV:   scale_qsv (HW scaling) + hwmap=derive_device=qsv,format=qsv
+    VAAPI: scale (CPU) + format=nv12|vaapi + hwupload
+    NVENC/CPU: standard scale filter
+    """
     filters: list[str] = []
 
-    if scale_width and scale_height:
-        filters.append(f"scale={scale_width}:{scale_height}")
-    elif scale_width:
-        filters.append(f"scale={scale_width}:-2")
-    elif scale_height:
-        filters.append(f"scale=-2:{scale_height}")
+    if encoder in QSV_ENCODERS:
+        # QSV: Use hardware scaling
+        if scale_width and scale_height:
+            filters.append(f"scale_qsv={scale_width}:{scale_height}")
+        elif scale_width:
+            filters.append(f"scale_qsv={scale_width}:-1")
+        elif scale_height:
+            filters.append(f"scale_qsv=-1:{scale_height}")
+        # Final: Map to QSV format (MUST be last filter)
+        filters.append("hwmap=derive_device=qsv,format=qsv")
+    elif encoder in VAAPI_ENCODERS:
+        # VAAPI: CPU scaling + VAAPI upload
+        if scale_width and scale_height:
+            filters.append(f"scale={scale_width}:{scale_height}")
+        elif scale_width:
+            filters.append(f"scale={scale_width}:-2")
+        elif scale_height:
+            filters.append(f"scale=-2:{scale_height}")
+        # Format for VAAPI hardware upload
+        filters.append("format=nv12,hwupload")
+    else:
+        # NVENC / CPU: standard software scaling
+        if scale_width and scale_height:
+            filters.append(f"scale={scale_width}:{scale_height}")
+        elif scale_width:
+            filters.append(f"scale={scale_width}:-2")
+        elif scale_height:
+            filters.append(f"scale=-2:{scale_height}")
 
     return filters
 
@@ -128,17 +155,51 @@ def _build_encoder_quality_flags(
     preset: Optional[str],
     tune: Optional[str],
 ) -> list[str]:
-    """Return encoder-specific quality/preset flags."""
+    """Return encoder-specific quality/preset flags.
+
+    QSV:   -global_quality (ICQ mode, best quality) + -look_ahead 1
+    VAAPI: -rc_mode VBR or CQP + -qp (if quality specified)
+    NVENC: -preset + -tune
+    CPU:   -preset
+    """
     flags: list[str] = []
 
-    if "nvenc" in encoder:
+    if encoder in QSV_ENCODERS:
+        # QSV: Always use lookahead for better quality
+        flags += ["-look_ahead", "1"]
+        # Note: If quality/crf is needed, use -global_quality in higher-level code
+        if preset:
+            mapped = QSV_PRESET_MAP.get(preset, "medium")
+            flags += ["-preset", mapped]
+    elif encoder in VAAPI_ENCODERS:
+        # VAAPI: Use VBR by default (bitrate-based)
+        flags += ["-rc_mode", "VBR"]
+        # Note: For CQP mode, add -rc_mode CQP + -qp in higher-level code
+        if preset:
+            # VAAPI doesn't have standard presets, use compression_level
+            compression_level = _vaapi_compression_level(preset)
+            flags += ["-compression_level", str(compression_level)]
+    elif "nvenc" in encoder:
+        # NVENC: preset + tune
         if preset:
             flags += ["-preset", preset]
         if tune:
             flags += ["-tune", tune]
     else:
+        # CPU encoders: preset mapping
         if preset:
             mapped = CPU_PRESET_MAP.get(preset, "medium")
             flags += ["-preset", mapped]
 
     return flags
+
+
+def _vaapi_compression_level(preset: str) -> int:
+    """Map preset string to VAAPI compression_level (0=fastest, 7=best quality)."""
+    mapping = {
+        "p1": 0, "p2": 1, "p3": 1, "p4": 2, "p5": 3, "p6": 4, "p7": 5,
+        "ultrafast": 0, "superfast": 1, "veryfast": 1,
+        "faster": 2, "fast": 3, "medium": 4,
+        "slow": 5, "slower": 6, "veryslow": 7,
+    }
+    return mapping.get(preset, 4)

@@ -158,16 +158,48 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
 
 
 def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
-    """Test if encoder can actually be initialized."""
+    """Test if encoder can actually be initialized.
+
+    For VAAPI/QSV encoders, uses the correct hwaccel init and filter chain.
+    """
     try:
-        common_args = [
-            "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
-            "-c:v", encoder_name, "-t", "0.1", "-frames:v", "3",
-            "-f", "null", "-",
-        ]
-        cmd = ["ffmpeg", "-hide_banner", *common_args]
+        vaapi_device = os.environ.get("VAAPI_DEVICE", "/dev/dri/renderD128")
+
+        if "_vaapi" in encoder_name:
+            # VAAPI: init device + filter_hw_device, CPU decode, hwupload to VAAPI
+            cmd = [
+                "ffmpeg", "-hide_banner", "-y",
+                "-init_hw_device", f"vaapi=va:{vaapi_device}",
+                "-filter_hw_device", "va",
+                "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
+                "-vf", "format=nv12,hwupload",
+                "-c:v", encoder_name, "-frames:v", "1",
+                "-f", "null", "-",
+            ]
+        elif "_qsv" in encoder_name:
+            # QSV needs: -init_hw_device vaapi=va:DEV -init_hw_device qsv=qs@va + hwmap
+            cmd = [
+                "ffmpeg", "-hide_banner", "-y",
+                "-init_hw_device", f"vaapi=va:{vaapi_device}",
+                "-init_hw_device", "qsv=qs@va",
+                "-hwaccel", "qsv", "-hwaccel_device", "qs",
+                "-hwaccel_output_format", "qsv",
+                "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
+                "-vf", "hwmap=derive_device=qsv,format=qsv",
+                "-c:v", encoder_name, "-frames:v", "1",
+                "-f", "null", "-",
+            ]
+        else:
+            # NVENC / CPU: simple test (original logic)
+            cmd = [
+                "ffmpeg", "-hide_banner",
+                "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
+                "-c:v", encoder_name, "-t", "0.1", "-frames:v", "3",
+                "-f", "null", "-",
+            ]
+
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=8, env=get_gpu_env()
+            cmd, capture_output=True, text=True, timeout=15, env=get_gpu_env()
         )
 
         if result is None:
@@ -238,7 +270,7 @@ def is_encoder_available(encoder_name: str) -> bool:
 
 
 def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
-    """Run encoder initialization tests for NVIDIA and CPU encoders."""
+    """Run encoder initialization tests for NVIDIA, QSV, VAAPI, and CPU encoders."""
     from .hw_detect import map_codec_to_hw
 
     logger.info("GPU Environment Check:")
@@ -249,6 +281,8 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
         f"  NVIDIA_DRIVER_CAPABILITIES: {os.environ.get('NVIDIA_DRIVER_CAPABILITIES', 'NOT SET')}"
     )
     logger.info(f"  LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', 'NOT SET')}")
+    logger.info(f"  VAAPI_DEVICE: {os.environ.get('VAAPI_DEVICE', 'NOT SET')}")
+    logger.info(f"  LIBVA_DRIVER_NAME: {os.environ.get('LIBVA_DRIVER_NAME', 'NOT SET')}")
     logger.info("")
 
     _wait_for_nv_runtime_ready(timeout_s=30.0, interval_s=2.0)
@@ -282,6 +316,19 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
             "hevc_nvenc": ("hevc", ["-hwaccel", "cuda", "-c:v", "hevc_cuvid"]),
             "av1_nvenc": ("av1", ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]),
         }
+
+    vaapi_device = hw_info.get("vaapi_device", "/dev/dri/renderD128")
+    if hw_type_lower in ("qsv", "vaapi") or os.path.exists(vaapi_device):
+        test_codecs.extend(["h264_qsv", "hevc_qsv", "av1_qsv"])
+        test_codecs.extend(["h264_vaapi", "hevc_vaapi", "av1_vaapi"])
+        hw_decoders.update({
+            "h264_qsv": ("h264", ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device]),
+            "hevc_qsv": ("hevc", ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device]),
+            "av1_qsv": ("av1", ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device]),
+            "h264_vaapi": ("h264", ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device]),
+            "hevc_vaapi": ("hevc", ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device]),
+            "av1_vaapi": ("av1", ["-hwaccel", "vaapi", "-hwaccel_device", vaapi_device]),
+        })
 
     test_codecs.extend(["libx264", "libx265", "libaom-av1"])
 

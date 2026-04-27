@@ -44,6 +44,8 @@
   let autoDownload = true;
   let warnText: string | null = null;
   let resolutionSuggestText: string | null = null;
+  // Sync select dropdown with explicitHeight
+  $: resolutionSelectValue = explicitHeight ? String(explicitHeight) : '';
   let resolutionSuggestHeight: 2160|1440|1080|720|480|360|240|null = null;
   
   // Helper function to parse time string to seconds
@@ -203,7 +205,7 @@
   let appVersion: string | null = null;
 
   // Available codecs from backend
-  let availableCodecs: Array<{value: string, label: string, group: string}> = [];
+  let availableCodecs: Array<{value: string, label: string, group: string, failed: boolean}> = [];
   let hardwareType = 'cpu';
   let sysCaps: any = null;
   let sysCapsError: string | null = null;
@@ -255,7 +257,8 @@
         targetMB = presets.target_mb;
         videoCodec = presets.video_codec;
         audioCodec = presets.audio_codec;
-        preset = presets.preset;
+        const validPresets = ['p1','p2','p3','p4','p5','p6','p7','extraquality'];
+        preset = validPresets.includes(presets.preset) ? presets.preset : 'p6';
         audioKbps = presets.audio_kbps;
         container = presets.container;
         tune = presets.tune;
@@ -295,6 +298,13 @@
       const tests = await getEncoderTestResults();
       gpuOk = !!tests?.any_hardware_passed;
       encoderTests = (tests?.results || []);
+      // Rebuild codec list now that we have test results for greying out failed codecs
+      if (encoderTests.length > 0) {
+        try {
+          const codecData = await getAvailableCodecs();
+          availableCodecs = buildCodecList(codecData);
+        } catch {}
+      }
     } catch {}
 
     // Fetch app version
@@ -361,8 +371,8 @@
     }
   }
 
-  function buildCodecList(codecData: any): Array<{value: string, label: string, group: string}> {
-    const list: Array<{value: string, label: string, group: string}> = [];
+  function buildCodecList(codecData: any): Array<{value: string, label: string, group: string, failed: boolean}> {
+    const list: Array<{value: string, label: string, group: string, failed: boolean}> = [];
     const enabledCodecs = codecData.enabled_codecs || [];
     
     // Build list of all possible codecs with labels
@@ -371,6 +381,14 @@
       { value: 'av1_nvenc', label: 'AV1 (NVIDIA - RTX 40/50 series)', group: 'nvidia' },
       { value: 'hevc_nvenc', label: 'HEVC (H.265, NVIDIA)', group: 'nvidia' },
       { value: 'h264_nvenc', label: 'H.264 (NVIDIA)', group: 'nvidia' },
+      // Intel QSV (via VAAPI backend)
+      { value: 'av1_qsv', label: 'AV1 (Intel QSV)', group: 'qsv' },
+      { value: 'hevc_qsv', label: 'HEVC (H.265, Intel QSV)', group: 'qsv' },
+      { value: 'h264_qsv', label: 'H.264 (Intel QSV)', group: 'qsv' },
+      // VAAPI (Intel iGPU, AMD)
+      { value: 'av1_vaapi', label: 'AV1 (VAAPI)', group: 'vaapi' },
+      { value: 'hevc_vaapi', label: 'HEVC (H.265, VAAPI)', group: 'vaapi' },
+      { value: 'h264_vaapi', label: 'H.264 (VAAPI)', group: 'vaapi' },
       // CPU / software
       { value: 'libaom-av1', label: 'AV1 (CPU - Highest Quality)', group: 'cpu' },
       { value: 'libsvtav1', label: 'AV1 (CPU - SVT-AV1)', group: 'cpu' },
@@ -381,7 +399,10 @@
     // Filter to only include codecs that are enabled in settings
     for (const codec of codecDefinitions) {
       if (enabledCodecs.includes(codec.value)) {
-        list.push(codec);
+        // Check if this codec failed the encoder test
+        const testResult = encoderTests.find((t: any) => t.codec === codec.value);
+        const failed = testResult ? !testResult.passed : false;
+        list.push({ ...codec, failed });
       }
     }
     
@@ -1007,6 +1028,15 @@
     try {
       await cancelJob(taskId);
       logLines = ['Cancellation requested…', ...logLines].slice(0, 500);
+      // Give server 3s to send 'canceled' SSE event, then force-reset UI
+      setTimeout(() => {
+        if (isCompressing) {
+          isCompressing = false;
+          isFinalizing = false;
+          logLines = ['🚫 Job canceled (timeout)', ...logLines];
+          try { esRef?.close(); } catch {}
+        }
+      }, 3000);
     } catch (e:any) {
       errorText = e?.message || 'Failed to cancel';
     } finally {
@@ -1246,8 +1276,8 @@
       <label class="block mb-1 text-sm">Video Codec</label>
       <select class="input w-full codec-select" bind:value={videoCodec}>
         {#each availableCodecs as codec}
-          <option value={codec.value} data-group={codec.group}>
-            {getCodecIcon(codec.group)} {codec.label}
+          <option value={codec.value} data-group={codec.group} class:codec-failed={codec.failed}>
+            {getCodecIcon(codec.group)} {codec.label}{codec.failed ? ' ✗' : ''}
           </option>
         {/each}
       </select>
@@ -1271,7 +1301,8 @@
       <label class="block mb-1 text-sm">Resolution</label>
       <div class="flex items-center gap-2">
         <select class="input w-full" disabled={audioOnly || autoResolution}
-          on:change={(e:any)=>{ const v = e.target.value; explicitHeight = parseExplicitHeight(v); }}>
+          bind:value={resolutionSelectValue}
+          on:change={() => { explicitHeight = parseExplicitHeight(resolutionSelectValue); }}>
           <option value="">Original</option>
           <option value="2160">2160p (4K)</option>
           <option value="1440">1440p</option>
@@ -1287,7 +1318,7 @@
         <label class="flex items-center gap-2 text-xs cursor-pointer">
           <input type="checkbox" bind:checked={autoResolution} disabled={audioOnly} />
           <span>Auto (won’t go below</span>
-          <select class="input h-7 py-0 px-2 text-xs w-20" bind:value={minAutoHeight} disabled={audioOnly || !autoResolution}>
+          <select class="input h-7 py-0 px-2 text-xs w-24" bind:value={minAutoHeight} disabled={audioOnly || !autoResolution}>
             <option value={240}>240p</option>
             <option value={360}>360p</option>
             <option value={480}>480p</option>
@@ -1552,6 +1583,10 @@
         {#if encodeMethod}
           {#if /_nvenc$/.test(encodeMethod)}
             <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: NVIDIA NVENC</span>
+          {:else if /_qsv$/.test(encodeMethod)}
+            <span class="text-xs px-2 py-1 rounded bg-blue-900/40 text-blue-300 border border-blue-700/40">Encoder: Intel QSV</span>
+          {:else if /_vaapi$/.test(encodeMethod)}
+            <span class="text-xs px-2 py-1 rounded bg-amber-900/40 text-amber-300 border border-amber-700/40">Encoder: VAAPI</span>
           {:else}
             <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-200 border border-slate-600/40">Encoder: CPU ({encodeMethod})</span>
           {/if}
@@ -1709,5 +1744,19 @@
   }
   .codec-select option[data-group="cpu"] {
     color: #9ca3af;
+  }
+  .codec-select option[data-group="qsv"] {
+    color: #60a5fa;
+    font-weight: 500;
+  }
+  .codec-select option[data-group="vaapi"] {
+    color: #fbbf24;
+    font-weight: 500;
+  }
+  /* Grey out codecs that failed encoder tests */
+  .codec-select :global(option.codec-failed) {
+    color: #6b7280 !important;
+    font-weight: 400 !important;
+    font-style: italic;
   }
 </style>

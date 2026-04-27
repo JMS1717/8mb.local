@@ -94,6 +94,12 @@ async def get_available_codecs() -> AvailableCodecsResponse:
             'h264_nvenc': codec_settings.get('h264_nvenc', True),
             'hevc_nvenc': codec_settings.get('hevc_nvenc', True),
             'av1_nvenc': codec_settings.get('av1_nvenc', True),
+            'h264_qsv': codec_settings.get('h264_qsv', True),
+            'hevc_qsv': codec_settings.get('hevc_qsv', True),
+            'av1_qsv': codec_settings.get('av1_qsv', True),
+            'h264_vaapi': codec_settings.get('h264_vaapi', True),
+            'hevc_vaapi': codec_settings.get('hevc_vaapi', True),
+            'av1_vaapi': codec_settings.get('av1_vaapi', True),
             'libx264': codec_settings.get('libx264', True),
             'libx265': codec_settings.get('libx265', True),
             'libaom-av1': codec_settings.get('libaom_av1', True),
@@ -144,6 +150,8 @@ async def system_encoder_tests():
 
     test_codecs = [
         "h264_nvenc","hevc_nvenc","av1_nvenc",
+        "h264_qsv","hevc_qsv","av1_qsv",
+        "h264_vaapi","hevc_vaapi","av1_vaapi",
         "libx264","libx265","libaom-av1",
     ]
 
@@ -194,7 +202,7 @@ async def system_encoder_tests():
                 "decode_message": decode_msg,
             })
             
-            is_hardware = actual_encoder.endswith("_nvenc")
+            is_hardware = actual_encoder.endswith("_nvenc") or actual_encoder.endswith("_qsv") or actual_encoder.endswith("_vaapi")
             if overall_passed and is_hardware:
                 any_hw_passed = True
 
@@ -204,6 +212,10 @@ async def system_encoder_tests():
                 return True
             if hw_type == "nvidia":
                 return c.endswith("_nvenc")
+            if hw_type == "qsv":
+                return c.endswith("_qsv") or c.endswith("_vaapi")
+            if hw_type == "vaapi":
+                return c.endswith("_vaapi")
             return False
         filtered = [r for r in results if _matches_hw(r["codec"])]
 
@@ -281,6 +293,10 @@ async def gpu_diagnostics():
     checks["ffmpeg_hwaccels"] = run_cmd(["ffmpeg", "-hide_banner", "-hwaccels"], timeout=4)
     checks["ffmpeg_encoders"] = run_cmd(["ffmpeg", "-hide_banner", "-encoders"], timeout=6)
 
+    # VAAPI diagnostics
+    checks["vainfo"] = run_cmd(["vainfo", "--display", "drm", "--device", "/dev/dri/renderD128"], timeout=6)
+    checks["dri_devices"] = run_cmd(["ls", "-la", "/dev/dri/"], timeout=2)
+
     nvenc_test = run_cmd([
         "ffmpeg", "-hide_banner", "-v", "error",
         "-f", "lavfi", "-i", "color=c=black:s=1280x720:d=0.1",
@@ -289,12 +305,29 @@ async def gpu_diagnostics():
     ], timeout=8)
     checks["nvenc_smoke_test"] = nvenc_test
 
+    # VAAPI smoke test
+    vaapi_test = run_cmd([
+        "ffmpeg", "-hide_banner", "-v", "error",
+        "-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128",
+        "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.1",
+        "-vf", "format=nv12|vaapi,hwupload",
+        "-c:v", "h264_vaapi", "-frames:v", "1",
+        "-f", "null", "-",
+    ], timeout=10)
+    checks["vaapi_smoke_test"] = vaapi_test
+
     summary = {
         "nvidia_device_present": any(x.get("exists") for x in checks.get("device_files", [])),
         "nvidia_smi_ok": checks["nvidia_smi_L"]["rc"] == 0 and bool(checks["nvidia_smi_L"].get("stdout")),
         "ffmpeg_sees_cuda": "cuda" in (checks["ffmpeg_hwaccels"].get("stdout", "") + checks["ffmpeg_hwaccels"].get("stderr", "")).lower(),
+        "ffmpeg_sees_vaapi": "vaapi" in (checks["ffmpeg_hwaccels"].get("stdout", "") + checks["ffmpeg_hwaccels"].get("stderr", "")).lower(),
         "ffmpeg_has_nvenc": any(tok in checks["ffmpeg_encoders"].get("stdout", "") for tok in ["h264_nvenc", "hevc_nvenc", "av1_nvenc"]),
+        "ffmpeg_has_qsv": any(tok in checks["ffmpeg_encoders"].get("stdout", "") for tok in ["h264_qsv", "hevc_qsv", "av1_qsv"]),
+        "ffmpeg_has_vaapi": any(tok in checks["ffmpeg_encoders"].get("stdout", "") for tok in ["h264_vaapi", "hevc_vaapi", "av1_vaapi"]),
         "nvenc_encode_ok": nvenc_test["rc"] == 0 and "error" not in (nvenc_test.get("stderr", "").lower()),
+        "vaapi_encode_ok": vaapi_test["rc"] == 0 and "error" not in (vaapi_test.get("stderr", "").lower()),
+        "vainfo_ok": checks["vainfo"]["rc"] == 0,
+        "dri_device_present": os.path.exists("/dev/dri/renderD128"),
     }
 
     return {"summary": summary, "checks": checks}

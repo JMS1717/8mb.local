@@ -25,6 +25,36 @@ REDIS = None
 # Cache encoder test results to avoid slow init tests on every job
 ENCODER_TEST_CACHE: Dict[str, bool] = {}
 
+# libsvtav1: SVT-AV1 preset helpers
+SVTAV1_PARAMS_MAX_LP = ["-svtav1-params", "lp=6"]
+
+
+def _cpu_fallback_for(encoder: str) -> tuple[str, list[str]]:
+    """Return (cpu_encoder, v_flags) for CPU fallback."""
+    from .constants import CPU_FALLBACK, LIBSVTAV1, LIBX264, LIBX265
+    fb = CPU_FALLBACK.get(encoder)
+    if fb is None:
+        if "h264" in encoder: fb = LIBX264
+        elif "hevc" in encoder or "h265" in encoder: fb = LIBX265
+        elif "av1" in encoder: fb = LIBSVTAV1
+        else: fb = LIBX264
+    flags = ["-pix_fmt", "yuv420p", "-profile:v", "high"] if fb == LIBX264 else ["-pix_fmt", "yuv420p"]
+    return fb, flags
+
+
+def _force_stop_ffmpeg(proc) -> None:
+    """Hard-stop ffmpeg (libsvtav1 ignores SIGTERM)."""
+    if proc.poll() is not None: return
+    try: proc.kill()
+    except Exception: pass
+    import sys as _sys
+    if _sys.platform != "win32" and proc.pid:
+        import signal as _sig
+        try: os.killpg(os.getpgid(proc.pid), _sig.SIGKILL)
+        except (ProcessLookupError, OSError): pass
+
+
+
 
 def get_gpu_env():
     """
@@ -1064,8 +1094,6 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         history_enabled = os.getenv('HISTORY_ENABLED', 'true').lower() in ('true', '1', 'yes')
         if history_enabled:
             # Import here to avoid circular dependency
-            import sys
-            sys.path.insert(0, '/app')
             import importlib
             hm = importlib.import_module('backend.history_manager')
             

@@ -1,5 +1,6 @@
 # GPU is enabled by default (`gpus: all`). Requires NVIDIA Container Toolkit on the host.
 # If `docker compose up` fails because no GPU is available, use `docker-compose.cpu.yml` instead.
+# For Intel systems with QSV/VAAPI support, the /dev/dri device is automatically included.
 services:
   8mblocal:
     build:
@@ -15,9 +16,15 @@ services:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
       - ./.env:/app/.env  # optional custom settings
+    # Mount DRI device for Intel QSV/VAAPI support (in addition to NVIDIA GPU)
+    devices:
+      - /dev/dri:/dev/dri
     gpus: all
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      # Intel QSV/VAAPI configuration
+      - VAAPI_DEVICE=/dev/dri/renderD128
+      - LIBVA_DRIVER_NAME=iHD  # or i965 for older Intel GPUs
     restart: unless-stopped

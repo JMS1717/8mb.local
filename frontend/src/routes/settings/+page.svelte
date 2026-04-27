@@ -13,15 +13,19 @@
 	tune: string;
   };
   type CodecVisibilitySettings = {
-	h264_nvenc: boolean;
-	hevc_nvenc: boolean;
-	av1_nvenc: boolean;
-	libx264: boolean;
-	libx265: boolean;
-	libaom_av1: boolean;
-  };
-
-  let saving = false;
+        h264_nvenc: boolean;
+        hevc_nvenc: boolean;
+        av1_nvenc: boolean;
+        h264_qsv: boolean;
+        hevc_qsv: boolean;
+        av1_qsv: boolean;
+        h264_vaapi: boolean;
+        hevc_vaapi: boolean;
+        av1_vaapi: boolean;
+        libx264: boolean;
+        libx265: boolean;
+        libaom_av1: boolean;
+  };  let saving = false;
   let message = '';
   let error = '';
 	// History toggle
@@ -48,15 +52,19 @@
 
   // Codec visibility - individual codecs
   let codecSettings: CodecVisibilitySettings = {
-	h264_nvenc: true,
-	hevc_nvenc: true,
-	av1_nvenc: true,
-	libx264: true,
-	libx265: true,
-	libaom_av1: true,
-  };
-
-	// New settings state
+        h264_nvenc: true,
+        hevc_nvenc: true,
+        av1_nvenc: true,
+        h264_qsv: true,
+        hevc_qsv: true,
+        av1_qsv: true,
+        h264_vaapi: true,
+        hevc_vaapi: true,
+        av1_vaapi: true,
+        libx264: true,
+        libx265: true,
+        libaom_av1: true,
+  };	// New settings state
 	let sizeButtons: number[] = [];
 	let newSizeValue: number | null = null;
 	let presetProfiles: any[] = [];
@@ -99,6 +107,12 @@
 			hevc_nvenc: !!c.hevc_nvenc,
 			av1_nvenc: !!c.av1_nvenc,
 			libx264: !!c.libx264,
+			h264_qsv: !!c.h264_qsv,
+			hevc_qsv: !!c.hevc_qsv,
+			av1_qsv: !!c.av1_qsv,
+			h264_vaapi: !!c.h264_vaapi,
+			hevc_vaapi: !!c.hevc_vaapi,
+			av1_vaapi: !!c.av1_vaapi,
 			libx265: !!c.libx265,
 			libaom_av1: !!c.libaom_av1,
 		};
@@ -440,8 +454,8 @@
   <div class="card">
 	<div class="title">Available Codecs</div>
 	<p class="label" style="margin-bottom:16px; color:#9ca3af">
-	  Select which codecs appear in the compression page dropdown. GPU options use NVIDIA NVENC; software options use the CPU.
-	  <a href="/gpu-support" style="color:#3b82f6; text-decoration:underline">View NVIDIA encoding support →</a>
+	  Select which codecs appear in the compression page dropdown. GPU options use NVIDIA NVENC, Intel QSV, or VAAPI; software options use the CPU.
+	  <a href="/gpu-support" style="color:#3b82f6; text-decoration:underline">View hardware encoding support →</a>
 	</p>
 
 	<!-- NVIDIA Section -->
@@ -463,6 +477,44 @@
 	  </div>
 	</div>
 
+
+        <!-- Intel QSV Section -->
+        <div style="margin-bottom:20px">
+          <h3 style="color:#60a5fa; font-weight:600; font-size:15px; margin-bottom:8px">Intel QSV (via VAAPI)</h3>
+          <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
+                <div class="switch">
+                  <input id="av1_qsv" type="checkbox" bind:checked={codecSettings.av1_qsv} />
+                  <label class="label" for="av1_qsv" style="margin:0">AV1 (Arc, 12th Gen+)</label>
+                </div>
+                <div class="switch">
+                  <input id="hevc_qsv" type="checkbox" bind:checked={codecSettings.hevc_qsv} />
+                  <label class="label" for="hevc_qsv" style="margin:0">HEVC (H.265)</label>
+                </div>
+                <div class="switch">
+                  <input id="h264_qsv" type="checkbox" bind:checked={codecSettings.h264_qsv} />
+                  <label class="label" for="h264_qsv" style="margin:0">H.264</label>
+                </div>
+          </div>
+        </div>
+
+        <!-- VAAPI Section -->
+        <div style="margin-bottom:20px">
+          <h3 style="color:#f59e0b; font-weight:600; font-size:15px; margin-bottom:8px">VAAPI (Intel / AMD)</h3>
+          <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
+                <div class="switch">
+                  <input id="av1_vaapi" type="checkbox" bind:checked={codecSettings.av1_vaapi} />
+                  <label class="label" for="av1_vaapi" style="margin:0">AV1</label>
+                </div>
+                <div class="switch">
+                  <input id="hevc_vaapi" type="checkbox" bind:checked={codecSettings.hevc_vaapi} />
+                  <label class="label" for="hevc_vaapi" style="margin:0">HEVC (H.265)</label>
+                </div>
+                <div class="switch">
+                  <input id="h264_vaapi" type="checkbox" bind:checked={codecSettings.h264_vaapi} />
+                  <label class="label" for="h264_vaapi" style="margin:0">H.264</label>
+                </div>
+          </div>
+        </div>
 	<!-- CPU Section -->
 	<div style="margin-bottom:20px">
 	  <h3 style="color:#9ca3af; font-weight:600; font-size:15px; margin-bottom:8px">CPU (Software Encoding)</h3>
@@ -705,6 +757,16 @@
 			<option value="hevc_nvenc">HEVC / H.265 (NVENC)</option>
 			<option value="h264_nvenc">H.264 (NVENC)</option>
 		  </optgroup>
+                  <optgroup label="Intel QSV (Hardware)">
+                        <option value="av1_qsv">AV1 (QSV)</option>
+                        <option value="hevc_qsv">HEVC / H.265 (QSV)</option>
+                        <option value="h264_qsv">H.264 (QSV)</option>
+                  </optgroup>
+                  <optgroup label="VAAPI (Intel / AMD)">
+                        <option value="av1_vaapi">AV1 (VAAPI)</option>
+                        <option value="hevc_vaapi">HEVC / H.265 (VAAPI)</option>
+                        <option value="h264_vaapi">H.264 (VAAPI)</option>
+                  </optgroup>
 		  <optgroup label="CPU (Software)">
 			<option value="libaom-av1">AV1 (CPU)</option>
 			<option value="libx265">HEVC / H.265 (CPU)</option>
