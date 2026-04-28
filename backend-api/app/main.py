@@ -81,7 +81,7 @@ async def on_startup():
 @app.on_event("startup")
 async def startup_event():
     settings_manager.initialize_env_if_missing()
-    start_scheduler()
+    # Note: start_scheduler() is already called in on_startup() above
     try:
         _ = get_hw_info_cached()
     except Exception:

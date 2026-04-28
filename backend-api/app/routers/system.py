@@ -387,8 +387,12 @@ def _get_latest_jellyfin_ffmpeg() -> dict:
         matches = re.findall(pattern, html)
         if not matches:
             return {"error": "No .deb packages found on Jellyfin repo", "url": JELLYFIN_REPO_BASE}
-        # Sort by version string (last entry = latest)
-        matches.sort(key=lambda m: m[1])
+        # Sort by parsed numeric tuple to handle multi-digit version parts correctly
+        # e.g. "7.1.10-5" > "7.1.2-5" (lexicographic sort would fail here)
+        def _ver_key(m: tuple) -> tuple:
+            import re as _re
+            return tuple(int(x) for x in _re.split(r"[.\-]", m[1]) if x.isdigit())
+        matches.sort(key=_ver_key)
         latest_filename, latest_version = matches[-1]
         return {
             "version": latest_version,

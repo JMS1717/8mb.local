@@ -83,6 +83,15 @@ CPU_PRESET_MAP: dict[str, str] = {
     "veryslow": "veryslow",
 }
 
+# libsvtav1 uses integer presets (0=slowest/best, 13=fastest/worst)
+# Maps UI preset strings and p1-p7 to integer values
+SVTAV1_PRESET_MAP: dict[str, int] = {
+    "p1": 1, "p2": 2, "p3": 4, "p4": 6, "p5": 8, "p6": 10, "p7": 12,
+    "ultrafast": 13, "superfast": 12, "veryfast": 11,
+    "faster": 9, "fast": 8, "medium": 6,
+    "slow": 4, "slower": 2, "veryslow": 1,
+}
+
 # QSV preset mapping (p1=veryfast ... p7=veryslow)
 QSV_PRESET_MAP: dict[str, str] = {
     "p1": "veryfast", "p2": "faster", "p3": "fast",

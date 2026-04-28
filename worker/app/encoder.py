@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from .constants import CPU_PRESET_MAP, QSV_PRESET_MAP, QSV_ENCODERS, VAAPI_ENCODERS
+from .constants import CPU_PRESET_MAP, SVTAV1_PRESET_MAP, QSV_PRESET_MAP, QSV_ENCODERS, VAAPI_ENCODERS
 
 logger = logging.getLogger(__name__)
 
@@ -136,8 +136,9 @@ def _build_video_filters(
             filters.append(f"scale={scale_width}:-2")
         elif scale_height:
             filters.append(f"scale=-2:{scale_height}")
-        # Format for VAAPI hardware upload
-        filters.append("format=nv12,hwupload")
+        # format=nv12|vaapi allows passthrough if already in VAAPI surface,
+        # otherwise converts to NV12 first; hwupload moves it to GPU memory
+        filters.append("format=nv12|vaapi,hwupload")
     else:
         # NVENC / CPU: standard software scaling
         if scale_width and scale_height:
@@ -187,10 +188,14 @@ def _build_encoder_quality_flags(
         if tune:
             flags += ["-tune", tune]
     else:
-        # CPU encoders: preset mapping
+        # CPU encoders: libsvtav1 needs integer presets, others use string presets
         if preset:
-            mapped = CPU_PRESET_MAP.get(preset, "medium")
-            flags += ["-preset", mapped]
+            if encoder == "libsvtav1":
+                mapped_int = SVTAV1_PRESET_MAP.get(preset, 6)
+                flags += ["-preset", str(mapped_int)]
+            else:
+                mapped = CPU_PRESET_MAP.get(preset, "medium")
+                flags += ["-preset", mapped]
 
     return flags
 

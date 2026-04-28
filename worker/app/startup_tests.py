@@ -179,11 +179,12 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
                 "-f", "null", "-",
             ]
         elif "_qsv" in encoder_name:
-            # QSV: init device + filter_hw_device, CPU decode, hwupload to QSV
+            # QSV: two-step init (vaapi → qsv@va), CPU decode, hwupload to QSV
             cmd = [
                 "ffmpeg", "-hide_banner", "-y",
-                "-init_hw_device", f"qsv=qsv:{vaapi_device}",
-                "-filter_hw_device", "qsv",
+                "-init_hw_device", f"vaapi=va:{vaapi_device}",
+                "-init_hw_device", "qsv=hw@va",
+                "-filter_hw_device", "hw",
                 "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
                 "-vf", "format=nv12,hwupload=extra_hw_frames=64",
                 "-c:v", encoder_name, "-frames:v", "1",

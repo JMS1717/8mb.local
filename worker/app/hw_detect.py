@@ -84,18 +84,19 @@ def _detect_vaapi_driver(device: str) -> str:
 
 
 def _test_qsv(encoder_name: str) -> bool:
-    """Test QSV encoder with direct device init.
+    """Test QSV encoder via VAAPI backend (correct two-step init for Linux).
 
-    Uses: -hwaccel qsv -hwaccel_device /dev/dri/renderD128
-    with format=nv12,hwupload=extra_hw_frames=64 filter chain.
+    Uses: -init_hw_device vaapi=va:DEV -init_hw_device qsv=hw@va
+    This is the modern approach that works without deprecated libmfx.
     """
     if _NO_QSV or not os.path.exists(VAAPI_DEVICE):
         return False
 
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-hwaccel", "qsv",
-        "-hwaccel_device", VAAPI_DEVICE,
+        "-init_hw_device", f"vaapi=va:{VAAPI_DEVICE}",
+        "-init_hw_device", "qsv=hw@va",
+        "-filter_hw_device", "hw",
         "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1:r=1",
         "-vf", "format=nv12,hwupload=extra_hw_frames=64",
         "-c:v", encoder_name,
@@ -359,11 +360,12 @@ def map_codec_to_hw(
                     logger.warning(f"QSV encoder {encoder} not available, falling back to CPU {cpu_fb}")
                     return cpu_fb, ["-pix_fmt", "yuv420p"], []
 
-        # QSV: special init with VAAPI backend
+        # QSV: special init with VAAPI backend (two-step: vaapi → qsv@va)
         if encoder in QSV_ENCODERS:
             init_flags = [
-                "-init_hw_device", f"qsv=qsv:{dev}",
-                "-filter_hw_device", "qsv",
+                "-init_hw_device", f"vaapi=va:{dev}",
+                "-init_hw_device", "qsv=hw@va",
+                "-filter_hw_device", "hw",
             ]
         # VAAPI: standard VAAPI hwaccel
         elif encoder in VAAPI_ENCODERS:
@@ -397,8 +399,9 @@ def map_codec_to_hw(
 
     if encoder in QSV_ENCODERS:
         init_flags = [
-            "-init_hw_device", f"qsv=qsv:{dev}",
-            "-filter_hw_device", "qsv",
+            "-init_hw_device", f"vaapi=va:{dev}",
+            "-init_hw_device", "qsv=hw@va",
+            "-filter_hw_device", "hw",
         ]
     elif encoder in VAAPI_ENCODERS:
         init_flags = [
