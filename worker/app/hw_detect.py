@@ -347,7 +347,10 @@ def map_codec_to_hw(
 
         # QSV→VAAPI fallback: if QSV was requested but failed startup test, use VAAPI
         tested = hw_info.get("tested_encoders", {})
-        if encoder in QSV_ENCODERS and not tested.get(encoder, False):
+        # Only fall back if the encoder was explicitly tested AND failed.
+        # tested.get(encoder, False) returns False both for "failed" AND "not tested yet",
+        # which would incorrectly downgrade QSV on a fresh start with empty tested_encoders.
+        if encoder in QSV_ENCODERS and (encoder in tested and not tested[encoder]):
             # Map qsv encoder to vaapi equivalent (e.g. hevc_qsv → hevc_vaapi)
             vaapi_equiv = encoder.replace("_qsv", "_vaapi")
             if tested.get(vaapi_equiv, False):

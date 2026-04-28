@@ -16,6 +16,7 @@ from .celery_app import celery_app
 from .utils import ffprobe_info, calc_bitrates
 from .auto_resolution import choose_auto_resolution
 from .hw_detect import get_hw_info, map_codec_to_hw, choose_best_codec
+from .constants import SVTAV1_PRESET_MAP, VAAPI_ENCODERS, QSV_ENCODERS, HW_ENCODERS
 from .startup_tests import run_startup_tests
 from .progress import parse_time_string
 
@@ -27,7 +28,19 @@ ENCODER_TEST_CACHE: Dict[str, bool] = {}
 # libsvtav1: SVT-AV1 uses LevelOfParallelism ``lp`` in ``-svtav1-params`` (indexed 0..6, not
 # "number of cores"). ``lp=0`` auto-picks a level and often leaves CPU partly idle on
 # high-core hosts; ``lp=6`` is the maximum parallelism level the library exposes.
-SVTAV1_PARAMS_MAX_LP = ["-svtav1-params", "lp=6"]
+# WARNING: lp=6 on 4K input can saturate all CPU cores and crash VMs.
+# lp=0 lets the library auto-pick a safe parallelism level.
+# Override via env: SVTAV1_LP=2  (0=auto, 1–6=explicit level)
+_svtav1_lp = os.environ.get("SVTAV1_LP", "0")
+SVTAV1_PARAMS_MAX_LP = ["-svtav1-params", f"lp={_svtav1_lp}"]
+
+# libx264 / libx265 / libaom-av1: thread limit via -threads N
+# Without a limit these encoders use all available cores, which can
+# saturate the host CPU and crash VMs (same risk as libsvtav1 lp=6).
+# 0 = let FFmpeg auto-select (usually = all cores), positive int = explicit limit.
+# Override via env: CPU_ENCODER_THREADS=2
+_cpu_threads_val = os.environ.get("CPU_ENCODER_THREADS", "0")
+CPU_ENCODER_THREADS: list[str] = [] if _cpu_threads_val == "0" else ["-threads", _cpu_threads_val]
 
 
 def _cpu_fallback_for(encoder: str) -> tuple[str, list[str]]:
@@ -201,7 +214,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Fallback to CPU only if startup tests explicitly marked encoder as unavailable.
     # If cache is empty (tests still running in background), attempt hardware and rely on runtime fallback below.
     original_encoder = actual_encoder
-    if actual_encoder not in ("libx264", "libx265", "libaom-av1"):
+    if actual_encoder in HW_ENCODERS:
         global ENCODER_TEST_CACHE
         cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
         if cache_key in ENCODER_TEST_CACHE and not ENCODER_TEST_CACHE[cache_key]:
@@ -219,8 +232,8 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             elif "hevc" in actual_encoder or "h265" in actual_encoder:
                 actual_encoder = "libx265"
                 v_flags = ["-pix_fmt", "yuv420p"]
-            else:  # AV1
-                actual_encoder = "libaom-av1"
+            else:  # AV1 — libaom-av1 not available in Jellyfin FFmpeg; use libsvtav1
+                actual_encoder = "libsvtav1"
                 v_flags = ["-pix_fmt", "yuv420p"]
             init_hw_flags = []
             # Update hardware info display to show CPU fallback
@@ -349,13 +362,22 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         elif actual_encoder == "libaom-av1":
             preset_flags = ["-cpu-used", "0"]
             preset_flags += ["-crf", "20"]
+            preset_flags += CPU_ENCODER_THREADS
+        elif actual_encoder == "libsvtav1":
+            # libsvtav1 extraquality: preset 1 (near-slowest) + CRF mode
+            preset_flags = ["-preset", "1", "-crf", "30"]
     elif actual_encoder.endswith("_nvenc"):
         preset_flags = ["-preset", preset_val]
         tune_flags = ["-tune", tune_val]
-    elif actual_encoder in ("libx264", "libx265", "libsvtav1"):
+    elif actual_encoder == "libsvtav1":
+        # libsvtav1 ONLY accepts integer presets (0–13); strings like "fast" cause a crash
+        preset_int = SVTAV1_PRESET_MAP.get(preset_val, 6)
+        preset_flags = ["-preset", str(preset_int)]
+    elif actual_encoder in ("libx264", "libx265"):
         # Software encoders
         cpu_preset_map = {"p1": "ultrafast", "p2": "superfast", "p3": "veryfast", "p4": "faster", "p5": "fast", "p6": "medium", "p7": "slow"}
         preset_flags = ["-preset", cpu_preset_map.get(preset_val, "medium")]
+        preset_flags += CPU_ENCODER_THREADS  # thread limit (env: CPU_ENCODER_THREADS)
         if actual_encoder == "libx264":
             tune_flags = ["-tune", "film"]  # Better than 'hq' for CPU
 
@@ -392,6 +414,13 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             scale_expr = f"-2:'min(ih,{max_height})'"
         vf_filters.append(f"scale={scale_expr}")
         _publish(self.request.id, {"type": "log", "message": f"Resolution: scaling to max {max_width or 'any'}x{max_height or 'any'}"})
+
+    # VAAPI/QSV: must append hwupload AFTER any scale filter.
+    # Without this the auto_scale_0 filter panics: "Impossible to convert" (FFmpeg exit code 218)
+    if actual_encoder in VAAPI_ENCODERS:
+        vf_filters.append("format=nv12|vaapi,hwupload")
+    elif actual_encoder in QSV_ENCODERS:
+        vf_filters.append("format=nv12,hwupload=extra_hw_frames=64")
 
     # Build input options for trimming and decoder preferences
     input_opts = []
@@ -601,13 +630,22 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     if vf_filters:
         cmd += ["-vf", ",".join(vf_filters)]
     
-    cmd += [
-        "-b:v", f"{int(video_kbps)}k",
-        "-maxrate", f"{maxrate}k",
-        "-bufsize", f"{bufsize}k",
-        *preset_flags,  # Encoder-specific preset
-        *tune_flags,    # Encoder-specific tune (if supported)
-    ]
+    # libsvtav1 does NOT support -maxrate/-bufsize in VBR mode — causes:
+    # "Svt[error]: Max Bitrate only supported with CRF mode"
+    if actual_encoder == "libsvtav1":
+        cmd += [
+            "-b:v", f"{int(video_kbps)}k",
+            *preset_flags,  # integer preset (0–13)
+            *SVTAV1_PARAMS_MAX_LP,  # lp=0: auto parallelism
+        ]
+    else:
+        cmd += [
+            "-b:v", f"{int(video_kbps)}k",
+            "-maxrate", f"{maxrate}k",
+            "-bufsize", f"{bufsize}k",
+            *preset_flags,  # Encoder-specific preset
+            *tune_flags,    # Encoder-specific tune (if supported)
+        ]
     
     # Add audio encoding or disable audio if muted
     if chosen_audio_codec is None:
@@ -884,7 +922,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             _publish(self.request.id, {"type": "error", "message": msg})
             raise RuntimeError(msg)
 
-    if rc != 0 and actual_encoder.endswith("_nvenc"):
+    if rc != 0 and actual_encoder in HW_ENCODERS:
         _publish(self.request.id, {"type": "log", "message": f"⚠️ Hardware encode failed (rc={rc}). Retrying on CPU..."})
         _publish(self.request.id, {"type": "log", "message": (
             "Explanation: The hardware encoder failed at runtime. The worker will retry using a CPU encoder which is slower. "
@@ -896,7 +934,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         elif "hevc" in actual_encoder or "h265" in actual_encoder:
             fb_encoder = "libx265"; fb_flags = ["-pix_fmt","yuv420p"]
         else:
-            fb_encoder = "libaom-av1"; fb_flags = ["-pix_fmt","yuv420p"]
+            fb_encoder = "libsvtav1"; fb_flags = ["-pix_fmt","yuv420p"]
 
         _publish(self.request.id, {"type": "log", "message": f"Encoder: CPU ({fb_encoder})"})
         actual_encoder = fb_encoder
@@ -908,8 +946,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         # Use libdav1d for AV1 input, otherwise let FFmpeg auto-select
         if in_codec == "av1":
             cpu_input_opts += ["-c:v", "libdav1d"]
-        # Revert scale_npp back to scale for CPU path
-        cpu_vf = [f.replace("scale_npp=", "scale=") for f in vf_filters] if vf_filters else []
+        # Revert scale_npp back to scale for CPU path; also strip any hw pixel format filters
+        cpu_vf_raw = [f.replace("scale_npp=", "scale=") for f in vf_filters] if vf_filters else []
+        cpu_vf = [f for f in cpu_vf_raw if not f.startswith("format=nv12") and f != "hwupload"]
 
         cmd2 = [
             "ffmpeg", "-hide_banner", "-y",
@@ -921,17 +960,22 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         ]
         if cpu_vf:
             cmd2 += ["-vf", ",".join(cpu_vf)]
-        cmd2 += [
-            "-b:v", f"{int(video_kbps)}k",
-            "-maxrate", f"{maxrate}k",
-            "-bufsize", f"{bufsize}k",
-        ]
+        # libsvtav1 does not support -maxrate/-bufsize in VBR mode
+        if fb_encoder == "libsvtav1":
+            cmd2 += ["-b:v", f"{int(video_kbps)}k"]
+            cmd2 += ["-preset", "8"]  # ~fast, safe integer preset
+            cmd2 += SVTAV1_PARAMS_MAX_LP
+        else:
+            cmd2 += [
+                "-b:v", f"{int(video_kbps)}k",
+                "-maxrate", f"{maxrate}k",
+                "-bufsize", f"{bufsize}k",
+            ]
         if fb_encoder == "libx264":
-            cmd2 += ["-preset","medium","-tune","film"]
+            cmd2 += ["-preset","medium","-tune","film"] + CPU_ENCODER_THREADS
         elif fb_encoder == "libx265":
-            cmd2 += ["-preset","medium"]
-        elif fb_encoder == "libaom-av1":
-            cmd2 += ["-cpu-used","4"]
+            cmd2 += ["-preset","medium"] + CPU_ENCODER_THREADS
+        # libsvtav1: preset/lp already added in the block above; no extra flags needed here
         if chosen_audio_codec is None:
             cmd2 += ["-an"]
         else:

@@ -450,10 +450,15 @@ async def ffmpeg_update():
         )
         # Fix any missing deps
         if inst.returncode != 0:
-            subprocess.run(
+            repair = subprocess.run(
                 ["apt-get", "install", "-y", "-f"],
                 capture_output=True, text=True, timeout=60,
             )
+            if repair.returncode != 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"dpkg install failed and dependency repair also failed: {repair.stderr[:400]}",
+                )
 
         # Ensure symlinks are up-to-date
         subprocess.run(

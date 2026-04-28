@@ -298,6 +298,9 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
 
     # Always flush old encoder test results before re-testing
     _flush_encoder_test_cache()
+    # Also clear in-memory tested_encoders so map_codec_to_hw does not
+    # rewrite encoders based on stale results from the previous run.
+    hw_info.pop("tested_encoders", None)
 
     logger.info("GPU Environment Check:")
     logger.info(

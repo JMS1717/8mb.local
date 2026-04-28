@@ -457,16 +457,20 @@
   function getCodecColor(group: string): string {
     switch(group) {
       case 'nvidia': return '#22c55e'; // green
-      case 'cpu': return '#6b7280';    // gray
-      default: return '#6b7280';
+      case 'qsv':   return '#60a5fa'; // blue
+      case 'vaapi': return '#fbbf24'; // amber/yellow
+      case 'cpu':   return '#6b7280'; // gray
+      default:      return '#6b7280';
     }
   }
 
   function getCodecIcon(group: string): string {
     switch(group) {
       case 'nvidia': return '🟢';
-      case 'cpu': return '⚪';
-      default: return '⚪';
+      case 'qsv':   return '🔵';
+      case 'vaapi': return '🟡';
+      case 'cpu':   return '⚪';
+      default:      return '⚪';
     }
   }
 
@@ -1291,6 +1295,12 @@
           CPU encoding (no GPU detected)
         </p>
       {/if}
+      {#if availableCodecs.find(c => c.value === videoCodec)?.failed}
+        <div class="mt-2 p-2 rounded bg-red-900/30 border border-red-700/50 text-xs text-red-300 flex items-start gap-2">
+          <span>⚠️</span>
+          <span><strong>{videoCodec}</strong> failed the encoder test and is not available on this system — please select a different codec.</span>
+        </div>
+      {/if}
       <!-- Audio-only toggle moved here (out of Advanced) -->
       <div class="mt-2">
         <label class="flex items-center gap-2 cursor-pointer text-sm"><input type="checkbox" bind:checked={audioOnly} /><span>Extract audio only (.m4a)</span></label>
@@ -1594,10 +1604,9 @@
           <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-600/40">Encoder: detecting…</span>
         {/if}
       </div>
-      {#if encodeMethod && encodeMethod.startsWith('lib') && hardwareType !== 'cpu'}
+      {#if encodeMethod && encodeMethod.startsWith('lib') && hardwareType !== 'cpu' && availableCodecs.find(c => c.value === videoCodec)?.group !== 'cpu'}
         <div class="text-xs text-amber-300 mt-1">Hardware encoder unavailable for this job — using CPU fallback.</div>
       {/if}
-      
       {#if isRetrying}
         <div class="mb-3 p-3 bg-amber-900/30 border-2 border-amber-500 rounded-lg animate-pulse">
           <div class="flex items-center gap-2">
@@ -1743,7 +1752,8 @@
     font-weight: 500;
   }
   .codec-select option[data-group="cpu"] {
-    color: #9ca3af;
+    color: #92400e;
+    font-weight: 500;
   }
   .codec-select option[data-group="qsv"] {
     color: #60a5fa;
