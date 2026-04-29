@@ -240,12 +240,11 @@ async def system_encoder_tests():
 async def rerun_encoder_tests():
     """Trigger a fresh run of encoder/decoder startup tests on the worker and return updated results."""
     try:
-        task = celery_app.send_task("worker.worker.run_hardware_tests")
-        try:
-            _ = task.get(timeout=90)
-        except Exception:
-            pass
-        return await system_encoder_tests()
+        # Fire-and-forget: do NOT block the event loop with task.get().
+        # Hardware tests run asynchronously on the worker (~30-90s).
+        # The UI should poll /api/system/encoder-tests to pick up results.
+        celery_app.send_task("worker.worker.run_hardware_tests")
+        return {"status": "started", "message": "Hardware encoder tests started. Poll /api/system/encoder-tests for results."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -296,8 +295,17 @@ async def gpu_diagnostics():
     checks["ffmpeg_hwaccels"] = run_cmd(["ffmpeg", "-hide_banner", "-hwaccels"], timeout=4)
     checks["ffmpeg_encoders"] = run_cmd(["ffmpeg", "-hide_banner", "-encoders"], timeout=6)
 
+    # Discover active render node: prefer VAAPI_DEVICE env, then first renderD* found
+    vaapi_device = os.environ.get("VAAPI_DEVICE", "")
+    if not vaapi_device or not os.path.exists(vaapi_device):
+        try:
+            render_nodes = sorted(p for p in os.listdir("/dev/dri") if p.startswith("renderD"))
+            vaapi_device = f"/dev/dri/{render_nodes[0]}" if render_nodes else "/dev/dri/renderD128"
+        except OSError:
+            vaapi_device = "/dev/dri/renderD128"
+
     # VAAPI diagnostics
-    checks["vainfo"] = run_cmd(["vainfo", "--display", "drm", "--device", "/dev/dri/renderD128"], timeout=6)
+    checks["vainfo"] = run_cmd(["vainfo", "--display", "drm", "--device", vaapi_device], timeout=6)
     checks["dri_devices"] = run_cmd(["ls", "-la", "/dev/dri/"], timeout=2)
 
     nvenc_test = run_cmd([
@@ -308,10 +316,10 @@ async def gpu_diagnostics():
     ], timeout=8)
     checks["nvenc_smoke_test"] = nvenc_test
 
-    # VAAPI smoke test
+    # VAAPI smoke test — use discovered render node
     vaapi_test = run_cmd([
         "ffmpeg", "-hide_banner", "-v", "error",
-        "-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128",
+        "-hwaccel", "vaapi", "-hwaccel_device", vaapi_device,
         "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.1",
         "-vf", "format=nv12|vaapi,hwupload",
         "-c:v", "h264_vaapi", "-frames:v", "1",
@@ -330,7 +338,7 @@ async def gpu_diagnostics():
         "nvenc_encode_ok": nvenc_test["rc"] == 0 and "error" not in (nvenc_test.get("stderr", "").lower()),
         "vaapi_encode_ok": vaapi_test["rc"] == 0 and "error" not in (vaapi_test.get("stderr", "").lower()),
         "vainfo_ok": checks["vainfo"]["rc"] == 0,
-        "dri_device_present": os.path.exists("/dev/dri/renderD128"),
+        "dri_device_present": os.path.exists(vaapi_device),
     }
 
     return {"summary": summary, "checks": checks}

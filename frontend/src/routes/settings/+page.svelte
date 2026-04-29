@@ -884,7 +884,6 @@
 		  <option value="libopus">Opus</option>
 		  <option value="aac">AAC</option>
               <option value="eac3">EAC3 (Dolby Digital+)</option>
-              <option value="eac3">EAC3 (Dolby Digital+)</option>
 		  <option value="none">No audio</option>
 		</select>
 	  </div>

@@ -946,9 +946,11 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         # Use libdav1d for AV1 input, otherwise let FFmpeg auto-select
         if in_codec == "av1":
             cpu_input_opts += ["-c:v", "libdav1d"]
-        # Revert scale_npp back to scale for CPU path; also strip any hw pixel format filters
+        # Revert scale_npp back to scale for CPU path; strip all hw-specific filters:
+        # format=nv12*, hwupload (VAAPI/QSV upload), hwdownload (CUDA download for FPS cap)
         cpu_vf_raw = [f.replace("scale_npp=", "scale=") for f in vf_filters] if vf_filters else []
-        cpu_vf = [f for f in cpu_vf_raw if not f.startswith("format=nv12") and f != "hwupload"]
+        _hw_filter_prefixes = ("format=nv12", "hwupload", "hwdownload")
+        cpu_vf = [f for f in cpu_vf_raw if not any(f.startswith(p) for p in _hw_filter_prefixes)]
 
         cmd2 = [
             "ffmpeg", "-hide_banner", "-y",

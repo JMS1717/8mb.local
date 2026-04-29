@@ -165,7 +165,17 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
     For VAAPI/QSV encoders, uses the correct hwaccel init and filter chain.
     """
     try:
-        vaapi_device = os.environ.get("VAAPI_DEVICE", "/dev/dri/renderD128")
+        # Extract VAAPI device from hw_flags if present (e.g. ['-init_hw_device', 'vaapi=va:/dev/dri/renderD129'])
+        # Fallback to env var, then default. This ensures we probe the device that map_codec_to_hw() detected.
+        vaapi_device = "/dev/dri/renderD128"
+        for i, flag in enumerate(hw_flags):
+            if flag == "-init_hw_device" and i + 1 < len(hw_flags):
+                val = hw_flags[i + 1]
+                if "vaapi=va:" in val:
+                    vaapi_device = val.split("vaapi=va:", 1)[1]
+                    break
+        else:
+            vaapi_device = os.environ.get("VAAPI_DEVICE", "/dev/dri/renderD128")
 
         if "_vaapi" in encoder_name:
             # VAAPI: init device + filter_hw_device, CPU decode, hwupload to VAAPI
