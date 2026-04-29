@@ -189,16 +189,37 @@
                 try {
                         const res = await fetch('/api/system/encoder-tests/rerun', { method: 'POST', credentials: 'include' });
                         if (res.ok) {
-                                const js = await res.json();
-                                hwTests = js.results || [];
-                                message = 'Hardware tests re-ran successfully';
+                                // Backend fires-and-forgets; poll /encoder-tests until results refresh.
+                                message = 'Hardware tests started — polling for results…';
+                                let attempts = 0;
+                                const poll = async () => {
+                                        if (attempts++ > 30) { // max ~90s
+                                                hwTestsLoading = false;
+                                                message = 'Tests started. Click "Refresh results" when ready.';
+                                                return;
+                                        }
+                                        try {
+                                                const r = await fetch('/api/system/encoder-tests');
+                                                if (r.ok) {
+                                                        const js = await r.json();
+                                                        if (js.results && js.results.length) {
+                                                                hwTests = js.results;
+                                                                message = 'Hardware tests completed.';
+                                                                hwTestsLoading = false;
+                                                                return;
+                                                        }
+                                                }
+                                        } catch {}
+                                        setTimeout(poll, 3000);
+                                };
+                                setTimeout(poll, 3000);
                         } else {
                                 const d = await res.json().catch(()=>({}));
                                 hwTestsError = d.detail || 'Failed to re-run hardware tests';
+                                hwTestsLoading = false;
                         }
                 } catch (e) {
                         hwTestsError = 'Failed to re-run hardware tests';
-                } finally {
                         hwTestsLoading = false;
                 }
         }

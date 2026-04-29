@@ -184,7 +184,7 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
                 "-init_hw_device", f"vaapi=va:{vaapi_device}",
                 "-filter_hw_device", "va",
                 "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
-                "-vf", "format=nv12,hwupload",
+                "-vf", "format=nv12|vaapi,hwupload",
                 "-c:v", encoder_name, "-frames:v", "1",
                 "-f", "null", "-",
             ]
