@@ -1051,18 +1051,21 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     max_retries = 2  # Maximum 2 retry attempts
     
     if (not bitrate_mode) and size_overage_percent > 2.0 and final_size_mb > progress_target_mb and retry_attempt < max_retries:
-        # Calculate if retry is feasible
-        # If we need to reduce bitrate below 50%, it's probably impossible
-        reduction_factor = max(0.5, 1.0 - (size_overage_percent / 100.0) - 0.05)
+        # Calculate if retry is feasible.
+        # Do NOT clamp to 0.5 here — we need to be able to detect when the
+        # required reduction is too aggressive (> 50%) and skip the retry.
+        reduction_factor = 1.0 - (size_overage_percent / 100.0) - 0.05
         
         if reduction_factor < 0.5:
+            # Reducing below 50% would compromise quality too much — give up.
             _publish(self.request.id, {"type": "log", "message": f"⚠️ File is {size_overage_percent:.1f}% over target, but further reduction would compromise quality too much."})
             _publish(self.request.id, {"type": "log", "message": f"📊 Final size: {final_size_mb:.2f} MB (target was {progress_target_mb:.2f} MB). Consider adjusting target size or resolution."})
         else:
-            # File is too large! Notify user and retry
+            # File is too large — notify and retry with reduced bitrate.
             _publish(self.request.id, {"type": "log", "message": f"⚠️ File is {size_overage_percent:.1f}% over target ({final_size_mb:.2f} MB vs {progress_target_mb:.2f} MB)"})
             _publish(self.request.id, {"type": "log", "message": f"🔄 Retry attempt {retry_attempt + 1}/{max_retries} with reduced bitrate..."})
-            _publish(self.request.id, {"type": "retry", "message": f"File too large ({final_size_mb:.2f} MB), retrying to fit {progress_target_mb:.2f} MB target (attempt {retry_attempt + 1}/{max_retries})", "overage_percent": round(size_overage_percent, 1)})
+            # Use "log" type to stay within the published event contract (log/progress/done/error).
+            _publish(self.request.id, {"type": "log", "message": f"File too large ({final_size_mb:.2f} MB), retrying to fit {progress_target_mb:.2f} MB target (attempt {retry_attempt + 1}/{max_retries}). Overage: {round(size_overage_percent, 1)}%"})
             
             # Calculate adjusted bitrate
             adjusted_video_kbps = int(video_kbps * reduction_factor)

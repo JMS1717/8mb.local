@@ -346,8 +346,8 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
             "av1_nvenc": ("av1", ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]),
         }
 
-    vaapi_device = hw_info.get("vaapi_device", "/dev/dri/renderD128")
-    if hw_type_lower in ("qsv", "vaapi") or os.path.exists(vaapi_device):
+    vaapi_device = hw_info.get("vaapi_device") or "/dev/dri/renderD128"
+    if hw_type_lower in ("qsv", "vaapi") or (vaapi_device and os.path.exists(vaapi_device)):
         test_codecs.extend(["h264_qsv", "hevc_qsv", "av1_qsv"])
         test_codecs.extend(["h264_vaapi", "hevc_vaapi", "av1_vaapi"])
         hw_decoders.update({
