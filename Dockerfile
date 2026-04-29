@@ -1,52 +1,7 @@
-# Multi-stage unified 8mb.local container
-# Stage 1: Build FFmpeg with NVIDIA NVENC GPU support + CPU encoders
-# Use CUDA 12.2 devel image: supports RTX 50-series and is compatible with NVIDIA driver 535+
-FROM nvidia/cuda:12.2.0-devel-ubuntu22.04 AS ffmpeg-build
+# 8mb.local container with Jellyfin FFmpeg 7.1 (VAAPI + QSV + NVENC + CPU)
+# No compilation needed — uses pre-built Jellyfin FFmpeg package
 
-ENV DEBIAN_FRONTEND=noninteractive
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-    build-essential nasm yasm cmake pkg-config git wget ca-certificates \
-    libnuma-dev libx264-dev libx265-dev libvpx-dev libopus-dev \
-    libaom-dev libdav1d-dev
-
-WORKDIR /build
-
-# NVIDIA NVENC headers
-# Pin to NVENC API 12.1 for widest compatibility with driver 535.x, while CUDA 12.2 runtime covers RTX 50‑series
-RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
-    cd nv-codec-headers && git checkout sdk/12.1 && make install && cd ..
-
-# SVT-AV1: Ubuntu 22.04's libsvtav1 (0.9.x) is too old for FFmpeg 6.1's libsvtav1 glue
-# (e.g. EbSvtAv1EncConfiguration.force_key_frames). Build a current release from source.
-# Canonical upstream is on GitLab (the GitHub mirror has no release tags).
-# Must match FFmpeg's bundled libsvtav1.c: FFmpeg 6.1.x targets SVT-AV1 2.x API;
-# SVT 3.x changed ``svt_av1_enc_init_handle`` and breaks the build.
-ARG SVTAV1_VERSION=v2.2.1
-RUN git clone --depth 1 --branch ${SVTAV1_VERSION} https://gitlab.com/AOMediaCodec/SVT-AV1.git && \
-    cd SVT-AV1/Build && \
-    cmake .. -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local && \
-    cmake --build . -j"$(nproc)" && cmake --install . && ldconfig && \
-    cd /build && rm -rf SVT-AV1
-
-# Build FFmpeg with NVIDIA NVENC + CPU encoders
-RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
-        tar xf ffmpeg-6.1.1.tar.xz && cd ffmpeg-6.1.1 && \
-                ./configure \
-      --enable-nonfree --enable-gpl \
-      --enable-cuda-nvcc --enable-libnpp --enable-nvenc \
-      --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus --enable-libaom --enable-libsvtav1 --enable-libdav1d \
-      --extra-cflags=-I/usr/local/cuda/include \
-      --extra-ldflags=-L/usr/local/cuda/lib64 \
-      --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages && \
-    make -j$(nproc) && make install && ldconfig && \
-    # Strip binaries to reduce size
-    strip --strip-all /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
-    # Clean up build artifacts
-        cd .. && rm -rf ffmpeg-6.1.1 ffmpeg-6.1.1.tar.xz nv-codec-headers /build
-
-# Stage 2: Build Frontend
+# Stage 1: Build Frontend
 FROM node:20-alpine AS frontend-build
 
 WORKDIR /frontend
@@ -55,19 +10,15 @@ RUN --mount=type=cache,target=/root/.npm \
     npm ci
 
 COPY frontend/ ./
-# Build with empty backend URL (same-origin deployment)
 ENV PUBLIC_BACKEND_URL=""
 RUN npm run build && \
-    # Remove source maps and unnecessary files to reduce size
     find build -name "*.map" -delete && \
     find build -name "*.ts" -delete
 
-# Stage 3: Runtime with all services
-# Use CUDA 12.2 runtime: minimum driver 535; supports RTX 50-series and older (535+) systems
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+# Stage 2: Runtime with all services
+FROM ubuntu:22.04
 
-# Build-time version (can be overridden)
-ARG BUILD_VERSION=137
+ARG BUILD_VERSION=136
 ENV APP_VERSION=${BUILD_VERSION}
 ARG BUILD_COMMIT=unknown
 ENV BUILD_COMMIT=${BUILD_COMMIT}
@@ -76,37 +27,38 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# Install base packages + Intel GPU repo (for up-to-date VAAPI/QSV drivers)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     python3.10 python3-pip supervisor redis-server \
-    libopus0 libx264-163 libx265-199 libvpx7 libnuma1 \
-    libaom3 libdav1d5 \
+    gpg wget ca-certificates \
+    && wget -qO - https://repositories.intel.com/gpu/intel-graphics.key | gpg --dearmor -o /usr/share/keyrings/intel-graphics.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu jammy client" > /etc/apt/sources.list.d/intel-gpu.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    libva2 libva-drm2 libva-x11-2 libvpl2 libmfxgen1 \
+    intel-media-va-driver-non-free \
+    vainfo intel-gpu-tools \
     && apt-get clean && rm -rf /tmp/*
 
-# Copy FFmpeg from build stage (only what we need)
-COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
-COPY --from=ffmpeg-build /usr/local/bin/ffprobe /usr/local/bin/ffprobe
-# SVT-AV1 is built from source in ffmpeg-build (not Ubuntu packages)
-COPY --from=ffmpeg-build /usr/local/lib/libSvtAv1Enc.so* /usr/local/lib/
-# Copy only FFmpeg libraries (not entire /usr/local/lib)
-COPY --from=ffmpeg-build /usr/local/lib/libavcodec.so* /usr/local/lib/
-COPY --from=ffmpeg-build /usr/local/lib/libavformat.so* /usr/local/lib/
-COPY --from=ffmpeg-build /usr/local/lib/libavutil.so* /usr/local/lib/
-COPY --from=ffmpeg-build /usr/local/lib/libavfilter.so* /usr/local/lib/
-COPY --from=ffmpeg-build /usr/local/lib/libswscale.so* /usr/local/lib/
-COPY --from=ffmpeg-build /usr/local/lib/libswresample.so* /usr/local/lib/
-COPY --from=ffmpeg-build /usr/local/lib/libavdevice.so* /usr/local/lib/
-RUN ldconfig
+# Install Jellyfin FFmpeg 7.1 — pre-built with VAAPI, QSV (libvpl), NVENC, and all CPU codecs
+# Update URL for newer versions: https://repo.jellyfin.org/files/ffmpeg/ubuntu/latest-7.x/amd64/
+ARG JELLYFIN_FFMPEG_URL=https://repo.jellyfin.org/files/ffmpeg/ubuntu/latest-7.x/amd64/jellyfin-ffmpeg7_7.1.3-5-jammy_amd64.deb
+RUN wget -q -O /tmp/jellyfin-ffmpeg.deb "${JELLYFIN_FFMPEG_URL}" && \
+    dpkg -i /tmp/jellyfin-ffmpeg.deb || true && \
+    apt-get update && apt-get install -y -f && \
+    rm /tmp/jellyfin-ffmpeg.deb && \
+    ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg && \
+    ln -sf /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python dependencies (single consolidated requirements)
+# Install Python dependencies
 COPY requirements.txt /app/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install --no-cache-dir -r /app/requirements.txt && \
     rm /app/requirements.txt && \
-    # Remove pip cache and unnecessary files
     find /usr/local/lib/python3.10 -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true && \
     find /usr/local/lib/python3.10 -type f -name '*.pyc' -delete && \
     find /usr/local/lib/python3.10 -type f -name '*.pyo' -delete
@@ -118,7 +70,7 @@ COPY worker/app /app/worker
 # Copy pre-built frontend
 COPY --from=frontend-build /frontend/build /app/frontend-build
 
-# Embed build metadata for runtime introspection
+# Embed build metadata
 RUN echo "Version: ${APP_VERSION}" > /app/VERSION && \
     echo "Commit: ${BUILD_COMMIT}" >> /app/VERSION && \
     echo -n "Built: " >> /app/VERSION && date -u +%FT%TZ >> /app/VERSION && \
@@ -127,14 +79,10 @@ RUN echo "Version: ${APP_VERSION}" > /app/VERSION && \
 # Create necessary directories
 RUN mkdir -p /app/uploads /app/outputs /var/log/supervisor /var/lib/redis /var/log/redis
 
-# Set NVIDIA driver capabilities for NVENC/NVDEC support
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
-ENV NVIDIA_VISIBLE_DEVICES=all
-
 # Configure supervisord
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Container entrypoint sets up NVIDIA library paths
+# Container entrypoint
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

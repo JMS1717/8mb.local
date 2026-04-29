@@ -50,7 +50,7 @@
     name: string;
     target_mb: number;
     video_codec: string;
-    audio_codec: 'libopus' | 'aac' | 'none';
+    audio_codec: 'libopus' | 'aac' | 'eac3' | 'none';
     preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality';
     audio_kbps: number;
     container: 'mp4' | 'mkv';
@@ -74,12 +74,12 @@
   let selectionNotice = '';
   let isDragActive = false;
 
-  let targetMB = 9.7;
+  let targetMB = 8;
   let targetMode: 'size' | 'bitrate' = 'size';
   let targetVideoKbps = 2500;
   let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p6';
   let videoCodec = 'av1_nvenc';
-  let audioCodec: 'libopus'|'aac'|'none' = 'libopus';
+  let audioCodec: 'libopus'|'aac'|'eac3'|'none' = 'libopus';
   let audioKbps = 128;
   let container: 'mp4'|'mkv' = 'mp4';
   let tune: 'hq'|'ll'|'ull'|'lossless' = 'hq';
@@ -98,7 +98,6 @@
   let availableCodecs: CodecOption[] = [];
   $: nvidiaCodecs = availableCodecs.filter((c) => c.group === 'nvidia');
   $: cpuCodecs = availableCodecs.filter((c) => c.group === 'cpu');
-  $: nvencTuneApplies = videoCodec.endsWith('_nvenc');
   let presetProfiles: PresetProfile[] = [];
   let selectedPreset: string | null = null;
   let sizeButtons: number[] = [4, 5, 8, 9.7, 25, 50, 100];
@@ -187,7 +186,7 @@
       { value: 'av1_nvenc', label: 'AV1 (NVIDIA)', group: 'nvidia' },
       { value: 'hevc_nvenc', label: 'HEVC (H.265, NVIDIA)', group: 'nvidia' },
       { value: 'h264_nvenc', label: 'H.264 (NVIDIA)', group: 'nvidia' },
-      { value: 'libaom-av1', label: 'AV1 (CPU)', group: 'cpu' },
+      { value: 'libsvtav1', label: 'AV1 (CPU)', group: 'cpu' },
       { value: 'libsvtav1', label: 'AV1 (SVT-AV1, CPU)', group: 'cpu' },
       { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
       { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
@@ -576,7 +575,7 @@
         const presets = await res.json();
         targetMB = Number(presets.target_mb || targetMB);
         videoCodec = String(presets.video_codec || videoCodec);
-        audioCodec = String(presets.audio_codec || audioCodec) as 'libopus' | 'aac' | 'none';
+        audioCodec = String(presets.audio_codec || audioCodec) as 'libopus' | 'aac' | 'eac3' | 'none';
         audioKbps = Number(presets.audio_kbps || audioKbps);
         preset = String(presets.preset || preset) as 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality';
         container = String(presets.container || container) as 'mp4' | 'mkv';
@@ -597,7 +596,7 @@
         { value: 'av1_nvenc', label: 'AV1 (NVIDIA)', group: 'nvidia' },
         { value: 'hevc_nvenc', label: 'HEVC (H.265, NVIDIA)', group: 'nvidia' },
         { value: 'h264_nvenc', label: 'H.264 (NVIDIA)', group: 'nvidia' },
-        { value: 'libaom-av1', label: 'AV1 (CPU)', group: 'cpu' },
+        { value: 'libsvtav1', label: 'AV1 (CPU)', group: 'cpu' },
         { value: 'libsvtav1', label: 'AV1 (SVT-AV1, CPU)', group: 'cpu' },
         { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
         { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
@@ -767,8 +766,8 @@
         {/if}
       </div>
       <label class="block text-sm">
-        <span class="block mb-1">Encoder preset (speed ↔ quality)</span>
-        <select class="input w-full" bind:value={preset} title="Encoder effort at your target size or bitrate; independent of NVENC tuning.">
+        <span class="block mb-1">Quality preset</span>
+        <select class="input w-full" bind:value={preset}>
           <option value="p1">Fastest (P1)</option>
           <option value="p2">Faster (P2)</option>
           <option value="p3">Fast (P3)</option>
@@ -776,19 +775,8 @@
           <option value="p5">Better (P5)</option>
           <option value="p6">High Quality (P6)</option>
           <option value="p7">Best Quality (P7)</option>
-          <option value="extraquality">Extra Quality (constant quality — CQ)</option>
+          <option value="extraquality">Extra Quality</option>
         </select>
-        {#if preset === 'extraquality' && targetMode === 'bitrate'}
-          <span class="block mt-1 text-xs text-amber-200/95 rounded border border-amber-700/40 bg-amber-950/35 px-2 py-1.5">
-            Extra Quality needs CQ mode; with <strong>fixed video bitrate</strong> the job uses <strong>P6</strong> instead.
-          </span>
-        {:else if preset === 'extraquality'}
-          <span class="block mt-1 text-xs text-sky-100/90 rounded border border-sky-800/50 bg-sky-950/30 px-2 py-1.5">
-            <strong>Extra Quality</strong> = <strong>constant quality</strong> (CRF/CQ): quality is fixed, <strong>output size is not guaranteed</strong> vs your target MB. Slower than P7.
-          </span>
-        {:else}
-          <span class="block mt-1 text-xs text-gray-500">P1 = fastest; P7 = slower ABR toward your target. Extra Quality is different (CQ). Not the same as NVENC tuning.</span>
-        {/if}
       </label>
     </div>
 
@@ -812,20 +800,15 @@
           {/if}
         </select>
       </label>
-      <div class="block text-sm">
-        <span class="block mb-1">NVENC tuning <span class="text-xs text-gray-500">(NVIDIA only)</span></span>
-        {#if nvencTuneApplies}
-          <select class="input w-full" bind:value={tune} title="NVENC: quality vs latency; separate from P-preset.">
-            <option value="hq">High quality (files)</option>
-            <option value="ll">Low latency</option>
-            <option value="ull">Ultra-low latency</option>
-            <option value="lossless">Lossless</option>
-          </select>
-          <span class="block mt-1 text-xs text-gray-500">For typical batches, use High quality. LL/ULL favor speed of encoding over efficiency.</span>
-        {:else}
-          <p class="text-xs text-gray-500 rounded border border-gray-700 bg-gray-900/40 px-2 py-2">Not used for CPU codecs—encoder preset above applies.</p>
-        {/if}
-      </div>
+      <label class="block text-sm">
+        <span class="block mb-1">Tune</span>
+        <select class="input w-full" bind:value={tune}>
+          <option value="hq">High Quality</option>
+          <option value="ll">Low Latency</option>
+          <option value="ull">Ultra Low Latency</option>
+          <option value="lossless">Lossless</option>
+        </select>
+      </label>
     </div>
 
     <label class="flex items-center gap-2 text-sm cursor-pointer">
@@ -846,6 +829,7 @@
             <select class="input w-full" bind:value={audioCodec} disabled={audioOnly}>
               <option value="libopus">Opus</option>
               <option value="aac">AAC</option>
+              <option value="eac3">EAC3 (Dolby Digital+)</option>
               <option value="none">None</option>
             </select>
           </label>

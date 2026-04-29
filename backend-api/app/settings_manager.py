@@ -48,57 +48,40 @@ def _ensure_defaults() -> Dict[str, Any]:
         changed = True
     if 'preset_profiles' not in data:
         data['preset_profiles'] = [
+            # QSV (Intel Quick Sync) -- best quality/speed on Intel iGPUs
+            {"name": "HEVC 9.7MB (QSV)", "target_mb": 9.7, "video_codec": "hevc_qsv", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+            {"name": "H264 8MB (QSV)", "target_mb": 8, "video_codec": "h264_qsv", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+            {"name": "HEVC 50MB HQ (QSV)", "target_mb": 50, "video_codec": "hevc_qsv", "audio_codec": "aac", "preset": "p7", "audio_kbps": 192, "container": "mp4", "tune": "hq"},
+            # VAAPI -- fallback HW encoder
+            {"name": "HEVC 9.7MB (VAAPI)", "target_mb": 9.7, "video_codec": "hevc_vaapi", "audio_codec": "libopus", "preset": "p5", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+            {"name": "H264 8MB (VAAPI)", "target_mb": 8, "video_codec": "h264_vaapi", "audio_codec": "libopus", "preset": "p5", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+            # NVENC (NVIDIA) -- kept for systems with NVIDIA GPU
             {"name": "AV1 9.7MB (NVENC)", "target_mb": 9.7, "video_codec": "av1_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
             {"name": "HEVC 9.7MB (NVENC)", "target_mb": 9.7, "video_codec": "hevc_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
             {"name": "H264 8MB (NVENC)", "target_mb": 8, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
-            {"name": "HEVC 50MB HQ (NVENC)", "target_mb": 50, "video_codec": "hevc_nvenc", "audio_codec": "aac", "preset": "p7", "audio_kbps": 192, "container": "mp4", "tune": "hq"},
-            {"name": "H264 25MB Fast (NVENC)", "target_mb": 25, "video_codec": "h264_nvenc", "audio_codec": "aac", "preset": "p3", "audio_kbps": 128, "container": "mp4", "tune": "ll"},
-            {"name": "AV1 9.7MB (SVT-AV1, CPU)", "target_mb": 9.7, "video_codec": "libsvtav1", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
-            {"name": "AV1 9.7MB (libaom, slow)", "target_mb": 9.7, "video_codec": "libaom-av1", "audio_codec": "libopus", "preset": "p4", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
+            # CPU
+            {"name": "AV1 8MB (CPU)", "target_mb": 8, "video_codec": "libsvtav1", "audio_codec": "libopus", "preset": "p4", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
         ]
         changed = True
-    try:
-        profiles = data.get('preset_profiles', [])
-        has_av1_nvenc = any(p.get('video_codec') == 'av1_nvenc' for p in profiles)
-        if not has_av1_nvenc:
-            profiles.insert(0, {
-                "name": "AV1 9.7MB (NVENC)",
-                "target_mb": 9.7,
-                "video_codec": "av1_nvenc",
-                "audio_codec": "libopus",
-                "preset": "p6",
-                "audio_kbps": 128,
-                "container": "mp4",
-                "tune": "hq",
-            })
-            data['preset_profiles'] = profiles
-            changed = True
-    except Exception:
-        pass
     if 'default_preset' not in data:
         data['default_preset'] = _pick_initial_default(data.get('preset_profiles', []))
         changed = True
     if 'codec_visibility' not in data:
         data['codec_visibility'] = {
+            'h264_qsv': True,
+            'hevc_qsv': True,
+            'av1_qsv': True,
+            'h264_vaapi': True,
+            'hevc_vaapi': True,
+            'av1_vaapi': True,
             'h264_nvenc': True,
             'hevc_nvenc': True,
             'av1_nvenc': True,
             'libx264': True,
             'libx265': True,
             'libsvtav1': True,
-            # libaom-av1 is opt-in (slow); SVT-AV1 is the default CPU AV1 path.
-            'libaom_av1': False,
         }
         changed = True
-    else:
-        # Backfill libsvtav1 visibility for configs that pre-date SVT-AV1 support.
-        if 'libsvtav1' not in data['codec_visibility']:
-            data['codec_visibility']['libsvtav1'] = True
-            changed = True
-        # libaom was historically default-on; new default is off — only backfill when absent.
-        if 'libaom_av1' not in data['codec_visibility']:
-            data['codec_visibility']['libaom_av1'] = False
-            changed = True
     if 'retention_hours' not in data:
         env_vars = read_env_file()
         try:
@@ -114,10 +97,11 @@ def _ensure_defaults() -> Dict[str, Any]:
 def _pick_initial_default(profiles: List[Dict[str, Any]]) -> str:
     """Pick the best initial default preset name from available profiles.
 
-    Priority: AV1 NVENC > HEVC NVENC > H264 NVENC > any CPU codec > first profile.
+    Priority: HEVC QSV > H264 QSV > HEVC VAAPI > H264 VAAPI > AV1 NVENC > HEVC NVENC > H264 NVENC > CPU > first profile.
     """
-    codec_priority = ['av1_nvenc', 'hevc_nvenc', 'h264_nvenc',
-                       'libsvtav1', 'libaom-av1', 'libx265', 'libx264']
+    codec_priority = ['hevc_qsv', 'h264_qsv', 'hevc_vaapi', 'h264_vaapi',
+                       'av1_nvenc', 'hevc_nvenc', 'h264_nvenc',
+                       'libsvtav1', 'libx265', 'libx264']
     for codec in codec_priority:
         for p in profiles:
             if p.get('video_codec') == codec:
@@ -341,10 +325,15 @@ def get_codec_visibility_settings() -> dict:
         'h264_nvenc': vis.get('h264_nvenc', True),
         'hevc_nvenc': vis.get('hevc_nvenc', True),
         'av1_nvenc': vis.get('av1_nvenc', True),
+        'h264_qsv': vis.get('h264_qsv', True),
+        'hevc_qsv': vis.get('hevc_qsv', True),
+        'av1_qsv': vis.get('av1_qsv', True),
+        'h264_vaapi': vis.get('h264_vaapi', True),
+        'hevc_vaapi': vis.get('hevc_vaapi', True),
+        'av1_vaapi': vis.get('av1_vaapi', True),
         'libx264': vis.get('libx264', True),
         'libx265': vis.get('libx265', True),
         'libsvtav1': vis.get('libsvtav1', True),
-        'libaom_av1': vis.get('libaom_av1', False),
     }
 
 
@@ -352,12 +341,11 @@ def update_codec_visibility_settings(settings: dict):
     """Update codec visibility in settings.json."""
     data = _ensure_defaults()
     vis = data.get('codec_visibility', {})
-    valid_keys = {'h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'libx264', 'libx265', 'libsvtav1', 'libaom_av1'}
+    valid_keys = {'h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'h264_qsv', 'hevc_qsv', 'av1_qsv', 'h264_vaapi', 'hevc_vaapi', 'av1_vaapi', 'libx264', 'libx265', 'libsvtav1'}
     for k in valid_keys:
         if k in settings:
             vis[k] = bool(settings[k])
     data['codec_visibility'] = vis
-    logger.debug("update_codec_visibility_settings: stored=%s", vis)
     _write_settings(data)
 
 

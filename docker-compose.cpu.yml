@@ -1,16 +1,13 @@
 # CPU-only stack (no GPU request) — macOS, hosts without NVIDIA Container Toolkit, or when the default compose fails.
+# Still supports Intel QSV/VAAPI if /dev/dri is available on the host.
 #   docker compose -f docker-compose.cpu.yml up -d --build
-#
-# BEFORE FIRST RUN: make sure `.env` is a FILE on the host, not a directory:
-#   cp .env.example .env     # or: touch .env
-# See the comment in docker-compose.yml for the `.env`-as-directory footgun.
 services:
   8mblocal:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "137"
+        BUILD_VERSION: "136"
     image: jms1717/8mblocal:latest
     container_name: 8mblocal
     ports:
@@ -18,12 +15,13 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
-      - type: bind
-        source: ./.env
-        target: /app/.env
-        bind:
-          create_host_path: false
+      - ./.env:/app/.env  # optional custom settings
+    # Optional: Mount DRI device for Intel QSV/VAAPI (only if /dev/dri exists on host)
+    devices:
+      - /dev/dri:/dev/dri
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
-      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-4}
+      # Intel QSV/VAAPI configuration (auto-detected)
+      - VAAPI_DEVICE=/dev/dri/renderD128
+      - LIBVA_DRIVER_NAME=iHD  # or i965 for older Intel GPUs
     restart: unless-stopped

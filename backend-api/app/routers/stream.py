@@ -37,10 +37,7 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
                 if msg.get("type") != "message":
                     continue
                 data = msg.get("data")
-                # Per-message trace is extremely noisy (ffmpeg progress lines every ~100ms).
-                if logger.isEnabledFor(logging.DEBUG):
-                    preview = data[:120] if isinstance(data, str) else data
-                    logger.debug("[SSE %s] redis: %s", task_id[:8], preview)
+                logger.debug("[SSE %s] msg", task_id[:8])
                 await queue.put(str(data))
         except asyncio.CancelledError:
             pass
@@ -65,18 +62,12 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
     reader_task = asyncio.create_task(reader())
     hb_task = asyncio.create_task(heartbeater())
     try:
-        logger.info("[SSE %s] stream opened", task_id[:8])
+        logger.debug("[SSE %s] stream started", task_id[:8])
         while True:
             data = await queue.get()
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "[SSE %s] yield %s",
-                    task_id[:8],
-                    data[:120] if len(data) > 120 else data,
-                )
             yield f"data: {data}\n\n".encode()
     finally:
-        logger.info("[SSE %s] stream closed", task_id[:8])
+        logger.debug("[SSE %s] stream closing", task_id[:8])
         reader_task.cancel()
         hb_task.cancel()
         with contextlib.suppress(Exception):
