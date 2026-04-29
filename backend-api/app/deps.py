@@ -5,6 +5,7 @@ All routers import from here rather than reaching into ``main`` so that
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
