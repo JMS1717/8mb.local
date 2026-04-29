@@ -187,7 +187,7 @@
                 hwTestsError = '';
                 hwTestsLoading = true;
                 try {
-                        const res = await fetch('/api/system/encoder-tests/rerun', { method: 'POST' });
+                        const res = await fetch('/api/system/encoder-tests/rerun', { method: 'POST', credentials: 'include' });
                         if (res.ok) {
                                 const js = await res.json();
                                 hwTests = js.results || [];
@@ -234,7 +234,7 @@
                 ffmpegError = '';
                 ffmpegUpdating = true;
                 try {
-                        const res = await fetch('/api/system/ffmpeg-update', { method: 'POST' });
+                        const res = await fetch('/api/system/ffmpeg-update', { method: 'POST', credentials: 'include' });
                         if (res.ok) {
                                 const js = await res.json();
                                 ffmpegInstalled = js.installed?.version || ffmpegInstalled;

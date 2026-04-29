@@ -1,6 +1,7 @@
 """System, hardware, codec, and diagnostics route handlers."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -14,7 +15,8 @@ from ..celery_app import celery_app
 from ..config import settings
 from ..deps import (
     get_hw_info_cached,
-    get_hw_info_fresh,
+    get_hw_info_cached_async,
+    get_hw_info_fresh_async,
     get_system_capabilities,
     redis,
     sync_codec_settings_from_tests,
@@ -66,9 +68,9 @@ async def startup_info():
 async def get_hardware_info():
     """Get available hardware acceleration info from worker."""
     try:
-        info = get_hw_info_fresh(timeout=5) or get_hw_info_cached()
+        info = await get_hw_info_fresh_async(timeout=5) or await get_hw_info_cached_async()
     except Exception:
-        info = get_hw_info_cached()
+        info = await get_hw_info_cached_async()
 
     try:
         from worker.hw_detect import choose_best_codec
@@ -86,7 +88,7 @@ async def get_hardware_info():
 async def get_available_codecs() -> AvailableCodecsResponse:
     """Get available codecs based on hardware detection, user settings, and encoder tests."""
     try:
-        hw_info = get_hw_info_cached()
+        hw_info = await get_hw_info_cached_async()
 
         codec_settings = settings_manager.get_codec_visibility_settings()
         
@@ -135,8 +137,8 @@ async def system_capabilities():
     """Return detailed system capabilities including CPU, memory, GPUs and worker HW type."""
     from .. import deps as _deps_mod
     if _deps_mod.SYSTEM_CAPS_CACHE is None:
-        caps = get_system_capabilities()
-        caps["hardware"] = get_hw_info_cached()
+        caps = await asyncio.to_thread(get_system_capabilities)
+        caps["hardware"] = await get_hw_info_cached_async()
         _deps_mod.SYSTEM_CAPS_CACHE = caps
     return _deps_mod.SYSTEM_CAPS_CACHE
 
@@ -145,7 +147,7 @@ async def system_capabilities():
 async def system_encoder_tests():
     """Return encoder startup test results and a simple summary."""
     try:
-        hw_info = get_hw_info_cached()
+        hw_info = await get_hw_info_cached_async()
     except Exception:
         hw_info = {"type": "cpu", "available_encoders": {}}
 

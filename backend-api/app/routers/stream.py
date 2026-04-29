@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import sys
 import time
 from typing import AsyncGenerator
 
@@ -38,14 +37,12 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
                 if msg.get("type") != "message":
                     continue
                 data = msg.get("data")
-                logger.info(f"[SSE {task_id[:8]}] Received Redis message: {data[:100] if isinstance(data, str) else data}")
-                sys.stdout.flush()
+                logger.debug("[SSE %s] msg", task_id[:8])
                 await queue.put(str(data))
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error(f"[SSE {task_id[:8]}] pubsub error: {e}")
-            sys.stdout.flush()
+            logger.error("[SSE %s] pubsub error: %s", task_id[:8], e)
             try:
                 await queue.put(orjson.dumps({"type": "error", "message": f"[SSE] pubsub error: {e}"}).decode())
             except Exception:
@@ -65,13 +62,12 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
     reader_task = asyncio.create_task(reader())
     hb_task = asyncio.create_task(heartbeater())
     try:
-        logger.info(f"[SSE {task_id[:8]}] Stream started")
+        logger.debug("[SSE %s] stream started", task_id[:8])
         while True:
             data = await queue.get()
-            logger.info(f"[SSE {task_id[:8]}] Yielding: {data[:100] if len(data) > 100 else data}")
             yield f"data: {data}\n\n".encode()
     finally:
-        logger.info(f"[SSE {task_id[:8]}] Stream closing")
+        logger.debug("[SSE %s] stream closing", task_id[:8])
         reader_task.cancel()
         hb_task.cancel()
         with contextlib.suppress(Exception):
