@@ -224,6 +224,7 @@
     decode_passed?: boolean;
     decode_message?: string;
   }>|null = null;
+  let encoderTestsOpen = false;
   let gpuOk: boolean = false;
   // Presets and size buttons
   let presetProfiles: Array<any> = [];
@@ -1103,39 +1104,61 @@
           <p class="text-sm opacity-70">No dedicated GPUs detected</p>
         {/if}
         {#if encoderTests}
-          <details class="mt-3">
-            <summary class="cursor-pointer text-sm">Encoder tests</summary>
-            <ul class="mt-2 text-xs space-y-2">
+          <div class="mt-3 overflow-hidden rounded-lg border border-gray-700/80 bg-gray-950/40">
+            <button
+              type="button"
+              class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors hover:bg-gray-800/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+              aria-expanded={encoderTestsOpen}
+              aria-controls="encoder-test-results"
+              on:click={() => encoderTestsOpen = !encoderTestsOpen}
+            >
+              <span class="flex min-w-0 items-center gap-2">
+                <span class={`h-2 w-2 shrink-0 rounded-full ${gpuOk ? 'bg-green-400' : 'bg-amber-400'}`}></span>
+                <span class="font-medium">Encoder tests</span>
+                <span class="truncate text-xs text-gray-400">
+                  {encoderTests.filter((test) => test.passed === true).length}/{encoderTests.length} available
+                </span>
+              </span>
+              <span class="flex shrink-0 items-center gap-1 text-xs text-gray-300">
+                {encoderTestsOpen ? 'Hide' : 'Show'}
+                <svg class={`h-4 w-4 transition-transform ${encoderTestsOpen ? 'rotate-180' : ''}`} viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.168l3.71-3.938a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z" clip-rule="evenodd" />
+                </svg>
+              </span>
+            </button>
+            {#if encoderTestsOpen}
+            <div id="encoder-test-results" class="border-t border-gray-700/80 p-2.5">
+            <ul class="grid max-h-96 gap-2 overflow-y-auto pr-1 text-xs lg:grid-cols-2">
               {#each encoderTests as t}
-                <li class="flex flex-col">
-                  <div class="flex items-center justify-between">
-                    <span class="font-medium">{encoderDisplayName(t.codec)}{#if t.actual_encoder !== t.codec} <span class="opacity-60">({t.actual_encoder})</span>{/if}</span>
+                <li class="flex flex-col rounded-md border border-gray-800 bg-gray-900/70 p-2.5">
+                  <div class="flex items-start justify-between gap-2">
+                    <span class="min-w-0 font-medium">{encoderDisplayName(t.codec)}{#if t.actual_encoder !== t.codec} <span class="text-gray-500">({t.actual_encoder})</span>{/if}</span>
                     {#if t.passed === true}
-                      <span class="text-green-400">PASS</span>
+                      <span class="rounded bg-green-900/40 px-1.5 py-0.5 text-[10px] font-semibold text-green-300">PASS</span>
                     {:else if t.passed === null}
-                      <span class="text-gray-400">N/A</span>
+                      <span class="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-semibold text-gray-400">N/A</span>
                     {:else}
-                      <span class="text-red-400">FAIL</span>
+                      <span class="rounded bg-red-900/30 px-1.5 py-0.5 text-[10px] font-semibold text-red-300">FAIL</span>
                     {/if}
                   </div>
                   {#if t.decode_passed !== null && t.decode_passed !== undefined}
-                    <div class="ml-3 mt-1 flex items-center justify-between opacity-80">
-                      <span>Decode:</span>
+                    <div class="mt-2 flex items-center justify-between gap-3 text-gray-400">
+                      <span>Decode</span>
                       {#if t.decode_passed === true}
-                        <span class="text-green-400 text-xs">✓ {t.decode_message || 'OK'}</span>
+                        <span class="truncate text-green-400" title={t.decode_message || 'OK'}>✓ {t.decode_message || 'OK'}</span>
                       {:else}
-                        <span class="text-red-400 text-xs" title={t.decode_message || 'Failed'}>✗ {t.decode_message || 'Failed'}</span>
+                        <span class="truncate text-red-400" title={t.decode_message || 'Failed'}>✕ {t.decode_message || 'Failed'}</span>
                       {/if}
                     </div>
                   {/if}
-                  <div class="ml-3 mt-1 flex items-center justify-between opacity-80">
-                    <span>Encode:</span>
+                  <div class="mt-1 flex items-center justify-between gap-3 text-gray-400">
+                    <span>Encode</span>
                     {#if t.encode_passed === true}
-                      <span class="text-green-400 text-xs">✓ {t.encode_message || 'OK'}</span>
+                      <span class="truncate text-green-400" title={t.encode_message || 'OK'}>✓ {t.encode_message || 'OK'}</span>
                     {:else if t.encode_passed === null}
-                      <span class="text-gray-400 text-xs">— {t.encode_message || 'Not tested'}</span>
+                      <span class="truncate text-gray-400" title={t.encode_message || 'Not tested'}>— {t.encode_message || 'Not tested'}</span>
                     {:else}
-                      <span class="text-red-400 text-xs" title={t.encode_message || 'Failed'}>✗ {t.encode_message || 'Failed'}</span>
+                      <span class="truncate text-red-400" title={t.encode_message || 'Failed'}>✕ {t.encode_message || 'Failed'}</span>
                     {/if}
                   </div>
                 </li>
@@ -1152,7 +1175,9 @@
                 </ul>
               </div>
             {/if}
-          </details>
+            </div>
+            {/if}
+          </div>
         {/if}
       </div>
     </div>
