@@ -138,7 +138,8 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # Container entrypoint sets up NVIDIA library paths
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh \
+    && chmod +x /app/entrypoint.sh
 
 EXPOSE 8001
 
