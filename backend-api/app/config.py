@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     AUTH_PASS: str = Field(default="changeme")
 
     # --- File management ---
+    # Docker keeps the default at /app; native/local launches can point this
+    # at a writable application-data directory without changing code.
+    APP_DATA_DIR: str = Field(default="/app")
+    UPLOADS_DIR: str = Field(default="")
+    OUTPUTS_DIR: str = Field(default="")
+    FRONTEND_BUILD_DIR: str = Field(default="/app/frontend-build")
     FILE_RETENTION_HOURS: int = Field(default=1)
     MAX_UPLOAD_SIZE_MB: int = Field(default=51200)
     MAX_BATCH_FILES: int = Field(default=200)
@@ -41,10 +47,11 @@ class Settings(BaseSettings):
     HISTORY_ENABLED: bool = Field(default=True)
 
     # --- Version (baked at build time) ---
-    APP_VERSION: str = Field(default="137")
+    APP_VERSION: str = Field(default="138")
 
     # --- Logging ---
     LOG_LEVEL: str = Field(default="INFO")
+    LOG_FILE: str = Field(default="")
 
     # --- Frontend ---
     PUBLIC_BACKEND_URL: str = Field(default="")
@@ -73,12 +80,22 @@ def configure_logging() -> None:
     """
     level_name = settings.LOG_LEVEL.upper()
     numeric_level = getattr(logging, level_name, logging.INFO)
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if settings.LOG_FILE:
+        try:
+            log_path = os.path.abspath(settings.LOG_FILE)
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+        except OSError:
+            # A read-only log path must never prevent the app from starting.
+            pass
     logging.basicConfig(
         level=numeric_level,
         # %(name)s includes the dotted logger path (e.g. app.routers.system)
         # which makes grepping per-subsystem trivial.
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
+        handlers=handlers,
         force=True,
     )
 

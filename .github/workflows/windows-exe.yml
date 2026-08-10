@@ -1,0 +1,47 @@
+name: Build native Windows executable
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build, install, and exercise the release
+        shell: pwsh
+        run: .\windows\test-release.ps1 -Build -Install
+
+      - name: Build Microsoft Store MSIX
+        shell: pwsh
+        run: |
+          .\windows\build-msix.ps1 `
+            -PackageIdentityName 'jms1717.8mb.local' `
+            -Publisher 'CN=AAE66F20-996E-4A3C-B08E-182952BAD9F7' `
+            -PublisherDisplayName 'jms1717' `
+            -StoreSubmission
+
+      - name: Upload desktop installer and executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: 8mblocal-windows
+          path: |
+            dist/8mblocal.exe
+            dist/8mblocal-Setup.exe
+          if-no-files-found: error
+
+      - name: Upload unsigned Store-submission MSIX separately
+        uses: actions/upload-artifact@v4
+        with:
+          name: 8mblocal-msix-store-submission
+          path: dist/8mblocal_138.0.0.0_x64.msix
+          if-no-files-found: error

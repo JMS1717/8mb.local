@@ -11,39 +11,60 @@ import threading
 import time
 import logging
 import sys
+import uuid
 from pathlib import Path
 from typing import Dict, Optional
 from redis import Redis
 
+from shared.subprocess_utils import hidden_process_kwargs
+
 from .celery_app import celery_app
 from .constants import (
     CPU_FALLBACK, CPU_ENCODERS, HW_ENCODERS,
-    LIBAOM_AV1, LIBSVTAV1, LIBX264, LIBX265,
+    LIBAOM_AV1, SVT_AV1, LIBX264, LIBX265,
+    AMF_ENCODERS, QSV_ENCODERS, VAAPI_ENCODERS,
 )
 from .utils import ffprobe_info, calc_bitrates
 from .auto_resolution import choose_auto_resolution
 from .hw_detect import get_hw_info, map_codec_to_hw, choose_best_codec
+from .ffmpeg_helpers import cpu_filter_chain, replace_bitrate_args
 from .startup_tests import run_startup_tests
-from .progress import parse_time_string
+from .progress import parse_ffmpeg_out_time, parse_time_string
 
 logger = logging.getLogger(__name__)
 
 REDIS = None
 # Cache encoder test results to avoid slow init tests on every job
 ENCODER_TEST_CACHE: Dict[str, bool] = {}
+_LAST_PUBLISH_WARNING_TS = 0.0
 
-# libsvtav1: SVT-AV1 uses LevelOfParallelism ``lp`` in ``-svtav1-params`` (indexed 0..6, not
-# “number of cores”). ``lp=0`` auto-picks a level and often leaves CPU partly idle on
-# high-core hosts; ``lp=6`` is the maximum parallelism level the library exposes.
-SVTAV1_PARAMS_MAX_LP = ["-svtav1-params", "lp=6"]
+# libsvtav1: SVT-AV1's LevelOfParallelism (``lp``) is a library tuning level,
+# not a core count. Older releases forced ``lp=6`` for throughput, but that
+# can overcommit small VMs and has caused encoder crashes. Let SVT choose a
+# safe level by default; operators with a known-good host can opt in with
+# ``SVTAV1_LP=0..6``.
+def _svtav1_params() -> list[str]:
+    value = os.getenv("SVTAV1_LP", "auto").strip().lower()
+    if value in {"", "auto", "default"}:
+        return []
+    try:
+        level = max(0, min(6, int(value)))
+    except ValueError:
+        logger.warning("Invalid SVTAV1_LP=%r; using SVT automatic parallelism", value)
+        return []
+    return ["-svtav1-params", f"lp={level}"]
 
 
-def _cpu_fallback_for(encoder: str) -> tuple[str, list[str]]:
+def _cpu_fallback_for(
+    encoder: str,
+    available_cpu_encoders: set[str] | None = None,
+) -> tuple[str, list[str]]:
     """Return (cpu_encoder, v_flags) to use when a hardware encoder fails.
 
-    Uses CPU_FALLBACK from constants so AV1 falls back to SVT-AV1 (fast) rather
-    than libaom-av1 (10-50× slower). Callers can override if libsvtav1 is not
-    present in the ffmpeg build.
+    Uses CPU_FALLBACK from constants so AV1 falls back to SVT-AV1 (FFmpeg's
+    ``libsvtav1`` token).  libaom-av1 is intentionally not an automatic
+    fallback: if SVT-AV1 is absent, failing clearly is safer than silently
+    turning a fast hardware request into a very slow encode.
     """
     fb = CPU_FALLBACK.get(encoder)
     if fb is None:
@@ -53,9 +74,20 @@ def _cpu_fallback_for(encoder: str) -> tuple[str, list[str]]:
         elif "hevc" in encoder or "h265" in encoder:
             fb = LIBX265
         elif "av1" in encoder:
-            fb = LIBSVTAV1
+            fb = SVT_AV1
         else:
             fb = LIBX264
+    if available_cpu_encoders is not None and fb not in available_cpu_encoders:
+        if fb == SVT_AV1:
+            raise RuntimeError(
+                "SVT-AV1 is required for the CPU AV1 fallback, but this FFmpeg build "
+                "does not expose libsvtav1"
+            )
+        logger.warning(
+            "Configured CPU fallback %s for %s is not in the FFmpeg inventory",
+            fb,
+            encoder,
+        )
     if fb == LIBX264:
         flags = ["-pix_fmt", "yuv420p", "-profile:v", "high"]
     else:
@@ -81,22 +113,51 @@ def get_gpu_env():
         '/usr/local/cuda/lib',
         '/usr/lib/wsl/lib',  # WSL2 libcuda.so location
         '/usr/lib/x86_64-linux-gnu',
+        '/usr/lib/x86_64-linux-gnu/dri',
+        '/usr/lib/dri',
     ]
     existing = env.get('LD_LIBRARY_PATH', '')
     add = ':'.join(p for p in lib_paths if p)
     env['LD_LIBRARY_PATH'] = (existing + (':' if existing and add else '') + add) if (existing or add) else ''
     return env
 
+
+def _is_hardware_encoder(encoder: str) -> bool:
+    return encoder in HW_ENCODERS
+
+
+
 def _redis() -> Redis:
     global REDIS
     if REDIS is None:
-        REDIS = Redis.from_url(os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"), decode_responses=True)
+        if os.getenv("LOCAL_RUNTIME", "").strip().lower() in {"1", "true", "yes", "on"}:
+            from shared.local_runtime import get_sync_redis
+
+            REDIS = get_sync_redis()
+        else:
+            REDIS = Redis.from_url(os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"), decode_responses=True)
     return REDIS
 
 
-def _publish(task_id: str, event: Dict):
+def _publish(task_id: str, event: Dict) -> bool:
+    global _LAST_PUBLISH_WARNING_TS
     event.setdefault("task_id", task_id)
-    _redis().publish(f"progress:{task_id}", json.dumps(event))
+    try:
+        _redis().publish(f"progress:{task_id}", json.dumps(event))
+        if os.getenv("LOCAL_RUNTIME", "").strip().lower() in {"1", "true", "yes", "on"}:
+            from shared.local_runtime import record_worker_event
+
+            record_worker_event(task_id, event)
+        return True
+    except Exception as exc:
+        # Progress is best-effort. Redis can briefly restart or lose a pub/sub
+        # connection; that must not turn a successful FFmpeg encode into a
+        # failed job. The queue/status metadata remains the source of truth.
+        now = time.monotonic()
+        if now - _LAST_PUBLISH_WARNING_TS >= 10.0:
+            _LAST_PUBLISH_WARNING_TS = now
+            logger.warning("progress publish failed for %s: %s", task_id[:8], exc)
+        return False
 
 
 def _is_cancelled(task_id: str) -> bool:
@@ -105,6 +166,15 @@ def _is_cancelled(task_id: str) -> bool:
         return str(val) == '1'
     except Exception:
         return False
+
+
+def _history_filename(job_id: str, input_path: str) -> str:
+    """Recover the user-facing name from the UUID-prefixed staging path."""
+    name = Path(input_path).name
+    prefix = f"{job_id}_"
+    if name.startswith(prefix) and len(name) > len(prefix):
+        return name[len(prefix):]
+    return name
 
 
 def _force_stop_ffmpeg(proc: subprocess.Popen) -> None:
@@ -177,9 +247,17 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         force_hw_decode, fast_mp4_finalize, input_path,
     )
 
+    def remove_cancelled_output() -> None:
+        """Remove any partial first-pass output after a cancellation."""
+        try:
+            Path(output_path).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove canceled partial output: %s", output_path)
+
     # Detect hardware acceleration
     _publish(self.request.id, {"type": "log", "message": "Initializing: detecting hardware…"})
     hw_info = get_hw_info()
+    available_cpu_encoders = set(hw_info.get("available_cpu_encoders") or [])
     logger.debug(
         "compress_video hw_info: type=%s device=%s encoders=%s",
         hw_info.get("type"), hw_info.get("device"),
@@ -189,7 +267,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     
     # Probe
     _publish(self.request.id, {"type": "log", "message": "Initializing: probing input file…"})
-    info = ffprobe_info(input_path)
+    info = ffprobe_info(input_path, allow_audio_only=bool(audio_only))
     duration = info.get("duration", 0.0)
     logger.debug(
         "compress_video ffprobe: duration=%.2fs %sx%s v_kbps=%s a_kbps=%s fps=%s rotation=%s",
@@ -234,7 +312,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         """
         vb = int(video_kbps)
         bvk = f"{vb}k"
-        if enc == LIBSVTAV1:
+        if enc == SVT_AV1:
             return ["-b:v", bvk]
         return ["-b:v", bvk, "-maxrate", f"{maxrate}k", "-bufsize", f"{bufsize}k"]
 
@@ -260,7 +338,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 "the job will use a CPU encoder instead which is typically much slower and increases CPU usage. "
                 "To enable hardware encoding, ensure drivers/libraries are installed and run 'System → Run encoder tests' in the UI to refresh results."
             )})
-            actual_encoder, v_flags = _cpu_fallback_for(actual_encoder)
+            actual_encoder, v_flags = _cpu_fallback_for(actual_encoder, available_cpu_encoders)
             init_hw_flags = []
             logger.info(
                 "CPU fallback selected (startup-test cache): %s -> %s",
@@ -320,22 +398,80 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         a_codec = 'aac' if output_path.lower().endswith('.m4a') else (audio_codec if audio_codec != 'none' else 'aac')
         a_bitrate_str = f"{int(max(64, audio_bitrate_kbps))}k"
         # Build simple ffmpeg command to extract/transcode audio
+        audio_temp_path = f"{output_path}.audio.{uuid.uuid4().hex}{Path(output_path).suffix}"
         cmd = [
             "ffmpeg", "-hide_banner", "-y",
             "-i", input_path,
             "-vn",
             "-c:a", a_codec, "-b:a", a_bitrate_str,
             "-movflags", "+faststart" if output_path.lower().endswith('.m4a') else "",
-            output_path,
+            audio_temp_path,
         ]
         # Remove empty flags
         cmd = [c for c in cmd if c != ""]
         _publish(self.request.id, {"type": "log", "message": f"FFmpeg (audio-only): {' '.join(cmd)}"})
-        rc, was_cancelled = (subprocess.run(cmd, text=True).returncode, False)
+        audio_proc = None
+        was_cancelled = False
+        rc = -1
+        try:
+            popen_kwargs = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "env": get_gpu_env(),
+            }
+            if sys.platform != "win32":
+                popen_kwargs["start_new_session"] = True
+            popen_kwargs.update(hidden_process_kwargs())
+            audio_proc = subprocess.Popen(cmd, **popen_kwargs)
+            while audio_proc.poll() is None:
+                if _is_cancelled(self.request.id):
+                    was_cancelled = True
+                    _publish(self.request.id, {"type": "log", "message": "Cancel received, stopping audio extraction..."})
+                    _force_stop_ffmpeg(audio_proc)
+                    break
+                time.sleep(0.25)
+            try:
+                audio_proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                _force_stop_ffmpeg(audio_proc)
+                audio_proc.wait(timeout=5)
+            rc = audio_proc.returncode if audio_proc.returncode is not None else -1
+        except Exception as exc:
+            _publish(self.request.id, {"type": "log", "message": f"Audio extraction process failed: {exc}"})
+            raise
+        finally:
+            if audio_proc is not None and audio_proc.poll() is None:
+                _force_stop_ffmpeg(audio_proc)
+            if was_cancelled or rc != 0:
+                try:
+                    if os.path.exists(audio_temp_path):
+                        os.remove(audio_temp_path)
+                except OSError:
+                    pass
+
+        if was_cancelled:
+            remove_cancelled_output()
+            _publish(self.request.id, {"type": "canceled"})
+            msg = "Job canceled by user"
+            _publish(self.request.id, {"type": "error", "message": msg})
+            raise RuntimeError(msg)
         if rc != 0:
             msg = f"Audio extraction failed with code {rc}"
             _publish(self.request.id, {"type": "error", "message": msg})
             raise RuntimeError(msg)
+        try:
+            if not os.path.exists(audio_temp_path) or os.path.getsize(audio_temp_path) <= 0:
+                raise RuntimeError("Audio extraction produced no output")
+            os.replace(audio_temp_path, output_path)
+        except Exception as exc:
+            try:
+                if os.path.exists(audio_temp_path):
+                    os.remove(audio_temp_path)
+            except OSError:
+                pass
+            msg = f"Audio extraction output could not be finalized: {exc}"
+            _publish(self.request.id, {"type": "error", "message": msg})
+            raise RuntimeError(msg) from exc
         # Publish completion
         final_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
         stats = {
@@ -345,6 +481,34 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             "target_size_mb": target_size_mb,
             "final_size_mb": round(final_size / (1024*1024), 2),
         }
+        try:
+            if os.getenv("HISTORY_ENABLED", "true").lower() in ("true", "1", "yes"):
+                import importlib
+
+                app_root = os.getenv("BACKEND_APP_ROOT", "/app")
+                sys.path.insert(0, app_root)
+                try:
+                    history = importlib.import_module("backend.history_manager")
+                except ModuleNotFoundError:
+                    history = importlib.import_module("app.history_manager")
+                history.add_history_entry(
+                    filename=_history_filename(job_id, input_path),
+                    original_size_mb=os.path.getsize(input_path) / (1024 * 1024),
+                    compressed_size_mb=stats["final_size_mb"],
+                    video_codec="audio-only",
+                    audio_codec=a_codec,
+                    target_mb=target_size_mb,
+                    preset=preset_val,
+                    duration=max(time.time() - start_ts, 0),
+                    task_id=self.request.id,
+                    container="m4a",
+                    tune=tune_val,
+                    audio_bitrate_kbps=int(audio_bitrate_kbps),
+                    encoder=a_codec,
+                    output_filename=Path(output_path).name,
+                )
+        except Exception as exc:
+            _publish(self.request.id, {"type": "log", "message": f"Failed to save audio history: {exc}"})
         _publish(self.request.id, {"type": "progress", "progress": 100.0, "phase": "done"})
         try:
             self.update_state(state="SUCCESS", meta={"output_path": output_path, "progress": 100.0, "detail": "done", **stats})
@@ -396,22 +560,39 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 preset_flags += ["-crf", "18"]
             else:
                 preset_flags += ["-crf", "20"]
-        elif actual_encoder == "libsvtav1":
-            preset_flags = ["-preset", "2", "-crf", "22", *SVTAV1_PARAMS_MAX_LP]
+        elif actual_encoder == SVT_AV1:
+            preset_flags = ["-preset", "2", "-crf", "22", *_svtav1_params()]
         elif actual_encoder == "libaom-av1":
             preset_flags = ["-cpu-used", "0", "-crf", "20"]
+        elif actual_encoder in QSV_ENCODERS:
+            # QSV has a preset but no NVENC-style tune. Keep this conservative
+            # because VAAPI encoders do not accept the same options.
+            preset_flags = ["-preset", "slow"]
+        elif actual_encoder in VAAPI_ENCODERS:
+            preset_flags = []
     elif actual_encoder.endswith("_nvenc"):
         # Honor UI preset/tune only — do not switch AV1 (or other NVENC) to faster presets
         # based on target bitrate; low-bitrate jobs still use the user's quality choice.
         preset_flags = ["-preset", preset_val]
         tune_flags = ["-tune", tune_val]
+    elif actual_encoder in QSV_ENCODERS:
+        qsv_preset_map = {
+            "p1": "veryfast", "p2": "faster", "p3": "fast",
+            "p4": "medium", "p5": "slow", "p6": "slower", "p7": "veryslow",
+        }
+        preset_flags = ["-preset", qsv_preset_map.get(preset_val, "medium")]
+    elif actual_encoder in VAAPI_ENCODERS or actual_encoder in AMF_ENCODERS:
+        # VAAPI encoders use driver-specific quality/rate controls; FFmpeg's
+        # generic -preset/-tune flags are not portable here. AMF similarly
+        # varies by FFmpeg/driver version, so rate control stays conservative.
+        preset_flags = []
     elif actual_encoder in ("libx264", "libx265"):
         cpu_preset_map = {"p1": "ultrafast", "p2": "superfast", "p3": "veryfast", "p4": "faster", "p5": "fast", "p6": "medium", "p7": "slow"}
         preset_flags = ["-preset", cpu_preset_map.get(preset_val, "medium")]
         if actual_encoder == "libx264":
             tune_flags = ["-tune", "film"]  # Better than 'hq' for CPU
-    elif actual_encoder == "libsvtav1":
-        preset_flags = ["-preset", svt_preset_map.get(preset_val, "8"), *SVTAV1_PARAMS_MAX_LP]
+    elif actual_encoder == SVT_AV1:
+        preset_flags = ["-preset", svt_preset_map.get(preset_val, "8"), *_svtav1_params()]
     elif actual_encoder == "libaom-av1":
         preset_flags = ["-cpu-used", aom_cpu_used_map.get(preset_val, "4"), "-row-mt", "1"]
 
@@ -460,6 +641,12 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     duration_opts = []
     
     if start_time:
+        try:
+            start_sec = parse_time_string(start_time)
+            if not math.isfinite(start_sec) or start_sec < 0:
+                raise ValueError("start time must be non-negative")
+        except Exception as e:
+            raise RuntimeError(f"Invalid start time: {e}") from e
         # -ss before input for fast seeking
         input_opts += ["-ss", str(start_time)]
         _publish(self.request.id, {"type": "log", "message": f"Trimming: start at {start_time}"})
@@ -468,49 +655,30 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         # Convert end_time to duration if we have start_time
         if start_time:
             # Calculate duration (end - start)
-            # Parse times to seconds for calculation
-            def parse_time(t):
-                if isinstance(t, (int, float)):
-                    return float(t)
-                if ':' in str(t):
-                    parts = str(t).split(':')
-                    if len(parts) == 3:  # HH:MM:SS
-                        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-                    elif len(parts) == 2:  # MM:SS
-                        return int(parts[0]) * 60 + float(parts[1])
-                return float(t)
-            
             try:
-                start_sec = parse_time(start_time)
-                end_sec = parse_time(end_time)
+                start_sec = parse_time_string(start_time)
+                end_sec = parse_time_string(end_time)
+                if not math.isfinite(start_sec) or not math.isfinite(end_sec) or start_sec < 0 or end_sec <= start_sec:
+                    raise ValueError("end time must be greater than start time, and both must be non-negative")
                 duration_sec = end_sec - start_sec
-                if duration_sec > 0:
-                    duration_opts = ["-t", str(duration_sec)]
-                    _publish(self.request.id, {"type": "log", "message": f"Trimming: duration {duration_sec:.2f}s (end at {end_time})"})
-                    # Use trimmed duration for accurate progress scaling
-                    try:
-                        duration = float(duration_sec)
-                    except Exception:
-                        pass
+                duration_opts = ["-t", str(duration_sec)]
+                _publish(self.request.id, {"type": "log", "message": f"Trimming: duration {duration_sec:.2f}s (end at {end_time})"})
+                # Use trimmed duration for accurate progress scaling
+                duration = float(duration_sec)
             except Exception as e:
-                _publish(self.request.id, {"type": "log", "message": f"Warning: Could not parse trim times: {e}"})
+                raise RuntimeError(f"Invalid trim range: {e}") from e
         else:
             # No start time, use -to
             duration_opts = ["-to", str(end_time)]
             _publish(self.request.id, {"type": "log", "message": f"Trimming: end at {end_time}"})
             # If only end_time provided, set duration to end timestamp if parsable
             try:
-                et = str(end_time)
-                if ':' in et:
-                    parts = et.split(':')
-                    if len(parts) == 3:
-                        duration = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-                    elif len(parts) == 2:
-                        duration = int(parts[0]) * 60 + float(parts[1])
-                else:
-                    duration = float(et)
-            except Exception:
-                pass
+                end_sec = parse_time_string(end_time)
+                if not math.isfinite(end_sec) or end_sec <= 0:
+                    raise ValueError("end time must be positive")
+                duration = float(end_sec)
+            except Exception as e:
+                raise RuntimeError(f"Invalid end time: {e}") from e
 
     # Decide decoder strategy based on input codec and runtime capability
     in_codec = info.get("video_codec")
@@ -519,7 +687,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         try:
             r = subprocess.run([
                 "ffmpeg", "-hide_banner", "-decoders"
-            ], capture_output=True, text=True, timeout=5, env=get_gpu_env())
+            ], capture_output=True, text=True, timeout=5, env=get_gpu_env(), **hidden_process_kwargs())
             return (r.returncode == 0) and (dec_name in (r.stdout or ""))
         except Exception:
             return False
@@ -534,7 +702,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 "-i", path,
                 "-f", "null", "-"
             ]
-            r = subprocess.run(test_cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env())
+            r = subprocess.run(test_cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env(), **hidden_process_kwargs())
             stderr = (r.stderr or "").lower()
             fail_patterns = [
                 "doesn't support hardware accelerated", "failed setup for format cuda",
@@ -560,7 +728,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 "-i", path,
                 "-f", "null", "-"
             ]
-            r = subprocess.run(test_cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env())
+            r = subprocess.run(test_cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env(), **hidden_process_kwargs())
             stderr = (r.stderr or "").lower()
             fail_patterns = [
                 "not found", "unknown decoder", "cannot load", "init failed",
@@ -649,6 +817,27 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             ip = f"{float(input_fps):.3g}"
             _publish(self.request.id, {"type": "log", "message": f"Frame rate: capping at {cap:g} fps (source ~{ip} fps)"})
 
+    # QSV and VAAPI encode hardware frames, but software decode and software
+    # scaling remain the most reliable path across Intel/AMD driver versions.
+    # Upload only after all software filters (scale/fps) have been applied.
+    if actual_encoder in QSV_ENCODERS:
+        # QSV requires a fixed hardware-frame pool when software-decoded frames
+        # are uploaded. Without this, Intel media-driver fails at runtime with
+        # "QSV requires a fixed frame pool size" despite a healthy device.
+        vf_filters.append("format=nv12,hwupload=extra_hw_frames=64")
+        _publish(self.request.id, {
+            "type": "log",
+            "message": f"Encoder: {actual_encoder} with software decode and QSV hardware upload",
+        })
+    elif actual_encoder in VAAPI_ENCODERS:
+        # Allow an already-uploaded VAAPI frame as well as software nv12.
+        # This is the portable form used by FFmpeg's VAAPI filter graph.
+        vf_filters.append("format=nv12|vaapi,hwupload")
+        _publish(self.request.id, {
+            "type": "log",
+            "message": f"Encoder: {actual_encoder} with software decode and VAAPI hardware upload",
+        })
+
     # Note: We do not inject -extra_hw_frames here. Large values (e.g. 16) plus the
     # default H.264 decoder thread count can exceed NVDEC's ~32 decode-surface budget and
     # make cuvidCreateDecoder fail. Capping -threads to compensate then slowed decodes
@@ -702,6 +891,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         }
         if sys.platform != "win32":
             _popen_kw["start_new_session"] = True
+        _popen_kw.update(hidden_process_kwargs())
         proc_i = subprocess.Popen(command, **_popen_kw)
         logger.debug("ffmpeg Popen pid=%s", proc_i.pid)
         local_stderr = []
@@ -712,7 +902,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         last_update_time = time.time()
         
         # Track multiple progress signals from ffmpeg
-        current_time_s = 0.0  # out_time_ms converted to seconds
+        current_time_s = 0.0  # FFmpeg out_time_ms/out_time_us converted from microseconds
         current_size_bytes = 0  # total_size in bytes
         current_bitrate_kbps = 0.0  # bitrate in kbps
         last_time_s = 0.0  # Track last time value to detect restarts
@@ -772,7 +962,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                     # Collect all progress metrics from ffmpeg
                     if key == "out_time_ms":
                         try:
-                            new_time_s = int(val) / 1000.0
+                            new_time_s = parse_ffmpeg_out_time(val)
+                            if new_time_s is None:
+                                continue
                             
                             # Detect FFmpeg restart (time goes backwards significantly)
                             if last_time_s > 0 and new_time_s < (last_time_s * 0.5):
@@ -925,8 +1117,10 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     last_progress = 0.0
     stderr_lines: list[str] = []
     rc, was_cancelled = run_ffmpeg_and_stream(cmd)
+    last_successful_cmd: list[str] | None = cmd.copy() if rc == 0 and not was_cancelled else None
 
     if was_cancelled:
+        remove_cancelled_output()
         _publish(self.request.id, {"type": "canceled"})
         msg = "Job canceled by user"
         _publish(self.request.id, {"type": "error", "message": msg})
@@ -935,14 +1129,19 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Decode-error retry: if the failure looks like a hardware decoder issue,
     # retry the same encoder with software decode before falling back to CPU.
     decode_fail_hints = ["cuvid", "error while opening decoder", "hwaccel", "not supported"]
-    if rc != 0 and not was_cancelled and any(h in '\n'.join(stderr_lines).lower() for h in decode_fail_hints):
+    if (
+        rc != 0
+        and not was_cancelled
+        and actual_encoder.endswith("_nvenc")
+        and any(h in '\n'.join(stderr_lines).lower() for h in decode_fail_hints)
+    ):
         _publish(self.request.id, {"type": "log", "message": "⚠️ Hardware decode failed. Retrying with software decoder..."})
         sw_input_opts = [o for i, o in enumerate(input_opts)
                          if not (o in ("-c:v",) or
                                  (i > 0 and input_opts[i-1] == "-c:v"))]
         if in_codec == "av1":
             sw_input_opts += ["-c:v", "libdav1d"]
-        sw_vf = [f.replace("scale_npp=", "scale=") for f in vf_filters] if vf_filters else []
+        sw_vf = cpu_filter_chain(vf_filters)
         sw_v_flags = v_flags
         if "-pix_fmt" not in v_flags and actual_encoder.endswith("_nvenc"):
             sw_v_flags = ["-pix_fmt", "yuv420p"] + sw_v_flags
@@ -969,22 +1168,30 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         stderr_lines = []
         last_progress = 0.0
         rc, was_cancelled = run_ffmpeg_and_stream(retry_cmd)
+        if rc == 0 and not was_cancelled:
+            last_successful_cmd = retry_cmd.copy()
         if was_cancelled:
+            remove_cancelled_output()
             _publish(self.request.id, {"type": "canceled"})
             msg = "Job canceled by user"
             _publish(self.request.id, {"type": "error", "message": msg})
             raise RuntimeError(msg)
 
-    if rc != 0 and actual_encoder.endswith("_nvenc"):
-        _publish(self.request.id, {"type": "log", "message": f"⚠️ Hardware encode failed (rc={rc}). Retrying on CPU..."})
+    if rc != 0 and _is_hardware_encoder(actual_encoder):
+        _publish(self.request.id, {"type": "log", "message": f"⚠️ Hardware encode ({original_encoder}) failed (rc={rc}). Retrying on CPU..."})
         _publish(self.request.id, {"type": "log", "message": (
             "Explanation: The hardware encoder failed at runtime. The worker will retry using a CPU encoder which is slower. "
             "This can happen if drivers, device nodes, or libraries are missing or if the encoder is unsupported by the current ffmpeg build. "
             "Run the encoder diagnostic tests from the UI or check logs to investigate."
         )})
-        fb_encoder, fb_flags = _cpu_fallback_for(actual_encoder)
+        try:
+            fb_encoder, fb_flags = _cpu_fallback_for(actual_encoder, available_cpu_encoders)
+        except RuntimeError as exc:
+            logger.error("No approved CPU fallback for %s: %s", actual_encoder, exc)
+            _publish(self.request.id, {"type": "error", "message": str(exc)})
+            raise
         logger.info(
-            "Runtime CPU fallback after NVENC failure: %s -> %s (rc=%s)",
+            "Runtime CPU fallback after hardware failure: %s -> %s (rc=%s)",
             actual_encoder, fb_encoder, rc,
         )
         _publish(self.request.id, {"type": "log", "message": f"Encoder: CPU ({fb_encoder})"})
@@ -997,8 +1204,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         # Use libdav1d for AV1 input, otherwise let FFmpeg auto-select
         if in_codec == "av1":
             cpu_input_opts += ["-c:v", "libdav1d"]
-        # Revert scale_npp back to scale for CPU path
-        cpu_vf = [f.replace("scale_npp=", "scale=") for f in vf_filters] if vf_filters else []
+        # Strip all hardware-frame filters for the CPU path. This also handles
+        # a joined chain such as ``scale=...,hwdownload,format=yuv420p``.
+        cpu_vf = cpu_filter_chain(vf_filters)
 
         cmd2 = [
             "ffmpeg", "-hide_banner", "-y",
@@ -1015,10 +1223,10 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             cmd2 += ["-preset","medium","-tune","film"]
         elif fb_encoder == "libx265":
             cmd2 += ["-preset","medium"]
-        elif fb_encoder == LIBSVTAV1:
+        elif fb_encoder == SVT_AV1:
             cmd2 += [
                 "-preset", svt_preset_map.get(preset_val, "8"),
-                *SVTAV1_PARAMS_MAX_LP,
+                *_svtav1_params(),
             ]
         elif fb_encoder == "libaom-av1":
             cmd2 += ["-cpu-used","4"]
@@ -1029,8 +1237,11 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         cmd2 += [*mp4_flags, "-progress", "pipe:2", output_path]
 
         rc, was_cancelled = run_ffmpeg_and_stream(cmd2)
+        if rc == 0 and not was_cancelled:
+            last_successful_cmd = cmd2.copy()
 
     if was_cancelled:
+        remove_cancelled_output()
         _publish(self.request.id, {"type": "canceled"})
         msg = "Job canceled by user"
         _publish(self.request.id, {"type": "error", "message": msg})
@@ -1121,12 +1332,23 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 f"(size ratio {size_ratio:.3f}×, −{100 * (1 - adjusted_video_kbps / max(video_kbps, 1e-9)):.1f}%)"
             )})
             
-            # Delete the oversized file
+            # Keep a reversible backup while the retry runs.  If FFmpeg or a
+            # driver fails during the second encode, returning success with a
+            # truncated/missing output is worse than keeping the verified
+            # oversized file the first pass produced.
+            retry_backup_path: str | None = None
+            retry_staging_path: str | None = None
             try:
-                os.remove(output_path)
-                _publish(self.request.id, {"type": "log", "message": "Removed oversized file"})
+                retry_backup_path = f"{output_path}.oversized.{uuid.uuid4().hex}.bak"
+                os.replace(output_path, retry_backup_path)
+                _publish(self.request.id, {"type": "log", "message": "Temporarily moved oversized output while retrying"})
             except Exception as e:
-                _publish(self.request.id, {"type": "log", "message": f"Warning: Could not remove oversized file: {e}"})
+                retry_backup_path = None
+                # Keep the verified first-pass output in place when it cannot be
+                # moved.  Encode the optional retry to a separate path so a
+                # failed retry cannot replace or truncate the good output.
+                retry_staging_path = f"{output_path}.retry.{uuid.uuid4().hex}{Path(output_path).suffix}"
+                _publish(self.request.id, {"type": "log", "message": f"Could not move oversized output; retrying to a staging file: {e}"})
             
             # Reset progress for retry
             _publish(self.request.id, {"type": "progress", "progress": 1.0, "phase": "encoding"})
@@ -1135,28 +1357,14 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             except Exception:
                 pass
             
-            # Re-run the encoding with adjusted bitrate by modifying cmd
-            # Match abr_rate_control_args: 1.2× maxrate, 2× bufsize (all VBV encoders)
-            _retry_maxrate_mul = 1.2
-            _retry_buf_mul = 2.0
-            retry_cmd = []
-            i = 0
-            while i < len(cmd):
-                if cmd[i] == "-b:v":
-                    retry_cmd.append(cmd[i])
-                    retry_cmd.append(f"{adjusted_video_kbps}k")
-                    i += 2
-                elif cmd[i] == "-maxrate":
-                    retry_cmd.append(cmd[i])
-                    retry_cmd.append(f"{int(adjusted_video_kbps * _retry_maxrate_mul)}k")
-                    i += 2
-                elif cmd[i] == "-bufsize":
-                    retry_cmd.append(cmd[i])
-                    retry_cmd.append(f"{int(adjusted_video_kbps * _retry_buf_mul)}k")
-                    i += 2
-                else:
-                    retry_cmd.append(cmd[i])
-                    i += 1
+            # Re-run the last command that actually produced the verified file.
+            # A decode retry or CPU fallback may have replaced the original
+            # command; rebuilding from the stale initial command silently
+            # reintroduced the failed hardware path on oversized outputs.
+            retry_base = last_successful_cmd or cmd
+            retry_cmd = replace_bitrate_args(retry_base, adjusted_video_kbps)
+            if retry_staging_path:
+                retry_cmd[-1] = retry_staging_path
             
             _publish(self.request.id, {"type": "log", "message": f"Retry FFmpeg command: {' '.join(retry_cmd[:10])}..."})
             
@@ -1166,26 +1374,81 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             rc, was_cancelled = run_ffmpeg_and_stream(retry_cmd)
             
             if was_cancelled:
+                if retry_staging_path and os.path.exists(retry_staging_path):
+                    try:
+                        os.remove(retry_staging_path)
+                    except OSError:
+                        logger.warning("Could not remove canceled retry staging file: %s", retry_staging_path)
+                if retry_backup_path and os.path.exists(retry_backup_path):
+                    try:
+                        if os.path.exists(output_path):
+                            os.remove(output_path)
+                        os.replace(retry_backup_path, output_path)
+                    except Exception:
+                        logger.warning("Could not restore oversized output after canceled retry: %s", output_path)
                 _publish(self.request.id, {"type": "canceled"})
                 msg = "Job canceled during retry"
                 _publish(self.request.id, {"type": "error", "message": msg})
                 raise RuntimeError(msg)
-            
-            if rc != 0:
-                _publish(self.request.id, {"type": "error", "message": f"Retry encode failed with return code {rc}. Using best result."})
-                # Don't fail completely, just note the retry failed
+
+            retry_output_path = retry_staging_path or output_path
+            retry_output_valid = False
+            try:
+                retry_output_valid = os.path.exists(retry_output_path) and os.path.getsize(retry_output_path) > 0
+            except OSError:
+                retry_output_valid = False
+            if rc != 0 or not retry_output_valid:
+                if retry_staging_path and os.path.exists(retry_staging_path):
+                    try:
+                        os.remove(retry_staging_path)
+                    except OSError:
+                        logger.warning("Could not remove failed retry staging file: %s", retry_staging_path)
+                if retry_backup_path and os.path.exists(retry_backup_path):
+                    try:
+                        if os.path.exists(output_path):
+                            os.remove(output_path)
+                        os.replace(retry_backup_path, output_path)
+                        final_size = os.path.getsize(output_path)
+                        final_size_mb = round(final_size / (1024 * 1024), 2)
+                    except Exception:
+                        logger.warning("Could not restore oversized output after failed retry: %s", output_path)
+                _publish(self.request.id, {"type": "error", "message": f"Retry encode failed with return code {rc}. Keeping the verified first-pass output."})
+                # Do not fail the job solely because the optional size retry failed.
             else:
-                # Update final size after successful retry
-                try:
-                    final_size = os.path.getsize(output_path)
-                    final_size_mb = round(final_size / (1024*1024), 2)
-                    new_overage = ((final_size_mb - progress_target_mb) / progress_target_mb) * 100 if progress_target_mb > 0 else 0
-                    if new_overage <= 0:
-                        _publish(self.request.id, {"type": "log", "message": f"✅ Retry successful! Final size: {final_size_mb:.2f} MB (under target)"})
-                    else:
-                        _publish(self.request.id, {"type": "log", "message": f"✅ Retry complete! Final size: {final_size_mb:.2f} MB ({new_overage:+.1f}% vs target)"})
-                except Exception:
-                    final_size = 0
+                if retry_staging_path:
+                    try:
+                        os.replace(retry_staging_path, output_path)
+                    except Exception:
+                        logger.exception("Could not promote successful retry staging file: %s", retry_staging_path)
+                        _publish(self.request.id, {"type": "error", "message": "Retry output could not be promoted; keeping the verified first-pass output."})
+                        try:
+                            if os.path.exists(retry_staging_path):
+                                os.remove(retry_staging_path)
+                        except OSError:
+                            pass
+                        retry_output_valid = False
+                if not retry_output_valid:
+                    # The original output remains valid when staging promotion
+                    # fails; leave it in place and skip the optional retry result.
+                    pass
+                else:
+                    last_successful_cmd = retry_cmd.copy()
+                    if retry_backup_path:
+                        try:
+                            os.remove(retry_backup_path)
+                        except OSError:
+                            logger.warning("Could not remove retry backup: %s", retry_backup_path)
+                    # Update final size after successful retry
+                    try:
+                        final_size = os.path.getsize(output_path)
+                        final_size_mb = round(final_size / (1024*1024), 2)
+                        new_overage = ((final_size_mb - progress_target_mb) / progress_target_mb) * 100 if progress_target_mb > 0 else 0
+                        if new_overage <= 0:
+                            _publish(self.request.id, {"type": "log", "message": f"✅ Retry successful! Final size: {final_size_mb:.2f} MB (under target)"})
+                        else:
+                            _publish(self.request.id, {"type": "log", "message": f"✅ Retry complete! Final size: {final_size_mb:.2f} MB ({new_overage:+.1f}% vs target)"})
+                    except Exception:
+                        final_size = 0
     elif size_overage_percent > 2.0 and retry_attempt >= max_retries:
         _publish(self.request.id, {"type": "log", "message": f"⚠️ File is {size_overage_percent:.1f}% over target after {max_retries} retries. Keeping best result."})
         _publish(self.request.id, {"type": "log", "message": f"📊 Final size: {final_size_mb:.2f} MB (target was {progress_target_mb:.2f} MB)"})
@@ -1193,6 +1456,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     stats = {
         "input_path": input_path,
         "output_path": output_path,
+        # This is the encoder that produced the final output, which may be a
+        # CPU encoder after a controlled hardware fallback.
+        "encoder": actual_encoder,
         "duration_s": duration,
         "target_size_mb": target_size_mb,
         "final_size_mb": final_size_mb,
@@ -1214,16 +1480,22 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         if history_enabled:
             # Import here to avoid circular dependency (``sys`` is module-global; do not re-import
             # inside ``compress_video`` or nested functions break: NameError on ``sys.platform``).
-            sys.path.insert(0, '/app')
             import importlib
-            hm = importlib.import_module('backend.history_manager')
+            app_root = os.getenv("BACKEND_APP_ROOT", "/app")
+            sys.path.insert(0, app_root)
+            try:
+                hm = importlib.import_module('backend.history_manager')
+            except ModuleNotFoundError:
+                # The source tree calls the package ``app`` while Docker
+                # copies it to ``backend``.  The local desktop build keeps
+                # the source package name, so use it as a safe fallback.
+                hm = importlib.import_module('app.history_manager')
             
             # Get original file size
             original_size = os.path.getsize(input_path)
             original_size_mb = original_size / (1024*1024)
             
-            # Extract filename from path
-            filename = Path(input_path).name
+            filename = _history_filename(job_id, input_path)
             
             # Get compression duration (time taken)
             compression_duration = max(time.time() - start_ts, 0)
@@ -1249,6 +1521,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 start_time=start_time,
                 end_time=end_time,
                 encoder=actual_encoder,
+                output_filename=Path(output_path).name,
             )
     except Exception as e:
         # Don't fail the job if history fails

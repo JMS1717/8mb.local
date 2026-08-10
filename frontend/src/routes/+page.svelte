@@ -1,11 +1,15 @@
 <script lang="ts">
   import '../app.css';
   import { onMount, onDestroy } from 'svelte';
-  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion, getBatchStatus, batchZipDownloadUrl } from '$lib/api';
+  import { goto } from '$app/navigation';
+  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getJobStatus, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion, getBatchStatus, batchZipDownloadUrl } from '$lib/api';
+  import { autoDownloadOnce, clearActiveJobId, getActiveJobId, setActiveJobId, triggerBrowserDownload } from '$lib/activeJob';
+  import { stagePendingBatchFiles } from '$lib/pendingBatch';
   import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
+  import { availableCodecOptions, codecColor, codecIcon, encoderDisplayName, type CodecOption } from '$lib/codecs';
 
   /** Header badge default; bump with each release. API `/api/version` overrides when available. */
-  const DEFAULT_APP_VERSION = '137';
+  const DEFAULT_APP_VERSION = '138';
 
   let file: File | null = null;
   let uploadInput: HTMLInputElement | null = null; // reference to clear file input
@@ -208,7 +212,8 @@
   let appVersion: string = DEFAULT_APP_VERSION;
 
   // Available codecs from backend
-  let availableCodecs: Array<{value: string, label: string, group: string}> = [];
+  let availableCodecs: CodecOption[] = [];
+  let codecNotice: string | null = null;
   let hardwareType = 'cpu';
   let sysCaps: any = null;
   let sysCapsError: string | null = null;
@@ -216,12 +221,13 @@
   let encoderTests: Array<{ 
     codec: string; 
     actual_encoder: string; 
-    passed: boolean; 
-    encode_passed: boolean;
+    passed: boolean | null;
+    encode_passed: boolean | null;
     encode_message?: string;
     decode_passed?: boolean;
     decode_message?: string;
   }>|null = null;
+  let encoderTestsOpen = false;
   let gpuOk: boolean = false;
   // Presets and size buttons
   let presetProfiles: Array<any> = [];
@@ -275,15 +281,17 @@
       // Tentatively set hardware based on worker-reported type; we'll refine after sysCaps
       hardwareType = codecData.hardware_type || 'cpu';
       availableCodecs = buildCodecList(codecData);
+      if (!availableCodecs.length) {
+        availableCodecs = availableCodecOptions(['libx264', 'libx265']);
+      }
     } catch (err) {
       console.warn('Failed to load available codecs, using fallback');
-      availableCodecs = [
-        { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
-        { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
-        { value: 'libaom-av1', label: 'AV1 (CPU)', group: 'cpu' },
-        { value: 'libsvtav1', label: 'AV1 (CPU - SVT-AV1)', group: 'cpu' },
-      ];
+      // A failed capability request must not expose hardware options that
+      // cannot be verified. CPU codecs are the reliable local fallback.
+      availableCodecs = availableCodecOptions(['libx264', 'libx265']);
     }
+
+    ensureSelectedCodec();
 
     // Load system capabilities (CPU, memory, GPUs)
     try {
@@ -313,8 +321,14 @@
     // Load preset profiles and size buttons
     try {
       const pp = await getPresetProfiles();
-      presetProfiles = pp.profiles || [];
-      selectedPreset = pp.default || (presetProfiles[0]?.name ?? null);
+      const availableValues = new Set(availableCodecs.map((codec) => codec.value));
+      presetProfiles = (pp.profiles || []).filter((profile: any) =>
+        availableValues.has(String(profile.video_codec)),
+      );
+      const requestedDefault = pp.default || null;
+      selectedPreset = presetProfiles.some((profile) => profile.name === requestedDefault)
+        ? requestedDefault
+        : (presetProfiles[0]?.name ?? null);
       if (selectedPreset) applyPreset(selectedPreset);
     } catch {}
     try {
@@ -322,15 +336,7 @@
       if (sb?.buttons?.length) sizeButtons = sb.buttons;
     } catch {}
 
-    // Fetch recent history (best-effort)
-    try {
-      const res = await fetch('/api/history');
-      if (res.ok) {
-        const data = await res.json();
-        historyEnabled = !!data.enabled;
-        history = (data.entries || []).slice(0,5);
-      }
-    } catch {}
+    await refreshRecentHistory();
 
     // Restore the currently tracked batch from the batch page
     try {
@@ -340,7 +346,28 @@
         await refreshActiveBatchStatus();
       }
     } catch {}
+
+    // Single-file jobs belong to the backend, not this page component. Restore
+    // and reconnect when the user returns from Queue, Settings, or History.
+    const trackedJob = getActiveJobId();
+    if (trackedJob) {
+      taskId = trackedJob;
+      logLines = ['Reconnected to the active background job.', ...logLines];
+      reconnectStream();
+    }
   });
+
+  async function refreshRecentHistory(): Promise<void> {
+    try {
+      const res = await fetch('/api/history', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      historyEnabled = !!data.enabled;
+      history = (data.entries || []).slice(0, 5);
+    } catch {
+      // History is best-effort and must not interfere with compression.
+    }
+  }
 
   function applyPreset(name: string){
     const p = presetProfiles.find(x => x.name === name);
@@ -354,6 +381,15 @@
     container = p.container;
     tune = p.tune;
     maxFpsCap = maxFpsFromProfile(p.max_output_fps);
+    ensureSelectedCodec();
+  }
+
+  function ensureSelectedCodec() {
+    if (!availableCodecs.length) return;
+    if (availableCodecs.some((codec) => codec.value === videoCodec)) return;
+    const previous = videoCodec;
+    videoCodec = availableCodecs[0].value;
+    codecNotice = `The selected encoder (${previous}) is not available on this worker. Switched to ${availableCodecs[0].label}.`;
   }
 
   function formatDurationTime(seconds: number): string {
@@ -368,31 +404,8 @@
     }
   }
 
-  function buildCodecList(codecData: any): Array<{value: string, label: string, group: string}> {
-    const list: Array<{value: string, label: string, group: string}> = [];
-    const enabledCodecs = codecData.enabled_codecs || [];
-    
-    // Build list of all possible codecs with labels
-    const codecDefinitions = [
-      // NVIDIA NVENC
-      { value: 'av1_nvenc', label: 'AV1 (NVIDIA - RTX 40/50 series)', group: 'nvidia' },
-      { value: 'hevc_nvenc', label: 'HEVC (H.265, NVIDIA)', group: 'nvidia' },
-      { value: 'h264_nvenc', label: 'H.264 (NVIDIA)', group: 'nvidia' },
-      // CPU / software
-      { value: 'libaom-av1', label: 'AV1 (CPU - Highest Quality)', group: 'cpu' },
-      { value: 'libsvtav1', label: 'AV1 (CPU - SVT-AV1)', group: 'cpu' },
-      { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
-      { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
-    ];
-    
-    // Filter to only include codecs that are enabled in settings
-    for (const codec of codecDefinitions) {
-      if (enabledCodecs.includes(codec.value)) {
-        list.push(codec);
-      }
-    }
-    
-    return list;
+  function buildCodecList(codecData: any): CodecOption[] {
+    return availableCodecOptions(codecData?.enabled_codecs);
   }
 
   // Auto-adjust audio bitrate for extreme compressions:
@@ -442,19 +455,11 @@
   })();
 
   function getCodecColor(group: string): string {
-    switch(group) {
-      case 'nvidia': return '#22c55e'; // green
-      case 'cpu': return '#6b7280';    // gray
-      default: return '#6b7280';
-    }
+    return codecColor(group);
   }
 
   function getCodecIcon(group: string): string {
-    switch(group) {
-      case 'nvidia': return '🟢';
-      case 'cpu': return '⚪';
-      default: return '⚪';
-    }
+    return codecIcon(group as any);
   }
 
   function formatSize(bytes: number): string {
@@ -533,7 +538,13 @@
   async function onDrop(e: DragEvent){
     e.preventDefault();
     if (!e.dataTransfer) return;
-    const f = e.dataTransfer.files?.[0];
+    const droppedFiles = Array.from(e.dataTransfer.files || []);
+    if (droppedFiles.length > 1) {
+      stagePendingBatchFiles(droppedFiles);
+      await goto('/batch');
+      return;
+    }
+    const f = droppedFiles[0];
     if (f) {
       file = f;
       fileSizeLabel = formatSize(f.size);
@@ -542,6 +553,20 @@
     }
   }
   function allowDrop(e: DragEvent){ e.preventDefault(); }
+
+  async function onFilesPicked(e: Event): Promise<void> {
+    const input = e.target as HTMLInputElement;
+    const pickedFiles = Array.from(input.files || []);
+    if (pickedFiles.length > 1) {
+      stagePendingBatchFiles(pickedFiles);
+      await goto('/batch');
+      return;
+    }
+    const picked = pickedFiles[0] || null;
+    file = picked;
+    fileSizeLabel = picked ? formatSize(picked.size) : null;
+    if (picked) setTimeout(() => doUpload(), 100);
+  }
 
   async function doUpload(){
     if (!file) return;
@@ -556,9 +581,7 @@
     uploadProgress = 0;
     errorText = null;
     try {
-      console.log('Analyzing file...', file.name);
       jobInfo = await uploadWithProgress(file, targetMB, audioKbps, { onProgress: (p:number)=>{ uploadProgress = p; } });
-      console.log('Analysis complete:', jobInfo);
       uploadedFileName = file.name; // Mark this file as uploaded
       // Set warn based on current client-side estimate
       warnText = (estimated && estimated.video_kbps < 100) ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
@@ -619,32 +642,26 @@
         start_time: startTime.trim() || undefined,
         end_time: endTime.trim() || undefined,
       };
-      console.log('Starting compression...', payload);
       const { task_id } = await startCompress(payload);
       taskId = task_id;
-      
-      console.log('🔴 [DEBUG] About to open SSE for task_id:', task_id);
+      setActiveJobId(task_id);
       
       // Open SSE progress stream
       logLines = ['✓ Job started. Opening progress stream...', ...logLines].slice(0, 500);
       
       const es = openProgressStream(task_id);
-      console.log('🔴 [DEBUG] openProgressStream returned:', es);
       esRef = es;
       
       es.onopen = () => {
-        console.log('SSE connection opened for task:', task_id);
         logLines = ['✅ Connected to progress stream', ...logLines].slice(0, 500);
       };
       
       es.onmessage = (ev) => {
         try {
           const data = JSON.parse(ev.data);
-          console.log('SSE event:', data.type, data);
           
           // Handle connection confirmation
           if (data.type === 'connected') {
-            console.log('SSE connection confirmed, task_id:', data.task_id);
             return; // Just log, don't show to user
           }
           
@@ -679,8 +696,9 @@
             if (data.progress >= 100 || data.phase === 'done') {
               progress = 100;
               displayedProgress = 100;
-              isCompressing = false;
-              isFinalizing = false;
+              // 100% progress means FFmpeg finished writing frames, not that
+              // history/output finalization and the durable done event landed.
+              isFinalizing = true;
               logLines = ['✅ 100% - Waiting for final confirmation...', ...logLines].slice(0, 500);
             }
             
@@ -745,13 +763,13 @@
           
           // Handle completion
           if (data.type === 'done') {
-            console.log('Received done event, completing job');
             doneStats = data.stats;
             progress = 100;
             displayedProgress = 100;
             isCompressing = false;
             isFinalizing = false;
             isRetrying = false;
+            isCancelling = false;
             retryMessage = '';
             isReady = true;
             hasProgress = false;
@@ -759,6 +777,8 @@
             logLines = ['✅ Compression complete!', ...logLines].slice(0, 500);
             
             try { esRef?.close(); esRef = null; } catch {}
+            clearActiveJobId(task_id);
+            setTimeout(() => refreshRecentHistory(), 100);
             
             // Play sound if enabled (gentle success chime)
             if (playSoundWhenDone) {
@@ -771,7 +791,7 @@
             // Auto-download if enabled
             if (autoDownload && taskId) {
               setTimeout(() => {
-                window.location.href = downloadUrl(taskId!);
+                autoDownloadOnce(task_id, downloadUrl(task_id));
               }, 500);
             }
           }
@@ -782,6 +802,8 @@
             errorText = data.message;
             isCompressing = false;
             isFinalizing = false;
+            isCancelling = false;
+            clearActiveJobId(task_id);
             try { esRef?.close(); } catch {}
           }
           
@@ -827,6 +849,8 @@
             logLines = ['🚫 Job canceled', ...logLines];
             isCompressing = false;
             isFinalizing = false;
+            isCancelling = false;
+            clearActiveJobId(task_id);
             try { esRef?.close(); } catch {}
           }
           
@@ -837,7 +861,6 @@
       
       es.onerror = (err) => {
         console.error('SSE error:', err);
-        console.log('SSE readyState:', es.readyState, 'taskId:', taskId);
         
         // Don't immediately fail - the job might still be running
         // Only show warning, don't stop isCompressing
@@ -872,8 +895,7 @@
     // If it's not ready, the backend will return a 404 with detail JSON, but at least
     // the finalization watchdog will keep polling and eventually succeed
     try {
-      // Use window.location with wait parameter; if it fails, browser shows download or error
-      window.location.href = `${url}?wait=2`;
+      triggerBrowserDownload(`${url}?wait=2`);
     } finally {
       // Reset state after a moment (the page may navigate away if download succeeds)
       setTimeout(() => { tryDownloading = false; }, 1000);
@@ -885,43 +907,25 @@
     // CRITICAL: Only trigger watchdog at EXACTLY 100%, not at high progress like 98%
     // This prevents "zombie stream" bug where client resets while server still encoding
     const shouldPoll = !!taskId && displayedProgress >= 99.9 && !isReady && !doneStats && isCompressing;
-    console.log('[Watchdog] Reactive check - shouldPoll:', shouldPoll, 'displayedProgress:', displayedProgress, 'isReady:', isReady, 'isCompressing:', isCompressing);
     if (shouldPoll && !finalizePoller) {
-      console.log('[Watchdog] Starting finalization poll for', taskId);
       finalizePoller = setInterval(async () => {
         if (!taskId) return;
         try {
-          console.log('[Watchdog] Polling download endpoint...');
-          // Try GET request with short wait instead of HEAD (more reliable)
-          const dlRes = await fetch(`${downloadUrl(taskId)}?wait=2`, { 
-            method: 'GET',
-            cache: 'no-store',
-            redirect: 'manual' // Don't follow redirects, just check response
-          });
-          console.log('[Watchdog] Response status:', dlRes.status, 'ok:', dlRes.ok);
-          
-          if (dlRes.ok && dlRes.status === 200) {
-            console.log('[Watchdog] File ready! Auto-downloading...');
-            isReady = true;
-            isFinalizing = false;
-            showTryDownload = false;
-            isCompressing = false;
+          const status = await getJobStatus(taskId);
+          const state = String(status?.state || '').toUpperCase();
+          if (state === 'SUCCESS') {
             clearInterval(finalizePoller);
             finalizePoller = null;
-            // Trigger download by navigating to URL
-            window.location.href = downloadUrl(taskId!);
-          } else if (dlRes.status === 404) {
-            const body = await dlRes.json().catch(() => ({}));
-            console.log('[Watchdog] File not ready yet (404):', body.detail?.state || 'unknown state');
-          } else {
-            console.log('[Watchdog] Unexpected status, will retry...');
+            reconnectStream();
+          } else if (state === 'FAILURE' || state === 'REVOKED') {
+            clearInterval(finalizePoller);
+            finalizePoller = null;
+            reconnectStream();
           }
-        } catch (e) {
-          console.log('[Watchdog] Poll error:', e);
+        } catch {
         }
       }, 1000);
     } else if (!shouldPoll && finalizePoller) {
-      console.log('[Watchdog] Stopping finalization poll (shouldPoll=false)');
       clearInterval(finalizePoller);
       finalizePoller = null;
     }
@@ -929,42 +933,54 @@
 
   function reconnectStream(){
     if (!taskId) return;
+    const reconnectTaskId = taskId;
     errorText = null;
     try { esRef?.close(); } catch {}
-    const es = openProgressStream(taskId);
+    const es = openProgressStream(reconnectTaskId);
     esRef = es;
     isCompressing = true;
     es.onmessage = (ev) => {
       try { const data = JSON.parse(ev.data);
-        if (data.type === 'progress') { progress = data.progress; }
-        if (data.type === 'log' && data.message) { logLines = [data.message, ...logLines].slice(0, 500); }
-        if (data.type === 'done') { 
-          doneStats = data.stats; 
-          progress = 100;
-          isCompressing = false;
-          try { esRef?.close(); } catch {}
-          // Play sound when done if enabled (gentle success chime)
-          if (playSoundWhenDone) {
-            // Pleasant ascending chime (C-E-G major chord)
-            const audio = new Audio('data:audio/wav;base64,UklGRiQFAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAFAAB/goSGiIqMjo+RkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ6foKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr/AwcLDxMXGx8jJysvMzc7P0NHS09TV1tfY2drb3N3e3+Dh4uPk5ebn6Onq6+zt7u/w8fLz9PX29/j5+vv8/f7/gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v8=');
-            audio.volume = 0.4;
-            audio.play().catch(() => {});
-          }
-          // Auto-download if enabled
-          if (autoDownload && taskId) {
-            setTimeout(() => {
-              window.location.href = downloadUrl(taskId!);
-            }, 500);
-          }
+        if (data.type === 'progress') {
+          progress = Number(data.progress || 0);
+          displayedProgress = progress;
+          isFinalizing = data.phase === 'finalizing';
         }
-        if (data.type === 'error') { logLines = [data.message, ...logLines]; isCompressing = false; try { esRef?.close(); } catch {} }
+        if (data.type === 'log' && data.message) { logLines = [data.message, ...logLines].slice(0, 500); }
+        if (data.type === 'done') {
+          doneStats = data.stats;
+          progress = 100;
+          displayedProgress = 100;
+          isCompressing = false;
+          isFinalizing = false;
+          isCancelling = false;
+          isReady = true;
+          clearActiveJobId(reconnectTaskId);
+          try { esRef?.close(); } catch {}
+          setTimeout(() => refreshRecentHistory(), 100);
+          if (autoDownload) setTimeout(() => autoDownloadOnce(reconnectTaskId, downloadUrl(reconnectTaskId)), 500);
+        }
+        if (data.type === 'error') {
+          errorText = String(data.message || 'Compression failed');
+          logLines = [`Error: ${errorText}`, ...logLines];
+          isCompressing = false;
+          isFinalizing = false;
+          isCancelling = false;
+          clearActiveJobId(reconnectTaskId);
+          try { esRef?.close(); } catch {}
+        }
+        if (data.type === 'canceled') {
+          logLines = ['Job canceled', ...logLines];
+          isCompressing = false;
+          isFinalizing = false;
+          isCancelling = false;
+          clearActiveJobId(reconnectTaskId);
+          try { esRef?.close(); } catch {}
+        }
       } catch {}
     }
     es.onerror = () => {
-      logLines = ['[SSE] Connection error: lost progress stream.', ...logLines].slice(0, 500);
-      errorText = 'Lost connection to progress stream. Check server/network and try again.';
-      isCompressing = false;
-      try { esRef?.close(); } catch {}
+      logLines = ['Progress connection interrupted; reconnecting automatically...', ...logLines].slice(0, 500);
     }
   }
 
@@ -1011,18 +1027,22 @@
   async function onCancel(){
     if (!taskId || isCancelling) return;
     isCancelling = true;
+    logLines = ['Cancellation requested; waiting for the encoder to stop…', ...logLines].slice(0, 500);
     try {
       await cancelJob(taskId);
-      logLines = ['Cancellation requested…', ...logLines].slice(0, 500);
+      if (!esRef) reconnectStream();
     } catch (e:any) {
       errorText = e?.message || 'Failed to cancel';
-    } finally {
       isCancelling = false;
     }
   }
 
   onDestroy(() => {
     stopActiveBatchPolling();
+    try { esRef?.close(); } catch {}
+    esRef = null;
+    if (finalizePoller) { clearInterval(finalizePoller); finalizePoller = null; }
+    if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
   });
 
   // Persist UI preferences
@@ -1136,35 +1156,61 @@
           <p class="text-sm opacity-70">No dedicated GPUs detected</p>
         {/if}
         {#if encoderTests}
-          <details class="mt-3">
-            <summary class="cursor-pointer text-sm">Encoder tests</summary>
-            <ul class="mt-2 text-xs space-y-2">
+          <div class="mt-3 overflow-hidden rounded-lg border border-gray-700/80 bg-gray-950/40">
+            <button
+              type="button"
+              class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors hover:bg-gray-800/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+              aria-expanded={encoderTestsOpen}
+              aria-controls="encoder-test-results"
+              on:click={() => encoderTestsOpen = !encoderTestsOpen}
+            >
+              <span class="flex min-w-0 items-center gap-2">
+                <span class={`h-2 w-2 shrink-0 rounded-full ${gpuOk ? 'bg-green-400' : 'bg-amber-400'}`}></span>
+                <span class="font-medium">Encoder tests</span>
+                <span class="truncate text-xs text-gray-400">
+                  {encoderTests.filter((test) => test.passed === true).length}/{encoderTests.length} available
+                </span>
+              </span>
+              <span class="flex shrink-0 items-center gap-1 text-xs text-gray-300">
+                {encoderTestsOpen ? 'Hide' : 'Show'}
+                <svg class={`h-4 w-4 transition-transform ${encoderTestsOpen ? 'rotate-180' : ''}`} viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.168l3.71-3.938a.75.75 0 1 1 1.08 1.04l-4.25 4.5a.75.75 0 0 1-1.08 0l-4.25-4.5a.75.75 0 0 1 .02-1.06Z" clip-rule="evenodd" />
+                </svg>
+              </span>
+            </button>
+            {#if encoderTestsOpen}
+            <div id="encoder-test-results" class="border-t border-gray-700/80 p-2.5">
+            <ul class="grid max-h-96 gap-2 overflow-y-auto pr-1 text-xs lg:grid-cols-2">
               {#each encoderTests as t}
-                <li class="flex flex-col">
-                  <div class="flex items-center justify-between">
-                    <span class="font-medium">{t.codec} <span class="opacity-60">({t.actual_encoder})</span></span>
-                    {#if t.passed}
-                      <span class="text-green-400">PASS</span>
+                <li class="flex flex-col rounded-md border border-gray-800 bg-gray-900/70 p-2.5">
+                  <div class="flex items-start justify-between gap-2">
+                    <span class="min-w-0 font-medium">{encoderDisplayName(t.codec)}{#if t.actual_encoder !== t.codec} <span class="text-gray-500">({t.actual_encoder})</span>{/if}</span>
+                    {#if t.passed === true}
+                      <span class="rounded bg-green-900/40 px-1.5 py-0.5 text-[10px] font-semibold text-green-300">PASS</span>
+                    {:else if t.passed === null}
+                      <span class="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] font-semibold text-gray-400">N/A</span>
                     {:else}
-                      <span class="text-red-400">FAIL</span>
+                      <span class="rounded bg-red-900/30 px-1.5 py-0.5 text-[10px] font-semibold text-red-300">FAIL</span>
                     {/if}
                   </div>
                   {#if t.decode_passed !== null && t.decode_passed !== undefined}
-                    <div class="ml-3 mt-1 flex items-center justify-between opacity-80">
-                      <span>Decode:</span>
+                    <div class="mt-2 flex items-center justify-between gap-3 text-gray-400">
+                      <span>Decode</span>
                       {#if t.decode_passed === true}
-                        <span class="text-green-400 text-xs">✓ {t.decode_message || 'OK'}</span>
+                        <span class="truncate text-green-400" title={t.decode_message || 'OK'}>✓ {t.decode_message || 'OK'}</span>
                       {:else}
-                        <span class="text-red-400 text-xs" title={t.decode_message || 'Failed'}>✗ {t.decode_message || 'Failed'}</span>
+                        <span class="truncate text-red-400" title={t.decode_message || 'Failed'}>✕ {t.decode_message || 'Failed'}</span>
                       {/if}
                     </div>
                   {/if}
-                  <div class="ml-3 mt-1 flex items-center justify-between opacity-80">
-                    <span>Encode:</span>
+                  <div class="mt-1 flex items-center justify-between gap-3 text-gray-400">
+                    <span>Encode</span>
                     {#if t.encode_passed === true}
-                      <span class="text-green-400 text-xs">✓ {t.encode_message || 'OK'}</span>
+                      <span class="truncate text-green-400" title={t.encode_message || 'OK'}>✓ {t.encode_message || 'OK'}</span>
+                    {:else if t.encode_passed === null}
+                      <span class="truncate text-gray-400" title={t.encode_message || 'Not tested'}>— {t.encode_message || 'Not tested'}</span>
                     {:else}
-                      <span class="text-red-400 text-xs" title={t.encode_message || 'Failed'}>✗ {t.encode_message || 'Failed'}</span>
+                      <span class="truncate text-red-400" title={t.encode_message || 'Failed'}>✕ {t.encode_message || 'Failed'}</span>
                     {/if}
                   </div>
                 </li>
@@ -1181,7 +1227,9 @@
                 </ul>
               </div>
             {/if}
-          </details>
+            </div>
+            {/if}
+          </div>
         {/if}
       </div>
     </div>
@@ -1189,9 +1237,10 @@
 
   <div class="card">
     <div class="border-2 border-dashed border-gray-700 rounded p-8 text-center"
+         role="region" aria-label="Video upload drop zone"
          on:drop={onDrop} on:dragover={allowDrop}>
       <p class="mb-2">Drag & drop a video here</p>
-  <input bind:this={uploadInput} type="file" accept="video/*" on:change={(e:any)=>{ const f=e.target.files?.[0]||null; file=f; fileSizeLabel = f? formatSize(f.size): null; if(f) setTimeout(()=>doUpload(), 100); }} />
+  <input bind:this={uploadInput} type="file" multiple accept="video/*" on:change={onFilesPicked} />
       {#if file}
         <div class="mt-2 flex items-center gap-2">
           <p class="text-sm text-gray-400">{file.name} {#if fileSizeLabel}<span class="opacity-70">• {fileSizeLabel}</span>{/if}</p>
@@ -1229,13 +1278,13 @@
           {/each}
         </div>
         <div class="flex items-center gap-2 flex-wrap">
-          <label class="text-sm">Custom size (MB)</label>
-          <input class="input w-28" type="number" bind:value={targetMB} min="1" disabled={audioOnly} />
+          <label class="text-sm" for="target-mb">Custom size (MB)</label>
+          <input id="target-mb" class="input w-28" type="number" bind:value={targetMB} min="1" disabled={audioOnly} />
         </div>
       {:else}
         <div class="flex items-center gap-2 flex-wrap">
-          <label class="text-sm">Video bitrate (kbps)</label>
-          <input class="input w-32" type="number" bind:value={targetVideoKbps} min="50" max="200000" step="50" disabled={audioOnly} />
+          <label class="text-sm" for="target-video-kbps">Video bitrate (kbps)</label>
+          <input id="target-video-kbps" class="input w-32" type="number" bind:value={targetVideoKbps} min="50" max="200000" step="50" disabled={audioOnly} />
         </div>
         <p class="text-xs text-gray-500">Audio is still set separately below; total size is not capped in this mode.</p>
       {/if}
@@ -1250,8 +1299,8 @@
   <!-- Primary controls: Codec and Speed/Quality preset (visible without expanding) -->
   <div class="card grid sm:grid-cols-3 gap-4">
     <div>
-      <label class="block mb-1 text-sm">Video Codec</label>
-      <select class="input w-full codec-select" bind:value={videoCodec}>
+      <label class="block mb-1 text-sm" for="video-codec">Video Codec</label>
+      <select id="video-codec" class="input w-full codec-select" bind:value={videoCodec} on:change={() => { codecNotice = null; }}>
         {#each availableCodecs as codec}
           <option value={codec.value} data-group={codec.group}>
             {getCodecIcon(codec.group)} {codec.label}
@@ -1269,15 +1318,18 @@
           CPU encoding (no GPU detected)
         </p>
       {/if}
+      {#if codecNotice}
+        <p class="text-xs text-amber-300 mt-1" role="status">{codecNotice}</p>
+      {/if}
       <!-- Audio-only toggle moved here (out of Advanced) -->
       <div class="mt-2">
         <label class="flex items-center gap-2 cursor-pointer text-sm"><input type="checkbox" bind:checked={audioOnly} /><span>Extract audio only (.m4a)</span></label>
       </div>
     </div>
     <div>
-      <label class="block mb-1 text-sm">Resolution</label>
+      <label class="block mb-1 text-sm" for="resolution-select">Resolution</label>
       <div class="flex items-center gap-2">
-        <select class="input w-full" disabled={audioOnly || autoResolution}
+        <select id="resolution-select" class="input w-full" disabled={audioOnly || autoResolution}
           on:change={(e:any)=>{ const v = e.target.value; explicitHeight = parseExplicitHeight(v); }}>
           <option value="">Original</option>
           <option value="2160">2160p (4K)</option>
@@ -1308,11 +1360,14 @@
       {/if}
     </div>
     <div>
-      <label class="block mb-1 text-sm">Encoder preset (speed ↔ quality)</label>
-      <select class="input w-full" bind:value={preset} title="Encoder effort: faster presets spend less time per frame; slower presets often look better at the same file size.">
-        <option value="p1">Fast (P1)</option>
-        <option value="p5">Balanced (P5)</option>
-        <option value="p6">Default (P6)</option>
+      <label class="block mb-1 text-sm" for="encoder-preset">Encoder preset (speed ↔ quality)</label>
+      <select id="encoder-preset" class="input w-full" bind:value={preset} title="Encoder effort: faster presets spend less time per frame; slower presets often look better at the same file size.">
+        <option value="p1">Fastest (P1)</option>
+        <option value="p2">Faster (P2)</option>
+        <option value="p3">Fast (P3)</option>
+        <option value="p4">Balanced (P4)</option>
+        <option value="p5">Better (P5)</option>
+        <option value="p6">High Quality (P6)</option>
         <option value="p7">Best Quality (P7)</option>
         <option value="extraquality">Extra Quality (constant quality — CQ)</option>
       </select>
@@ -1337,23 +1392,23 @@
         <!-- Moved Speed/Quality to primary controls; remove here -->
         <!-- Audio Only moved to primary controls -->
         <div>
-          <label class="block mb-1 text-sm">Audio Codec</label>
-          <select class="input w-full" bind:value={audioCodec}>
+          <label class="block mb-1 text-sm" for="audio-codec">Audio Codec</label>
+          <select id="audio-codec" class="input w-full" bind:value={audioCodec}>
             <option value="libopus">Opus (Default)</option>
             <option value="aac">AAC</option>
             <option value="none">🔇 None (Mute)</option>
           </select>
         </div>
         <div>
-          <label class="block mb-1 text-sm">Container</label>
-          <select class="input w-full" bind:value={container}>
+          <label class="block mb-1 text-sm" for="container">Container</label>
+          <select id="container" class="input w-full" bind:value={container}>
             <option value="mp4">MP4 (Most compatible)</option>
             <option value="mkv">MKV (Best with Opus)</option>
           </select>
         </div>
         <div>
-          <label class="block mb-1 text-sm">Audio Bitrate (kbps)</label>
-          <select class="input w-full" bind:value={audioKbps} disabled={audioCodec === 'none' || autoAudioBitrate} on:change={(e:any)=>{ const v = parseInt(e.target.value); if (!Number.isNaN(v)) baseAudioKbps = v as any; }}>
+          <label class="block mb-1 text-sm" for="audio-bitrate">Audio Bitrate (kbps)</label>
+          <select id="audio-bitrate" class="input w-full" bind:value={audioKbps} disabled={audioCodec === 'none' || autoAudioBitrate} on:change={(e:any)=>{ const v = parseInt(e.target.value); if (!Number.isNaN(v)) baseAudioKbps = v as any; }}>
             <option value={32}>32</option>
             <option value={48}>48</option>
             <option value={64}>64</option>
@@ -1370,11 +1425,12 @@
           {/if}
         </div>
         <div>
-          <label class="block mb-1 text-sm flex items-center gap-1">
+          {#if nvencTuneApplies}
+          <label class="block mb-1 text-sm flex items-center gap-1" for="nvenc-tune">
             NVENC tuning <span class="text-[11px] opacity-70">(NVIDIA only)</span>
           </label>
-          {#if nvencTuneApplies}
             <select
+              id="nvenc-tune"
               class="input w-full"
               bind:value={tune}
               title="NVIDIA NVENC: HQ for normal files; low latency for screen/live; lossless ignores small size targets."
@@ -1388,14 +1444,17 @@
               Separate from the P-preset above: chooses quality vs turnaround for NVENC. For typical uploads, leave on High quality.
             </p>
           {:else}
+            <div class="block mb-1 text-sm flex items-center gap-1">
+              NVENC tuning <span class="text-[11px] opacity-70">(NVIDIA only)</span>
+            </div>
             <p class="text-xs opacity-70 rounded border border-gray-700 bg-gray-900/50 px-2 py-2">
               Not used for this codec. CPU / software encoders follow the encoder preset only (no separate NVENC tune).
             </p>
           {/if}
         </div>
         <div class="sm:col-span-2 lg:col-span-4">
-          <label class="block mb-1 text-sm">Max frame rate</label>
-          <select class="input w-full max-w-md" bind:value={maxFpsCap} disabled={audioOnly}>
+          <label class="block mb-1 text-sm" for="max-fps-cap">Max frame rate</label>
+          <select id="max-fps-cap" class="input w-full max-w-md" bind:value={maxFpsCap} disabled={audioOnly}>
             <option value="">Same as input (default)</option>
             {#each FPS_CAP_VALUES as v}
               <option value={v}>{v} fps (cap)</option>
@@ -1409,8 +1468,8 @@
         <div class="mt-4 pt-4 border-t border-gray-700">
           <h4 class="text-sm font-medium mb-2">Profiles</h4>
           <div class="max-w-sm">
-            <label class="block mb-1 text-xs">Select profile</label>
-            <select class="input w-full text-xs py-1 h-8" bind:value={selectedPreset} on:change={(e:any)=>applyPreset(e.target.value)}>
+            <label class="block mb-1 text-xs" for="selected-profile">Select profile</label>
+            <select id="selected-profile" class="input w-full text-xs py-1 h-8" bind:value={selectedPreset} on:change={(e:any)=>applyPreset(e.target.value)}>
               {#each presetProfiles as p}
                 <option value={p.name}>{p.name}</option>
               {/each}
@@ -1425,21 +1484,21 @@
         <h4 class="text-sm font-medium mb-3">Resolution & Trimming</h4>
         <div class="grid sm:grid-cols-4 gap-4">
           <div>
-            <label class="block mb-1 text-sm">Max Width (px)</label>
-            <input class="input w-full" type="number" bind:value={maxWidth} placeholder="Original" min="1" disabled={autoResolution || !!explicitHeight} />
+            <label class="block mb-1 text-sm" for="max-width">Max Width (px)</label>
+            <input id="max-width" class="input w-full" type="number" bind:value={maxWidth} placeholder="Original" min="1" disabled={autoResolution || !!explicitHeight} />
           </div>
           <div>
-            <label class="block mb-1 text-sm">Max Height (px)</label>
-            <input class="input w-full" type="number" bind:value={maxHeight} placeholder="Original" min="1" disabled={autoResolution || !!explicitHeight} />
+            <label class="block mb-1 text-sm" for="max-height">Max Height (px)</label>
+            <input id="max-height" class="input w-full" type="number" bind:value={maxHeight} placeholder="Original" min="1" disabled={autoResolution || !!explicitHeight} />
           </div>
           <div>
-            <label class="block mb-1 text-sm">Start Time</label>
-            <input class="input w-full" type="text" bind:value={startTime} placeholder="0 or 00:00:00" />
+            <label class="block mb-1 text-sm" for="start-time">Start Time</label>
+            <input id="start-time" class="input w-full" type="text" bind:value={startTime} placeholder="0 or 00:00:00" />
             <p class="mt-1 text-xs opacity-70">Format: seconds or HH:MM:SS</p>
           </div>
           <div>
-            <label class="block mb-1 text-sm">End Time</label>
-            <input class="input w-full" type="text" bind:value={endTime} placeholder="Full duration" />
+            <label class="block mb-1 text-sm" for="end-time">End Time</label>
+            <input id="end-time" class="input w-full" type="text" bind:value={endTime} placeholder="Full duration" />
             <p class="mt-1 text-xs opacity-70">Format: seconds or HH:MM:SS</p>
           </div>
         </div>
@@ -1545,7 +1604,7 @@
     {#if taskId && isCompressing}
       <button class="btn" on:click={onCancel} disabled={isCancelling}>{isCancelling ? 'Canceling…' : 'Cancel'}</button>
     {/if}
-    <button class="btn" on:click={reset} disabled={!file && !taskId}>Reset</button>
+    <button class="btn" on:click={reset} disabled={isCompressing || isCancelling || (!file && !taskId)}>Reset</button>
   </div>
 
   <!-- Download Ready Card - Prominent when file is ready -->
@@ -1689,6 +1748,7 @@
     id="support-popover"
     class="fixed bottom-16 right-4 w-64 bg-gray-900/95 text-gray-100 border border-gray-700 rounded-lg shadow-xl p-3 z-50"
     role="dialog"
+    tabindex="-1"
     aria-label="Support the project"
     on:keydown={onKey}
   >
@@ -1735,6 +1795,14 @@
   /* Color-code codec options based on hardware type */
   .codec-select option[data-group="nvidia"] {
     color: #22c55e;
+    font-weight: 500;
+  }
+  .codec-select option[data-group="intel"] {
+    color: #60a5fa;
+    font-weight: 500;
+  }
+  .codec-select option[data-group="vaapi"] {
+    color: #c084fc;
     font-weight: 500;
   }
   .codec-select option[data-group="cpu"] {

@@ -1,5 +1,24 @@
 # Changelog
 
+## [v138] - 2026-08-09
+
+### Production hardening
+
+- Added runtime-tested NVIDIA, Intel QSV, AMD/VAAPI, SVT-AV1, x264, and x265 detection with explicit CPU fallback when a hardware driver rejects an encoder.
+- Hardened uploads, FFprobe validation, temporary-file cleanup, history persistence, downloads, batch ZIP paths, progress streaming, and local queue behavior.
+- Added Docker CPU/VAAPI profiles, health checks, persistent state mounts, regression tests, and disposable HTTP E2E coverage.
+
+### Native Windows release
+
+- Added a portable executable and Inno Setup installer using the shared frontend/backend/worker code.
+- The installer defaults to an all-users installation with a desktop shortcut and supports a current-user no-admin mode.
+
+### Docker
+
+- Release image: `jms1717/8mblocal:v138` and `jms1717/8mblocal:latest` (`BUILD_VERSION` **138**).
+
+---
+
 ## [v137] - 2026-04-20
 
 ### UI

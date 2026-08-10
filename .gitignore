@@ -22,10 +22,17 @@ uploads/*
 !uploads/.gitkeep
 outputs/*
 !outputs/.gitkeep
+build/
+dist/
+windows/ffmpeg/
 
 # Test media files (binary)
 test.mp4
 host-vid.mp4
+test-artifacts/
+tests/media/generated/
 
 # Docker
 *.env.local
+state/
+redis-data/

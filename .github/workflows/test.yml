@@ -1,0 +1,89 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Install backend HTTP test dependency
+        run: python -m pip install httpx==0.27.2
+      - name: Compile Python modules
+        run: python -m compileall -q worker/app backend-api/app shared windows
+      - name: Run unit tests
+        env:
+          PYTHONPATH: .
+        run: python -m unittest discover -s worker/tests -v
+      - name: Run backend HTTP smoke tests
+        env:
+          PYTHONPATH: backend-api:worker:.
+        run: python -m unittest discover -s backend-api/tests -v
+      - name: Run shared local-runtime tests
+        env:
+          PYTHONPATH: .
+        run: python -m unittest discover -s shared/tests -v
+      - name: Run local Celery adapter smoke test
+        env:
+          LOCAL_RUNTIME: "1"
+          PYTHONPATH: backend-api:worker:.
+        run: python -m unittest discover -s backend-api/tests -p 'test_local_celery.py' -v
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build frontend
+        run: npm run build
+      - name: Type-check Svelte frontend
+        run: npm run check
+
+  e2e-local:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install backend runtime
+        run: python -m pip install -r requirements.txt
+      - name: Build the shared frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Exercise the local runtime with real media
+        env:
+          PYTHONPATH: backend-api:worker:.
+        run: >-
+          python scripts/e2e_test.py --mode local --profile quick
+          --codecs libx264,h264_qsv,h264_vaapi,h264_nvenc

@@ -43,7 +43,7 @@ class TestHwDetect(unittest.TestCase):
         mock_run.side_effect = run_side_effect
         info = detect_hw_accel()
         self.assertEqual(info['type'], 'cpu')
-        self.assertEqual(info['available_encoders'].get('av1'), 'libaom-av1')
+        self.assertEqual(info['available_encoders'].get('av1'), 'libsvtav1')
 
 if __name__ == '__main__':
     unittest.main()

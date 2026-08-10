@@ -1,6 +1,6 @@
 # 8mb.local – Self-Hosted GPU Video Compressor
 
-8mb.local is a self-hosted, fire-and-forget video compressor. Drop a file, choose a target size (e.g., 8 MB, 25 MB, 50 MB, 100 MB), and let GPU-accelerated encoding produce compact outputs with AV1/HEVC/H.264. Supports **NVIDIA NVENC** hardware encoding with automatic **CPU fallback**. The stack includes a SvelteKit UI, FastAPI backend, Celery worker, Redis broker, and real-time progress via Server-Sent Events (SSE).
+8mb.local is a self-hosted, fire-and-forget video compressor. Drop a file, choose a target size (e.g., 8 MB, 25 MB, 50 MB, 100 MB), and let GPU-accelerated encoding produce compact outputs with AV1/HEVC/H.264. Supports **NVIDIA NVENC**, **Intel Quick Sync**, **Windows AMD AMF**, and **Linux VAAPI** (including AMD) with automatic **CPU fallback**. The Docker deployment uses a SvelteKit UI, FastAPI backend, Celery worker, Redis broker, and real-time progress via Server-Sent Events (SSE). The native Windows installer runs the same UI/API/worker code with a local in-process queue.
 
 <p align="center">
   <a href="https://www.youtube.com/watch?v=1YDjDtZ21lc">
@@ -26,9 +26,9 @@
 
 ## Features
 
-- **NVIDIA NVENC hardware encoding** with automatic CPU fallback when no GPU is available
+- **NVIDIA NVENC, Intel QSV, Windows AMD AMF, and Linux VAAPI hardware encoding** with automatic CPU fallback when a GPU or driver is unavailable
 - **Robust encoder validation** at startup — tests actual encoder initialization, not just availability
-- **AV1, HEVC (H.265), and H.264** encoding via NVENC or CPU software encoders
+- **AV1, HEVC (H.265), and H.264** encoding via NVENC, QSV, AMF, VAAPI, or CPU software encoders
 - Drag-and-drop UI with helpful presets and advanced options (codec, container, tune, audio bitrate)
 - **Configurable codec visibility** — enable/disable specific codecs in the Settings page
 - **Resolution control** — set max width/height while maintaining aspect ratio
@@ -101,7 +101,7 @@ Public instances run by people who offer their **8mb.local** install for anyone 
 flowchart LR
   A[Browser / SvelteKit UI] -- Upload / SSE --> B(FastAPI Backend)
   B -- Enqueue --> C[Redis]
-  D[Celery Worker + FFmpeg NVENC] -- Progress / Logs --> C
+  D[Celery Worker + FFmpeg GPU/CPU] -- Progress / Logs --> C
   B -- Pub/Sub relay --> A
   D -- Files --> E[outputs/]
   A -- Download --> B
@@ -113,7 +113,7 @@ flowchart LR
 |-------|-----------|------|
 | Frontend | SvelteKit + Vite | Drag-and-drop UI, size estimates, SSE progress/logs, download |
 | Backend API | FastAPI | Accepts uploads, runs ffprobe, relays SSE, serves downloads |
-| Worker | Celery + FFmpeg 6.1.1 | Compression with NVENC or CPU; parses `ffmpeg -progress` |
+| Worker | Celery + FFmpeg 6.1.1 | Compression with NVENC/QSV/VAAPI or CPU; parses `ffmpeg -progress` |
 | Broker | Redis | Celery broker and pub/sub transport for progress events |
 
 **Data & files**
@@ -121,6 +121,16 @@ flowchart LR
 - `outputs/` — compressed results (cleaned up on the same schedule)
 
 All components run in a single container via supervisord.
+
+### Native Windows mode
+
+The Windows installer packages the same frontend, backend, worker, and FFmpeg
+path in one executable. It replaces only Redis/Celery transport with an
+in-process bounded queue, stores data under the user's local application data
+directory, binds to localhost, and opens a native WebView2 window without
+visible terminal windows. The standalone `8mblocal.exe` does not require
+Docker, Redis, Python, Node.js, or a separate FFmpeg installation. See
+[`windows/README.md`](windows/README.md).
 
 ## Installation
 
@@ -153,6 +163,16 @@ docker run -d \
 ```
 
 Access the web UI at **http://localhost:8001**.
+
+#### Intel / AMD VAAPI
+
+For Linux hosts with Intel or AMD graphics, use the DRI-enabled compose
+profile. It discovers `/dev/dri/renderD*`, validates QSV/VAAPI at startup, and
+falls back to CPU when the device cannot encode:
+
+```bash
+docker compose -f docker-compose.vaapi.yml up -d --build
+```
 
 ### Docker Compose
 
@@ -207,7 +227,7 @@ cd 8mb.local
 docker compose up -d --build
 ```
 
-**CPU only** (no GPU passthrough — e.g. macOS or machine without NVIDIA toolkit):
+**CPU only** (no GPU passthrough — e.g. macOS or machine without GPU access):
 
 ```bash
 docker compose -f docker-compose.cpu.yml up -d --build
@@ -219,7 +239,60 @@ docker compose -f docker-compose.cpu.yml up -d --build
 |----------|------------|-------|
 | **Windows** | NVIDIA via WSL2 | Install Docker Desktop, enable WSL2 GPU support, install NVIDIA drivers |
 | **Linux** | NVIDIA native | Install NVIDIA drivers + [Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) |
+| **Linux** | Intel / AMD VAAPI | Use `docker-compose.vaapi.yml` and pass `/dev/dri`; the worker identifies the vendor |
 | **macOS** | CPU only | Docker runs in a Linux VM without GPU passthrough |
+
+### Native Windows executable
+
+For a Docker-free Windows install, run the manual **Build native Windows
+executable** GitHub Actions workflow and download `8mblocal-Setup.exe` from its
+`8mblocal-windows` artifact. The per-user installer creates a Start Menu
+shortcut and optionally a Desktop shortcut. The release also includes a
+standalone `8mblocal.exe` that can run without installation. Both open the same
+native WebView2 interface on localhost and probe NVENC, Quick Sync, and AMD AMF
+before falling back to CPU encoding. See [`windows/README.md`](windows/README.md)
+for the installer, Windows security warning, hardware probes, and build details.
+
+### Repeatable end-to-end validation
+
+The repository includes a disposable scenario harness. It generates a small
+media corpus, starts the local runtime, uploads real files, runs selected
+codecs, verifies downloaded outputs with FFprobe, and exercises parallel batch
+upload plus ZIP download. Explicit hardware requests are useful on CPU-only
+machines too: a healthy runtime should complete them through its documented
+CPU fallback path.
+
+```bash
+# Source/local runtime (no Docker or GPU required)
+python scripts/e2e_test.py --mode local
+
+# A representative quicker run
+python scripts/e2e_test.py --mode local --profile quick \
+  --codecs libx264,h264_qsv,h264_vaapi,h264_nvenc
+
+# A disposable Docker run; build the image first if it is not already present
+docker build -t 8mb.local:e2e .
+python scripts/e2e_test.py --mode docker --docker-image 8mb.local:e2e
+
+# Hardware-specific Docker runs on the matching host
+python scripts/e2e_test.py --mode docker --docker-image 8mb.local:e2e --docker-gpu nvidia
+python scripts/e2e_test.py --mode docker --docker-image 8mb.local:e2e --docker-gpu vaapi
+```
+
+The Docker harness uses a unique container name and temporary bind-mounted
+directories, then stops and removes only the container it created. Use
+`--keep` when retaining logs and outputs for diagnosis. The full codec list is
+the default; narrow it with `--codecs` when iterating on one hardware path.
+The manual **Docker end-to-end smoke** workflow builds a CPU container and runs
+the same representative scenarios in GitHub Actions.
+
+On Windows, the release script performs the same health, frontend, upload,
+transcode, status, download, and FFprobe checks. Add `-Install` to silently
+install and uninstall the Inno Setup package in an isolated temporary folder:
+
+```powershell
+.\windows\test-release.ps1 -Build -Install
+```
 
 ### Verify Installation
 
@@ -290,13 +363,12 @@ FILE_RETENTION_HOURS=1
 # Worker concurrency (max parallel jobs)
 WORKER_CONCURRENCY=4
 
-# Codec visibility (all default to true)
-CODEC_H264_NVENC=true
-CODEC_HEVC_NVENC=true
-CODEC_AV1_NVENC=true
-CODEC_LIBX264=true
-CODEC_LIBX265=true
-CODEC_LIBAOM_AV1=true
+# SVT-AV1 thread-level parallelism. "auto" is safest across mixed hardware;
+# optionally set 0..6 after benchmarking a stable host.
+SVTAV1_LP=auto
+
+# Codec visibility is persisted in settings.json and managed from Settings.
+# Hardware entries are still hidden unless their runtime probe passes.
 
 # Redis / backend (usually no need to change)
 REDIS_URL=redis://127.0.0.1:6379/0
@@ -304,13 +376,20 @@ BACKEND_HOST=0.0.0.0
 BACKEND_PORT=8001
 ```
 
+The Compose profiles bind `./uploads` and `./outputs` for media, `./state` for
+settings/history, and `./redis-data` for the local Redis AOF. Multipart upload
+and FFmpeg temporary files use `./uploads/.tmp`, so large batch uploads do not
+consume the container's writable layer. Put the media directories on the disk
+with the most free space and back up `state/` if you want to preserve the UI
+configuration.
+
 ### Settings UI
 
 Manage settings at `/settings` with no container restart required:
 
 - **Authentication** — enable/disable, manage credentials
 - **Default Presets** — target size, codec, quality, container defaults
-- **Codec Visibility** — enable/disable NVIDIA and CPU codecs
+- **Codec Visibility** — enable/disable NVIDIA, Intel/VAAPI, and CPU codecs
 - **Preset Profiles** — create named presets for quick access
 - **Worker Concurrency** — adjust parallel job limit
 - **Size Buttons** — customize the target size quick-pick buttons
@@ -458,7 +537,7 @@ This is handled automatically. If the output exceeds the target by more than 2%,
 | Permission denied on uploads/outputs | `chmod 777 uploads outputs` or `chown $USER:$USER uploads outputs` |
 | Port already in use | Change mapping: `-p 8080:8001` |
 | Container won't start | `docker logs 8mblocal` to check errors; `docker rm -f 8mblocal` and retry |
-| FFmpeg errors | Check logs in the UI; try CPU-only codecs (libx264/libx265/libaom-av1) |
+| FFmpeg errors | Check logs in the UI; try the CPU fallback paths: SVT-AV1 (`libsvtav1`), x265 (`libx265`), or x264 (`libx264`) |
 
 ### Quick Diagnostic Commands
 

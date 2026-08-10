@@ -1,0 +1,45 @@
+# Linux VAAPI profile for Intel iGPU/QSV and AMD VAAPI.
+#
+# Usage:
+#   cp .env.example .env
+#   docker compose -f docker-compose.vaapi.yml up -d --build
+#
+# The worker discovers renderD* nodes and validates each encoder at startup.
+# Override VAAPI_DEVICE when a host has more than one GPU. VIDEO_GID and
+# RENDER_GID should match the host's `video`/`render` group IDs when the
+# container needs explicit supplementary group access.
+services:
+  8mblocal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_VERSION: "138"
+    image: jms1717/8mblocal:vaapi
+    container_name: 8mblocal
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./state:/app/state
+      - ./redis-data:/var/lib/redis
+      - type: bind
+        source: ./.env
+        target: /app/.env
+        bind:
+          create_host_path: false
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-109}"
+    environment:
+      - REDIS_URL=redis://127.0.0.1:6379/0
+      - ENV_FILE=/app/.env
+      - SETTINGS_FILE=/app/state/settings.json
+      - HISTORY_FILE=/app/state/history.json
+      - TMPDIR=/app/uploads/.tmp
+      - VAAPI_DEVICE=${VAAPI_DEVICE:-}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-4}
+    restart: unless-stopped

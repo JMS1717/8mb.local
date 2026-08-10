@@ -85,7 +85,7 @@ async def compress(req: CompressRequest):
     return {"task_id": task.id}
 
 
-@router.post("/api/jobs/{task_id}/cancel")
+@router.post("/api/jobs/{task_id}/cancel", dependencies=[Depends(basic_auth)])
 async def cancel_job(task_id: str):
     """Signal a running job to cancel and attempt to stop ffmpeg."""
     logger.info("cancel_job: task_id=%s", task_id)
@@ -103,7 +103,7 @@ async def cancel_job(task_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/api/queue/clear")
+@router.post("/api/queue/clear", dependencies=[Depends(basic_auth)])
 async def clear_queue():
     """Clear all jobs from the queue (cancel running, remove pending/completed)."""
     try:

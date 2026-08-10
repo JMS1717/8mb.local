@@ -153,8 +153,8 @@ export interface HardwareInfo {
 export interface EncoderTestResult {
 	codec: string;
 	actual_encoder: string;
-	passed: boolean;
-	encode_passed: boolean;
+	passed: boolean | null;
+	encode_passed: boolean | null;
 	encode_message: string;
 	decode_passed: boolean | null;
 	decode_message: string | null;

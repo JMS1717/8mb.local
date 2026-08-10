@@ -7,20 +7,23 @@
 # persistence will silently break. `create_host_path: false` below makes
 # Docker fail loudly instead of silently creating a directory if the file is
 # missing; the entrypoint also detects+recovers an empty directory.
+# `./uploads` is also the backing volume for multipart/FFmpeg temporary files;
+# keep it on a disk with enough free space for the largest input.
 services:
   8mblocal:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "137"
+        BUILD_VERSION: "138"
     image: jms1717/8mblocal:latest
-    container_name: 8mblocal
     ports:
       - "8001:8001"
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
+      - ./state:/app/state
+      - ./redis-data:/var/lib/redis
       - type: bind
         source: ./.env
         target: /app/.env
@@ -29,6 +32,10 @@ services:
     gpus: all
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
+      - ENV_FILE=/app/.env
+      - SETTINGS_FILE=/app/state/settings.json
+      - HISTORY_FILE=/app/state/history.json
+      - TMPDIR=/app/uploads/.tmp
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
       # Parallel encode jobs (each runs FFmpeg). Raise to use more CPU/RAM; watch GPU VRAM if using NVENC.

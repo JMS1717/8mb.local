@@ -8,14 +8,47 @@ import time
 from typing import AsyncGenerator
 
 import orjson
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from ..auth import basic_auth
+from ..celery_app import celery_app
 from ..deps import redis
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["stream"])
+
+
+def _terminal_or_progress_event(task_id: str) -> dict | None:
+    """Replay durable task state so reconnects cannot miss the terminal event."""
+    result = celery_app.AsyncResult(task_id)
+    state = str(result.state or "PENDING").upper()
+    info = result.info if isinstance(result.info, dict) else {}
+
+    if state in {"STARTED", "PROGRESS"}:
+        return {
+            "type": "progress",
+            "task_id": task_id,
+            "progress": info.get("progress", 0.0),
+            "phase": info.get("phase") or "encoding",
+        }
+    if state == "SUCCESS":
+        stats = info.get("stats") if isinstance(info.get("stats"), dict) else {}
+        if not stats and isinstance(result.result, dict):
+            stats = result.result
+        return {"type": "done", "task_id": task_id, "stats": stats}
+    if state == "FAILURE":
+        detail = info.get("detail") or info.get("message")
+        if not detail:
+            try:
+                detail = str(result.result or "Compression failed")
+            except Exception:
+                detail = "Compression failed"
+        return {"type": "error", "task_id": task_id, "message": str(detail)}
+    if state == "REVOKED":
+        return {"type": "canceled", "task_id": task_id, "message": "Job canceled by user"}
+    return None
 
 
 async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
@@ -28,8 +61,14 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
     await pubsub.subscribe(channel)
 
     queue: asyncio.Queue[str] = asyncio.Queue()
-    
+
     await queue.put(orjson.dumps({"type": "connected", "task_id": task_id, "ts": time.time()}).decode())
+    try:
+        replay = await asyncio.to_thread(_terminal_or_progress_event, task_id)
+        if replay is not None:
+            await queue.put(orjson.dumps(replay).decode())
+    except Exception as exc:
+        logger.debug("[SSE %s] status replay unavailable: %s", task_id[:8], exc)
 
     async def reader():
         try:
@@ -75,6 +114,12 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
                     data[:120] if len(data) > 120 else data,
                 )
             yield f"data: {data}\n\n".encode()
+            try:
+                event_type = orjson.loads(data).get("type")
+            except Exception:
+                event_type = None
+            if event_type in {"done", "error", "canceled"}:
+                return
     finally:
         logger.info("[SSE %s] stream closed", task_id[:8])
         reader_task.cancel()
@@ -84,7 +129,7 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
             await pubsub.close()
 
 
-@router.get("/api/stream/{task_id}")
+@router.get("/api/stream/{task_id}", dependencies=[Depends(basic_auth)])
 async def stream(task_id: str):
     return StreamingResponse(
         _sse_event_generator(task_id),

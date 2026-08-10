@@ -1,0 +1,33 @@
+name: Docker end-to-end smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-cpu-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host FFmpeg for fixture generation
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the Docker image
+        run: docker build -t 8mb.local:e2e .
+
+      - name: Exercise the disposable CPU container
+        run: >-
+          python scripts/e2e_test.py --mode docker --docker-image 8mb.local:e2e
+          --profile quick --codecs libx264,h264_qsv,h264_vaapi,h264_nvenc --keep

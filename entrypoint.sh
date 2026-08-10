@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Docker entrypoint: set up NVIDIA environment, then launch supervisord.
+# Docker entrypoint: set up GPU/temp-file environment, then launch supervisord.
 
 log() {
   ts=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date)
@@ -17,6 +17,13 @@ for libdir in /usr/local/nvidia/lib64 /usr/local/nvidia/lib /usr/local/cuda/lib6
 done
 
 log "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+
+# Keep multipart uploads and FFmpeg temporary files on the mounted upload
+# volume. Otherwise large batch uploads can fill Docker's writable layer and
+# the host root filesystem before the application limit is reached.
+export TMPDIR="${TMPDIR:-/app/uploads/.tmp}"
+mkdir -p "$TMPDIR" /app/uploads /app/outputs /app/state /var/lib/redis 2>/dev/null || true
+log "TMPDIR=$TMPDIR"
 
 # ----------------------------------------------------------------------------
 # .env sanity check

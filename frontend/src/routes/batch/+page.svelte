@@ -12,6 +12,8 @@
     openProgressStream,
   } from '$lib/api';
   import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
+  import { availableCodecOptions, codecIcon, type CodecOption } from '$lib/codecs';
+  import { takePendingBatchFiles } from '$lib/pendingBatch';
 
   type BatchItem = {
     index: number;
@@ -38,12 +40,6 @@
     overall_progress: number;
     items: BatchItem[];
     zip_download_url?: string | null;
-  };
-
-  type CodecOption = {
-    value: string;
-    label: string;
-    group: string;
   };
 
   type PresetProfile = {
@@ -97,6 +93,9 @@
 
   let availableCodecs: CodecOption[] = [];
   $: nvidiaCodecs = availableCodecs.filter((c) => c.group === 'nvidia');
+  $: intelCodecs = availableCodecs.filter((c) => c.group === 'intel');
+  $: amdCodecs = availableCodecs.filter((c) => c.group === 'amd');
+  $: vaapiCodecs = availableCodecs.filter((c) => c.group === 'vaapi');
   $: cpuCodecs = availableCodecs.filter((c) => c.group === 'cpu');
   $: nvencTuneApplies = videoCodec.endsWith('_nvenc');
   let presetProfiles: PresetProfile[] = [];
@@ -175,31 +174,17 @@
   }
 
   function getCodecIcon(group: string): string {
-    if (group === 'nvidia') return '🟢';
-    return '⚪';
+    return codecIcon(group as any);
   }
 
   function buildCodecList(codecData: any): CodecOption[] {
-    const list: CodecOption[] = [];
-    const enabledCodecs: string[] = codecData?.enabled_codecs || [];
+    return availableCodecOptions(codecData?.enabled_codecs);
+  }
 
-    const codecDefinitions: CodecOption[] = [
-      { value: 'av1_nvenc', label: 'AV1 (NVIDIA)', group: 'nvidia' },
-      { value: 'hevc_nvenc', label: 'HEVC (H.265, NVIDIA)', group: 'nvidia' },
-      { value: 'h264_nvenc', label: 'H.264 (NVIDIA)', group: 'nvidia' },
-      { value: 'libaom-av1', label: 'AV1 (CPU)', group: 'cpu' },
-      { value: 'libsvtav1', label: 'AV1 (SVT-AV1, CPU)', group: 'cpu' },
-      { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
-      { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
-    ];
-
-    for (const codec of codecDefinitions) {
-      if (enabledCodecs.includes(codec.value)) {
-        list.push(codec);
-      }
-    }
-
-    return list;
+  function ensureSelectedCodec() {
+    if (!availableCodecs.length) return;
+    if (availableCodecs.some((codec) => codec.value === videoCodec)) return;
+    videoCodec = availableCodecs[0].value;
   }
 
   function setPresetMB(mb: number) {
@@ -218,6 +203,7 @@
     container = p.container;
     tune = p.tune;
     maxFpsCap = maxFpsFromProfile(p.max_output_fps);
+    ensureSelectedCodec();
   }
 
   function pushLiveLog(message: string) {
@@ -570,6 +556,12 @@
   }
 
   onMount(async () => {
+    const stagedFiles = takePendingBatchFiles();
+    if (stagedFiles.length > 0) {
+      applySelection(stagedFiles);
+      selectionNotice = `Switched to Batch automatically for ${stagedFiles.length} selected files.`;
+    }
+
     try {
       const res = await fetch('/api/settings/presets');
       if (res.ok) {
@@ -591,17 +583,11 @@
       const codecList = buildCodecList(codecData);
       if (codecList.length > 0) {
         availableCodecs = codecList;
+      } else {
+        availableCodecs = availableCodecOptions(['libx264', 'libx265']);
       }
     } catch {
-      availableCodecs = [
-        { value: 'av1_nvenc', label: 'AV1 (NVIDIA)', group: 'nvidia' },
-        { value: 'hevc_nvenc', label: 'HEVC (H.265, NVIDIA)', group: 'nvidia' },
-        { value: 'h264_nvenc', label: 'H.264 (NVIDIA)', group: 'nvidia' },
-        { value: 'libaom-av1', label: 'AV1 (CPU)', group: 'cpu' },
-        { value: 'libsvtav1', label: 'AV1 (SVT-AV1, CPU)', group: 'cpu' },
-        { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
-        { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
-      ];
+      availableCodecs = availableCodecOptions(['libx264', 'libx265']);
     }
 
     if (availableCodecs.length > 0 && !availableCodecs.some((c) => c.value === videoCodec)) {
@@ -619,8 +605,14 @@
 
     try {
       const pp = await getPresetProfiles();
-      presetProfiles = pp?.profiles || [];
-      selectedPreset = pp?.default || (presetProfiles[0]?.name ?? null);
+      const availableValues = new Set(availableCodecs.map((codec) => codec.value));
+      presetProfiles = (pp?.profiles || []).filter((profile: any) =>
+        availableValues.has(String(profile.video_codec)),
+      );
+      const requestedDefault = pp?.default || null;
+      selectedPreset = presetProfiles.some((profile) => profile.name === requestedDefault)
+        ? requestedDefault
+        : (presetProfiles[0]?.name ?? null);
       if (selectedPreset) {
         applyPreset(selectedPreset);
       }
@@ -795,7 +787,7 @@
     <div class="grid md:grid-cols-2 gap-3">
       <label class="block text-sm">
         <span class="block mb-1">Video codec</span>
-        <select class="input w-full" bind:value={videoCodec}>
+        <select id="batch-video-codec" class="input w-full" bind:value={videoCodec}>
           {#if availableCodecs.length === 0}
             <option value={videoCodec}>{videoCodec}</option>
           {:else}
@@ -804,6 +796,27 @@
                 <option value={codec.value}>{getCodecIcon(codec.group)} {codec.label}</option>
               {/each}
             </optgroup>
+            {#if intelCodecs.length}
+              <optgroup label="Intel Quick Sync">
+                {#each intelCodecs as codec}
+                  <option value={codec.value}>{getCodecIcon(codec.group)} {codec.label}</option>
+                {/each}
+              </optgroup>
+            {/if}
+            {#if amdCodecs.length}
+              <optgroup label="AMD AMF">
+                {#each amdCodecs as codec}
+                  <option value={codec.value}>{getCodecIcon(codec.group)} {codec.label}</option>
+                {/each}
+              </optgroup>
+            {/if}
+            {#if vaapiCodecs.length}
+              <optgroup label="Linux VAAPI">
+                {#each vaapiCodecs as codec}
+                  <option value={codec.value}>{getCodecIcon(codec.group)} {codec.label}</option>
+                {/each}
+              </optgroup>
+            {/if}
             <optgroup label="CPU / Software">
               {#each cpuCodecs as codec}
                 <option value={codec.value}>{getCodecIcon(codec.group)} {codec.label}</option>

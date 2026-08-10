@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
+import platform
 import subprocess
 import time
 import uuid
@@ -19,6 +21,8 @@ import psutil
 from fastapi import HTTPException, UploadFile
 from redis.asyncio import Redis
 
+from shared.subprocess_utils import hidden_process_kwargs
+
 from .celery_app import celery_app
 from .config import settings
 from .models import JobMetadata
@@ -26,15 +30,22 @@ from .models import JobMetadata
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Path constants
+# Path constants. Docker keeps the historical /app defaults; native/local
+# launches may override APP_DATA_DIR, UPLOADS_DIR, and OUTPUTS_DIR.
 # ---------------------------------------------------------------------------
-UPLOADS_DIR = Path("/app/uploads")
-OUTPUTS_DIR = Path("/app/outputs")
+_APP_DATA_DIR = Path(settings.APP_DATA_DIR)
+UPLOADS_DIR = Path(settings.UPLOADS_DIR) if settings.UPLOADS_DIR else _APP_DATA_DIR / "uploads"
+OUTPUTS_DIR = Path(settings.OUTPUTS_DIR) if settings.OUTPUTS_DIR else _APP_DATA_DIR / "outputs"
 
 # ---------------------------------------------------------------------------
 # Redis async client (shared across all routers)
 # ---------------------------------------------------------------------------
-redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+if os.getenv("LOCAL_RUNTIME", "").strip().lower() in {"1", "true", "yes", "on"}:
+    from shared.local_runtime import get_async_redis
+
+    redis = get_async_redis()
+else:
+    redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 # ---------------------------------------------------------------------------
 # Upload / batch limits (read once at import time from settings)
@@ -54,11 +65,32 @@ VIDEO_EXTENSIONS: set[str] = {
 HW_INFO_CACHE: dict | None = None
 HW_INFO_CACHE_TS: float = 0.0
 SYSTEM_CAPS_CACHE: dict | None = None
+SYSTEM_CAPS_CACHE_TS: float = 0.0
 
 # TTL after which get_hw_info_cached() will trigger a fresh worker probe in the
 # background. Short enough to pick up hardware changes (GPU driver reload,
 # encoder tests re-run) without hammering Celery on every hw-info request.
 HW_INFO_TTL_SECONDS: int = 60
+SYSTEM_CAPS_TTL_SECONDS: int = 30
+
+# Hardware probing runs a real one-frame FFmpeg test for each encoder.  A
+# native Windows process can need several seconds to initialize both NVIDIA
+# and Intel devices, so the old five-second RPC deadline turned a healthy
+# local runtime into repeated timeout warnings and incomplete codec metadata.
+# Keep the deadline bounded while allowing the probe to finish; operators can
+# override it for unusually slow drivers.
+_LOCAL_RUNTIME = os.getenv("LOCAL_RUNTIME", "").strip().lower() in {"1", "true", "yes", "on"}
+_DEFAULT_HW_INFO_RPC_TIMEOUT = 20 if _LOCAL_RUNTIME else 10
+try:
+    HW_INFO_RPC_TIMEOUT_SECONDS: int = max(
+        5, int(os.getenv("HW_INFO_RPC_TIMEOUT_SECONDS", str(_DEFAULT_HW_INFO_RPC_TIMEOUT)))
+    )
+except ValueError:
+    logger.warning(
+        "Invalid HW_INFO_RPC_TIMEOUT_SECONDS; using %ss",
+        _DEFAULT_HW_INFO_RPC_TIMEOUT,
+    )
+    HW_INFO_RPC_TIMEOUT_SECONDS = _DEFAULT_HW_INFO_RPC_TIMEOUT
 
 # Guard against multiple concurrent refreshes kicked off by the same burst of
 # requests. Populated lazily on the first async call so the lock attaches to
@@ -108,7 +140,7 @@ def get_hw_info_cached() -> dict:
         "hw-info: cache MISS (have_cache=%s age=%.1fs ttl=%ss) — refreshing",
         HW_INFO_CACHE is not None, now - HW_INFO_CACHE_TS, HW_INFO_TTL_SECONDS,
     )
-    fresh = _fetch_hw_info_blocking(timeout=5)
+    fresh = _fetch_hw_info_blocking(timeout=HW_INFO_RPC_TIMEOUT_SECONDS)
     if fresh:
         HW_INFO_CACHE = fresh
         HW_INFO_CACHE_TS = now
@@ -136,7 +168,7 @@ async def get_hw_info_cached_async() -> dict:
         if HW_INFO_CACHE is not None and (now - HW_INFO_CACHE_TS) < HW_INFO_TTL_SECONDS:
             return HW_INFO_CACHE
         logger.debug("hw-info: async refresh starting (offloading celery.get to thread)")
-        fresh = await asyncio.to_thread(_fetch_hw_info_blocking, 5)
+        fresh = await asyncio.to_thread(_fetch_hw_info_blocking, HW_INFO_RPC_TIMEOUT_SECONDS)
         if fresh:
             HW_INFO_CACHE = fresh
             HW_INFO_CACHE_TS = time.time()
@@ -200,6 +232,15 @@ def _parse_fps_fraction(s: str | None) -> float | None:
         return None
 
 
+def _parse_finite_float(value: object) -> float | None:
+    """Parse ffprobe numeric fields without treating ``N/A`` as an error."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
 def ffprobe(input_path: Path) -> dict:
     cmd = [
         "ffprobe", "-v", "error",
@@ -208,32 +249,53 @@ def ffprobe(input_path: Path) -> dict:
         "-of", "json",
         str(input_path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, **hidden_process_kwargs()
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("ffprobe timed out while analyzing the upload") from exc
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr)
-    data = json.loads(proc.stdout)
-    duration = float(data.get("format", {}).get("duration", 0.0))
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("ffprobe returned invalid JSON") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("ffprobe returned an unexpected JSON shape")
+    duration = _parse_finite_float((data.get("format") or {}).get("duration"))
+    if duration is None or duration <= 0:
+        raise RuntimeError("Input has no usable media duration")
     v_bitrate = None
     a_bitrate = None
     v_width = None
     v_height = None
     v_fps = None
     video_seen = False
+    audio_seen = False
     for s in data.get("streams", []):
         if s.get("codec_type") == "video":
-            if s.get("bit_rate"):
-                v_bitrate = float(s["bit_rate"]) / 1000.0
-            if s.get("width"):
-                v_width = int(s["width"])
-            if s.get("height"):
-                v_height = int(s["height"])
+            bitrate = _parse_finite_float(s.get("bit_rate"))
+            if bitrate is not None and bitrate >= 0:
+                v_bitrate = bitrate / 1000.0
+            width = _parse_finite_float(s.get("width"))
+            height = _parse_finite_float(s.get("height"))
+            if width is not None and width > 0:
+                v_width = int(width)
+            if height is not None and height > 0:
+                v_height = int(height)
             if not video_seen:
                 v_fps = _parse_fps_fraction(s.get("avg_frame_rate"))
                 if v_fps is None or v_fps <= 0:
                     v_fps = _parse_fps_fraction(s.get("r_frame_rate"))
                 video_seen = True
-        if s.get("codec_type") == "audio" and s.get("bit_rate"):
-            a_bitrate = float(s["bit_rate"]) / 1000.0
+        if s.get("codec_type") == "audio":
+            audio_seen = True
+            bitrate = _parse_finite_float(s.get("bit_rate"))
+            if bitrate is not None and bitrate >= 0:
+                a_bitrate = bitrate / 1000.0
+    if not video_seen and not audio_seen:
+        raise RuntimeError("Input has no usable audio or video stream")
     return {
         "duration": duration,
         "video_bitrate_kbps": v_bitrate,
@@ -241,6 +303,8 @@ def ffprobe(input_path: Path) -> dict:
         "width": v_width,
         "height": v_height,
         "video_fps": v_fps,
+        "has_video": video_seen,
+        "has_audio": audio_seen,
     }
 
 
@@ -265,16 +329,25 @@ def safe_filename(filename: str | None) -> str:
 
 async def save_upload_file(upload: UploadFile, destination: Path) -> None:
     total_size = 0
-    with destination.open("wb") as out:
-        while chunk := await upload.read(8192):
-            total_size += len(chunk)
-            if total_size > MAX_UPLOAD_SIZE_BYTES:
-                destination.unlink(missing_ok=True)
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"File too large. Max size: {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)}MB",
-                )
-            out.write(chunk)
+    try:
+        with destination.open("wb") as out:
+            while chunk := await upload.read(8192):
+                total_size += len(chunk)
+                if total_size > MAX_UPLOAD_SIZE_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Max size: {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)}MB",
+                    )
+                out.write(chunk)
+    except HTTPException:
+        # The file handle must be closed before unlinking on Windows.  Keeping
+        # cleanup outside the ``with`` block also guarantees a partial upload
+        # cannot be mistaken for a valid input after a 413 response.
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("upload: could not remove oversized partial file %s", destination)
+        raise
 
 
 def is_video_upload(upload: UploadFile) -> bool:
@@ -319,10 +392,12 @@ async def store_job_metadata(task_id: str, job_id: str, filename: str, target_si
 # ---------------------------------------------------------------------------
 def get_system_capabilities() -> dict:
     """Gather system capabilities: CPU, memory, GPUs, driver versions."""
+    logical_cpus = psutil.cpu_count(logical=True) or 0
+    physical_cpus = psutil.cpu_count(logical=False) or 0
     info: dict = {
         "cpu": {
-            "cores_logical": psutil.cpu_count(logical=True) or 0,
-            "cores_physical": psutil.cpu_count(logical=False) or 0,
+            "cores_logical": logical_cpus,
+            "cores_physical": physical_cpus,
         },
         "memory": {
             "total_gb": round(psutil.virtual_memory().total / (1024**3), 2),
@@ -330,26 +405,48 @@ def get_system_capabilities() -> dict:
         },
         "gpus": [],
         "nvidia_driver": None,
+        "dri_devices": [],
     }
 
+    # /proc/cpuinfo is Linux-only. Native Windows builds otherwise rendered
+    # a useful CPU count as ``CPU: Unknown`` even though psutil was working.
     try:
-        if hasattr(os, 'uname'):
+        cpu_model = ""
+        if os.name == "nt":
             try:
-                with open('/proc/cpuinfo', 'r') as f:
-                    for line in f:
-                        if 'model name' in line:
-                            info["cpu"]["model"] = line.split(':', 1)[1].strip()
+                import winreg
+
+                with winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+                ) as key:
+                    cpu_model = str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+            except Exception:
+                pass
+        if not cpu_model and hasattr(os, "uname"):
+            try:
+                with open("/proc/cpuinfo", "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if "model name" in line:
+                            cpu_model = line.split(":", 1)[1].strip()
                             break
             except Exception:
                 pass
+        if not cpu_model:
+            cpu_model = str(platform.processor() or platform.uname().processor or "").strip()
+        info["cpu"]["model"] = cpu_model or f"{physical_cpus or logical_cpus}-core CPU"
     except Exception:
-        pass
+        info["cpu"]["model"] = f"{physical_cpus or logical_cpus}-core CPU"
 
     try:
         q = "index,name,memory.total,memory.used,driver_version,uuid"
+        # nvidia-smi may need a few seconds to wake a powered-down laptop GPU.
+        # A two-second cold-start timeout produced a permanently cached empty
+        # GPU list even while the worker's NVENC initialization probes passed.
         res = subprocess.run(
             ["nvidia-smi", f"--query-gpu={q}", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True, text=True, timeout=8,
+            **hidden_process_kwargs(),
         )
         if res.returncode == 0 and res.stdout.strip():
             lines = [l.strip() for l in res.stdout.strip().splitlines() if l.strip()]
@@ -365,8 +462,19 @@ def get_system_capabilities() -> dict:
                         "uuid": gpu_uuid,
                     })
                     info["nvidia_driver"] = drv
-    except Exception:
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.info("NVIDIA inventory unavailable: %s", exc)
+    except Exception as exc:
+        logger.warning("NVIDIA inventory failed: %s", exc)
+
+    try:
+        info["dri_devices"] = [
+            f"/dev/dri/{name}"
+            for name in sorted(os.listdir("/dev/dri"))
+            if name.startswith("renderD")
+        ]
+    except (FileNotFoundError, PermissionError, OSError):
+        info["dri_devices"] = []
 
     return info
 
@@ -391,9 +499,9 @@ async def sync_codec_settings_from_tests(timeout_s: int = 60) -> None:
     """Initialize codec visibility and default preset based on detected hardware.
 
     - CPU codecs are always enabled.
-    - NVENC codecs are enabled when the worker reports them available and tests pass.
+    - Hardware codecs are enabled when the worker reports them available and tests pass.
     - After updating visibility, ensures the default_preset points to the best
-      available codec (NVENC AV1 > HEVC > H264 > CPU).
+      available codec (NVENC > QSV > VAAPI > CPU).
     """
     import asyncio
     import json as _json
@@ -404,7 +512,11 @@ async def sync_codec_settings_from_tests(timeout_s: int = 60) -> None:
         deadline = time.time() + max(5, timeout_s)
         while time.time() < deadline:
             try:
-                hw_info = get_hw_info_fresh(timeout=5) or {}
+                # This function is already async; keep the blocking Celery
+                # compatibility call off the event loop.  The hardware probe
+                # itself is bounded by the same runtime-aware deadline used
+                # by the API cache.
+                hw_info = await get_hw_info_fresh_async(timeout=HW_INFO_RPC_TIMEOUT_SECONDS) or {}
                 avail = hw_info.get("available_encoders", {}) or {}
                 if avail:
                     break
@@ -414,22 +526,63 @@ async def sync_codec_settings_from_tests(timeout_s: int = 60) -> None:
 
         from . import settings_manager as _sm
 
-        # Omit libaom_av1: visibility is user-controlled (Settings). Hardware sync
-        # should not re-enable the slow libaom-av1 path; SVT-AV1 is the default CPU AV1.
+        # SVT-AV1 is the approved CPU AV1 fallback. Legacy libaom settings are
+        # intentionally not included in the runtime visibility sync.
+        listed_cpu = hw_info.get("available_cpu_encoders")
+        if isinstance(listed_cpu, list):
+            available_cpu = {str(codec) for codec in listed_cpu}
+        else:
+            # A failed/old worker must not advertise a codec that the local
+            # FFmpeg binary does not contain. x264/x265 are the conservative
+            # compatibility baseline; SVT-AV1 is included only when enumerated.
+            available_cpu = {"libx264", "libx265"}
+
         payload: dict[str, bool] = {
-            "libx264": True,
-            "libx265": True,
-            "libsvtav1": True,
+            "libx264": "libx264" in available_cpu,
+            "libx265": "libx265" in available_cpu,
+            "libsvtav1": "libsvtav1" in available_cpu,
             "h264_nvenc": False,
             "hevc_nvenc": False,
             "av1_nvenc": False,
+            "h264_qsv": False,
+            "hevc_qsv": False,
+            "av1_qsv": False,
+            "h264_vaapi": False,
+            "hevc_vaapi": False,
+            "av1_vaapi": False,
+            "h264_amf": False,
+            "hevc_amf": False,
+            "av1_amf": False,
         }
 
-        hardware_keys = ["h264_nvenc", "hevc_nvenc", "av1_nvenc"]
+        hardware_keys = [
+            "h264_nvenc", "hevc_nvenc", "av1_nvenc",
+            "h264_qsv", "hevc_qsv", "av1_qsv",
+            "h264_vaapi", "hevc_vaapi", "av1_vaapi",
+            "h264_amf", "hevc_amf", "av1_amf",
+        ]
 
-        if avail:
+        tested_encoders = hw_info.get("tested_encoders") or {}
+        runtime_probe_authoritative = bool(tested_encoders)
+        if avail or tested_encoders:
             for codec in hardware_keys:
-                default_enabled = codec in avail.values() or codec.replace('_', '-') in avail.values()
+                if runtime_probe_authoritative:
+                    # Encoder-test keys in Redis intentionally live much
+                    # longer than a worker process. Once this worker has a
+                    # fresh probe map, codecs absent from it are unsupported
+                    # for this runtime and must not be re-enabled from stale
+                    # persisted results.
+                    payload[codec] = bool(tested_encoders.get(codec))
+                    continue
+                # ``available_encoders`` is the preferred encoder per family,
+                # not the complete set of working devices. Mixed systems can
+                # have NVIDIA plus Intel QSV, so retain every encoder whose
+                # runtime probe passed.
+                default_enabled = (
+                    codec in avail.values()
+                    or codec.replace('_', '-') in avail.values()
+                    or bool(tested_encoders.get(codec))
+                )
 
                 try:
                     encode_detail_raw = await redis.get(f"encoder_test_json:{codec}")
@@ -478,8 +631,12 @@ async def sync_codec_settings_from_tests(timeout_s: int = 60) -> None:
 
 
 def _ensure_default_preset_matches_hardware(_sm, visibility: dict[str, bool]) -> None:
-    """If the current default_preset uses a codec that isn't available,
-    switch it to the best available codec's profile."""
+    """Keep an auto-managed default on the fastest preferred working codec.
+
+    A detected hardware encoder may not have a built-in profile (historically
+    only NVENC did). In that case clone the matching codec-family template and
+    keep one managed profile instead of silently dropping to a CPU profile.
+    """
     try:
         data = _sm._read_settings()
         profiles = data.get('preset_profiles', [])
@@ -497,23 +654,70 @@ def _ensure_default_preset_matches_hardware(_sm, visibility: dict[str, bool]) ->
         if current_codec == 'libaom-av1':
             vis_key = 'libaom_av1'
         _vis_def = False if vis_key == 'libaom_av1' else True
-        if vis_key and visibility.get(vis_key, _vis_def):
+        current_available = bool(vis_key and visibility.get(vis_key, _vis_def))
+        managed_default = bool(data.get('default_preset_managed', False))
+        if current_available and not managed_default:
             return
 
-        codec_priority = ['av1_nvenc', 'hevc_nvenc', 'h264_nvenc',
-                          'libsvtav1', 'libaom_av1', 'libx265', 'libx264']
+        codec_priority = [
+            'av1_nvenc', 'av1_qsv', 'av1_amf', 'av1_vaapi',
+            'hevc_nvenc', 'hevc_qsv', 'hevc_amf', 'hevc_vaapi',
+            'h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_vaapi',
+            'libsvtav1', 'libx265', 'libx264',
+        ]
         codec_to_vis = {'libaom-av1': 'libaom_av1'}
-        for codec in codec_priority:
-            vk = codec_to_vis.get(codec, codec)
-            _vk_def = False if vk == 'libaom_av1' else True
-            if not visibility.get(vk, _vk_def):
-                continue
-            for p in profiles:
-                if p.get('video_codec') == codec:
-                    data['default_preset'] = p['name']
-                    _sm._write_settings(data)
-                    logger.info("Default preset auto-switched to '%s' based on available hardware", p['name'])
-                    return
+        best_codec = next((
+            codec for codec in codec_priority
+            if visibility.get(codec_to_vis.get(codec, codec), False)
+        ), None)
+        if not best_codec or (current_available and current_codec == best_codec):
+            return
+
+        for p in profiles:
+            if p.get('video_codec') == best_codec:
+                data['default_preset'] = p['name']
+                data['default_preset_managed'] = True
+                _sm._write_settings(data)
+                logger.info("Default preset auto-switched to '%s' based on available hardware", p['name'])
+                return
+
+        def codec_family(codec: str) -> str:
+            lowered = codec.lower()
+            if 'av1' in lowered:
+                return 'av1'
+            if 'hevc' in lowered or '265' in lowered:
+                return 'hevc'
+            return 'h264'
+
+        family = codec_family(best_codec)
+        template = next((p for p in profiles if codec_family(str(p.get('video_codec', ''))) == family), None)
+        if template is None:
+            return
+
+        labels = {
+            'av1_qsv': 'AV1 9.7MB (Intel Quick Sync)',
+            'hevc_qsv': 'HEVC 9.7MB (Intel Quick Sync)',
+            'h264_qsv': 'H264 8MB (Intel Quick Sync)',
+            'av1_amf': 'AV1 9.7MB (AMD AMF)',
+            'hevc_amf': 'HEVC 9.7MB (AMD AMF)',
+            'h264_amf': 'H264 8MB (AMD AMF)',
+            'av1_vaapi': 'AV1 9.7MB (VAAPI)',
+            'hevc_vaapi': 'HEVC 9.7MB (VAAPI)',
+            'h264_vaapi': 'H264 8MB (VAAPI)',
+        }
+        managed_profile = dict(template)
+        managed_profile.update({
+            'name': labels.get(best_codec, f'{family.upper()} (Auto hardware)'),
+            'video_codec': best_codec,
+            '_auto_hardware_profile': True,
+        })
+        profiles = [p for p in profiles if not p.get('_auto_hardware_profile')]
+        profiles.append(managed_profile)
+        data['preset_profiles'] = profiles
+        data['default_preset'] = managed_profile['name']
+        data['default_preset_managed'] = True
+        _sm._write_settings(data)
+        logger.info("Default preset auto-created and switched to '%s'", managed_profile['name'])
     except Exception as e:
         logger.warning(f"Failed to auto-switch default preset: {e}")
 
@@ -527,7 +731,6 @@ async def refresh_batch_payload(batch_payload: dict) -> dict:
     completed_count = 0
     failed_count = 0
     total_progress = 0.0
-    first_failed_index: int | None = None
 
     for idx, item in enumerate(items):
         task_id = str(item.get("task_id") or "")
@@ -577,8 +780,6 @@ async def refresh_batch_payload(batch_payload: dict) -> dict:
         else:
             failed_count += 1
             total_progress += 100.0
-            if first_failed_index is None:
-                first_failed_index = idx
 
         updated_items.append({
             **item,
@@ -587,6 +788,16 @@ async def refresh_batch_payload(batch_payload: dict) -> dict:
             "error": error,
             "output_path": output_path,
         })
+
+    # New batches are dispatched as a Celery group, so a failed item must not
+    # mark unrelated files as skipped. Keep the old chain behavior for batch
+    # records created by older releases that do not carry an execution mode.
+    first_failed_index: int | None = None
+    if batch_payload.get("execution", "sequential") != "parallel":
+        for idx, item in enumerate(updated_items):
+            if item.get("state") in ("failed", "canceled"):
+                first_failed_index = idx
+                break
 
     if first_failed_index is not None:
         for idx in range(first_failed_index + 1, len(updated_items)):

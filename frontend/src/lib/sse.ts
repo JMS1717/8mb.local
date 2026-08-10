@@ -92,12 +92,11 @@ export function openProgressStream(
 		sseUrl = `/api/stream/${taskId}`;
 	}
 
-	if (auth) {
-		const authParam = btoa(`${auth.user}:${auth.pass}`);
-		sseUrl += `?auth=${encodeURIComponent(authParam)}`;
-	}
+	// Native EventSource cannot set an Authorization header. Let the browser's
+	// HTTP Basic-auth challenge/cache handle this request; putting credentials
+	// in the query string leaks them into proxy logs and browser history.
+	void auth;
 
-	console.log('Opening SSE connection to:', sseUrl);
 	return new EventSource(sseUrl);
 }
 

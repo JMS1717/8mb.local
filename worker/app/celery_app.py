@@ -8,14 +8,33 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+LOCAL_RUNTIME = os.getenv("LOCAL_RUNTIME", "").strip().lower() in {"1", "true", "yes", "on"}
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 
-celery_app = Celery(
-    "8mblocal",
-    broker=REDIS_URL,
-    backend=REDIS_URL,
-    include=["worker.worker"],  # Ensure task module is imported so tasks register
-)
+# The desktop launcher executes task functions directly.  A memory backend
+# keeps Celery's bound-task ``update_state`` calls local and prevents every
+# progress update from trying to connect to a Redis server that is not there.
+# Pass the loader class and disable Django fixups explicitly in local mode:
+# Celery otherwise resolves both through strings at runtime, which is fragile
+# in a frozen PyInstaller application and serves no purpose here.
+if LOCAL_RUNTIME:
+    from celery.loaders.app import AppLoader
+
+    celery_app = Celery(
+        "8mblocal",
+        broker="memory://",
+        backend="cache+memory://",
+        loader=AppLoader,
+        fixups=[],
+        include=["worker.worker"],
+    )
+else:
+    celery_app = Celery(
+        "8mblocal",
+        broker=REDIS_URL,
+        backend=REDIS_URL,
+        include=["worker.worker"],  # Ensure task module is imported so tasks register
+    )
 
 celery_app.conf.update(
     task_serializer="json",

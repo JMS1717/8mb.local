@@ -6,15 +6,21 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import secrets
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .config import settings
 
 logger = logging.getLogger(__name__)
 
 
-ENV_FILE = Path("/app/.env")
-SETTINGS_FILE = Path("/app/settings.json")
+_APP_DATA_DIR = Path(settings.APP_DATA_DIR)
+ENV_FILE = Path(os.getenv("ENV_FILE", str(_APP_DATA_DIR / ".env")))
+SETTINGS_FILE = Path(os.getenv("SETTINGS_FILE", str(_APP_DATA_DIR / "settings.json")))
 
 
 def _read_settings() -> Dict[str, Any]:
@@ -23,20 +29,37 @@ def _read_settings() -> Dict[str, Any]:
         return {}
     try:
         with SETTINGS_FILE.open('r') as f:
-            return json.load(f)
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
 
 def _write_settings(data: Dict[str, Any]):
     """Write JSON settings file safely."""
+    temp_path: Path | None = None
     try:
         SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with SETTINGS_FILE.open('w') as f:
+        with tempfile.NamedTemporaryFile(
+            mode='w', encoding='utf-8', dir=SETTINGS_FILE.parent,
+            prefix=f'.{SETTINGS_FILE.name}.', suffix='.tmp', delete=False,
+        ) as f:
+            temp_path = Path(f.name)
             json.dump(data, f, indent=2)
-        os.chmod(SETTINGS_FILE, 0o600)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, SETTINGS_FILE)
+        temp_path = None
     except Exception as e:
         raise RuntimeError(f"Failed to write settings.json: {e}")
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _ensure_defaults() -> Dict[str, Any]:
@@ -54,7 +77,6 @@ def _ensure_defaults() -> Dict[str, Any]:
             {"name": "HEVC 50MB HQ (NVENC)", "target_mb": 50, "video_codec": "hevc_nvenc", "audio_codec": "aac", "preset": "p7", "audio_kbps": 192, "container": "mp4", "tune": "hq"},
             {"name": "H264 25MB Fast (NVENC)", "target_mb": 25, "video_codec": "h264_nvenc", "audio_codec": "aac", "preset": "p3", "audio_kbps": 128, "container": "mp4", "tune": "ll"},
             {"name": "AV1 9.7MB (SVT-AV1, CPU)", "target_mb": 9.7, "video_codec": "libsvtav1", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
-            {"name": "AV1 9.7MB (libaom, slow)", "target_mb": 9.7, "video_codec": "libaom-av1", "audio_codec": "libopus", "preset": "p4", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
         ]
         changed = True
     try:
@@ -78,11 +100,32 @@ def _ensure_defaults() -> Dict[str, Any]:
     if 'default_preset' not in data:
         data['default_preset'] = _pick_initial_default(data.get('preset_profiles', []))
         changed = True
+    if 'default_preset_managed' not in data:
+        # A legacy settings file may contain an explicit user choice. Only
+        # treat known stock defaults as application-managed; never replace a
+        # custom preset during an upgrade merely because hardware appeared.
+        stock_names = {
+            "AV1 9.7MB (NVENC)",
+            "AV1 9.7MB (SVT-AV1, CPU)",
+            "H.264 9.7MB (NVENC)",
+            "H.264 9.7MB (CPU)",
+        }
+        data['default_preset_managed'] = data.get('default_preset') in stock_names
+        changed = True
     if 'codec_visibility' not in data:
         data['codec_visibility'] = {
             'h264_nvenc': True,
             'hevc_nvenc': True,
             'av1_nvenc': True,
+            'h264_qsv': True,
+            'hevc_qsv': True,
+            'av1_qsv': True,
+            'h264_vaapi': True,
+            'hevc_vaapi': True,
+            'av1_vaapi': True,
+            'h264_amf': True,
+            'hevc_amf': True,
+            'av1_amf': True,
             'libx264': True,
             'libx265': True,
             'libsvtav1': True,
@@ -99,6 +142,14 @@ def _ensure_defaults() -> Dict[str, Any]:
         if 'libaom_av1' not in data['codec_visibility']:
             data['codec_visibility']['libaom_av1'] = False
             changed = True
+        for key in (
+            'h264_qsv', 'hevc_qsv', 'av1_qsv',
+            'h264_vaapi', 'hevc_vaapi', 'av1_vaapi',
+            'h264_amf', 'hevc_amf', 'av1_amf',
+        ):
+            if key not in data['codec_visibility']:
+                data['codec_visibility'][key] = True
+                changed = True
     if 'retention_hours' not in data:
         env_vars = read_env_file()
         try:
@@ -114,10 +165,13 @@ def _ensure_defaults() -> Dict[str, Any]:
 def _pick_initial_default(profiles: List[Dict[str, Any]]) -> str:
     """Pick the best initial default preset name from available profiles.
 
-    Priority: AV1 NVENC > HEVC NVENC > H264 NVENC > any CPU codec > first profile.
+    Priority: NVENC > QSV > AMF > VAAPI > CPU > first profile.
     """
     codec_priority = ['av1_nvenc', 'hevc_nvenc', 'h264_nvenc',
-                       'libsvtav1', 'libaom-av1', 'libx265', 'libx264']
+                       'av1_qsv', 'hevc_qsv', 'h264_qsv',
+                       'av1_amf', 'hevc_amf', 'h264_amf',
+                       'av1_vaapi', 'hevc_vaapi', 'h264_vaapi',
+                       'libsvtav1', 'libx265', 'libx264']
     for codec in codec_priority:
         for p in profiles:
             if p.get('video_codec') == codec:
@@ -228,7 +282,7 @@ def verify_password(password: str) -> bool:
     """Verify if password matches current AUTH_PASS"""
     env_vars = read_env_file()
     current_pass = os.getenv('AUTH_PASS', env_vars.get('AUTH_PASS', 'changeme'))
-    return password == current_pass
+    return secrets.compare_digest(str(password), str(current_pass))
 
 
 def initialize_env_if_missing():
@@ -330,6 +384,7 @@ def update_default_presets(
     if not replaced:
         data['preset_profiles'].append(new_values)
         data['default_preset'] = default_name
+    data['default_preset_managed'] = False
     _write_settings(data)
 
 
@@ -341,6 +396,15 @@ def get_codec_visibility_settings() -> dict:
         'h264_nvenc': vis.get('h264_nvenc', True),
         'hevc_nvenc': vis.get('hevc_nvenc', True),
         'av1_nvenc': vis.get('av1_nvenc', True),
+        'h264_qsv': vis.get('h264_qsv', True),
+        'hevc_qsv': vis.get('hevc_qsv', True),
+        'av1_qsv': vis.get('av1_qsv', True),
+        'h264_vaapi': vis.get('h264_vaapi', True),
+        'hevc_vaapi': vis.get('hevc_vaapi', True),
+        'av1_vaapi': vis.get('av1_vaapi', True),
+        'h264_amf': vis.get('h264_amf', True),
+        'hevc_amf': vis.get('hevc_amf', True),
+        'av1_amf': vis.get('av1_amf', True),
         'libx264': vis.get('libx264', True),
         'libx265': vis.get('libx265', True),
         'libsvtav1': vis.get('libsvtav1', True),
@@ -352,7 +416,13 @@ def update_codec_visibility_settings(settings: dict):
     """Update codec visibility in settings.json."""
     data = _ensure_defaults()
     vis = data.get('codec_visibility', {})
-    valid_keys = {'h264_nvenc', 'hevc_nvenc', 'av1_nvenc', 'libx264', 'libx265', 'libsvtav1', 'libaom_av1'}
+    valid_keys = {
+        'h264_nvenc', 'hevc_nvenc', 'av1_nvenc',
+        'h264_qsv', 'hevc_qsv', 'av1_qsv',
+        'h264_vaapi', 'hevc_vaapi', 'av1_vaapi',
+        'h264_amf', 'hevc_amf', 'av1_amf',
+        'libx264', 'libx265', 'libsvtav1', 'libaom_av1',
+    }
     for k in valid_keys:
         if k in settings:
             vis[k] = bool(settings[k])
@@ -384,8 +454,10 @@ def get_size_buttons() -> List[float]:
 
 
 def update_size_buttons(buttons: List[float]):
-    if not isinstance(buttons, list) or not all(isinstance(x, (int, float)) for x in buttons):
-        raise ValueError("buttons must be a list of numbers")
+    if not isinstance(buttons, list) or not buttons or not all(isinstance(x, (int, float)) for x in buttons):
+        raise ValueError("buttons must be a non-empty list of numbers")
+    if not all(math.isfinite(float(x)) and 0 < float(x) <= 51200 for x in buttons):
+        raise ValueError("size buttons must be finite values between 0 and 51200 MB")
     data = _ensure_defaults()
     # dedupe & sort ascending
     cleaned = sorted({round(float(x), 2) for x in buttons})
@@ -404,6 +476,7 @@ def set_default_preset(name: str):
     if name not in names:
         raise ValueError("preset not found")
     data['default_preset'] = name
+    data['default_preset_managed'] = False
     _write_settings(data)
 
 
