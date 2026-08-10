@@ -26,11 +26,11 @@ jobs:
         id: vars
         run: |
           # Stable application version baked into image; also keep sha tag for traceability
-          APP_VERSION=137
+          APP_VERSION=138
           echo "app_version=${APP_VERSION}" >> $GITHUB_OUTPUT
           SHA_TAG=sha-${GITHUB_SHA::7}
           echo "sha_tag=${SHA_TAG}" >> $GITHUB_OUTPUT
-          if [[ "${GITHUB_REF}" == refs/heads/main || "${GITHUB_REF}" == refs/heads/master ]]; then
+          if [[ "${GITHUB_REF}" == refs/heads/main || "${GITHUB_REF}" == refs/heads/master || "${GITHUB_EVENT_NAME}" == workflow_dispatch ]]; then
             echo "latest_tag=latest" >> $GITHUB_OUTPUT
             echo "stable_tag=v${APP_VERSION}" >> $GITHUB_OUTPUT
           fi
