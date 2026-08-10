@@ -1,0 +1,31 @@
+name: Build native Windows executable
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build, install, and exercise the release
+        shell: pwsh
+        run: .\windows\test-release.ps1 -Build -Install
+
+      - name: Upload desktop installer and executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: 8mblocal-windows
+          path: |
+            dist/8mblocal.exe
+            dist/8mblocal-Setup.exe
+          if-no-files-found: error

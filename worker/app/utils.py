@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 from typing import Any, Optional
@@ -47,6 +48,15 @@ def parse_fps_fraction(val: Any) -> Optional[float]:
         return float(s)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_finite_float(value: Any) -> Optional[float]:
+    """Parse ffprobe numeric fields while tolerating ``N/A`` and infinities."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _normalize_rotation_degrees(val: Any) -> Optional[int]:
@@ -191,8 +201,13 @@ def transpose_filters_for_rotation_degrees(rotation_deg: int) -> list[str]:
     return []
 
 
-def ffprobe_info(input_path: str) -> dict:
-    """Return duration, stream bitrates, codec, dimensions, and audio/video presence from ffprobe."""
+def ffprobe_info(input_path: str, allow_audio_only: bool = False) -> dict:
+    """Return media metadata, optionally accepting audio-only inputs.
+
+    Normal video jobs still reject audio-only media. The explicit flag keeps
+    that validation while allowing the audio extraction path to reuse the
+    same probe and upload contract.
+    """
     # Large probesize helps read moov/trak metadata for rotation on phone MP4/MOV (default probe can miss tags).
     # Full -show_streams (not selective -show_entries) so side_data_list includes Display Matrix rotation
     # for HEVC/Android MP4; selective entries have been observed to omit rotation while ffmpeg -i shows it.
@@ -205,7 +220,12 @@ def ffprobe_info(input_path: str) -> dict:
         "-of", "json",
         input_path,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=get_gpu_env())
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, env=get_gpu_env(), timeout=45
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("ffprobe timed out while analyzing the input") from exc
     if proc.returncode != 0:
         # Fallback for older ffprobe without side_data_list
         cmd_fb = [
@@ -214,15 +234,30 @@ def ffprobe_info(input_path: str) -> dict:
             "-of", "json",
             input_path,
         ]
-        proc = subprocess.run(cmd_fb, capture_output=True, text=True, env=get_gpu_env())
+        try:
+            proc = subprocess.run(
+                cmd_fb, capture_output=True, text=True, env=get_gpu_env(), timeout=30
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("ffprobe fallback timed out while analyzing the input") from exc
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr)
-        data = json.loads(proc.stdout)
-        format_tags = (data.get("format") or {}).get("tags") or {}
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("ffprobe returned invalid JSON") from exc
+        format_tags = ((data.get("format") or {}).get("tags") or {}) if isinstance(data, dict) else {}
     else:
-        data = json.loads(proc.stdout)
-        format_tags = (data.get("format") or {}).get("tags") or {}
-    duration = float((data.get("format") or {}).get("duration", 0.0))
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("ffprobe returned invalid JSON") from exc
+        format_tags = ((data.get("format") or {}).get("tags") or {}) if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        raise RuntimeError("ffprobe returned an unexpected JSON shape")
+    duration = _parse_finite_float((data.get("format") or {}).get("duration"))
+    if duration is None or duration <= 0:
+        raise RuntimeError("Input has no usable media duration")
     v_bitrate = None
     a_bitrate = None
     v_codec = None
@@ -235,22 +270,28 @@ def ffprobe_info(input_path: str) -> dict:
     rotation_degrees = 0
     video_seen = False
     for s in data.get("streams", []):
-        if s.get("codec_type") == "video" and s.get("bit_rate"):
-            v_bitrate = float(s["bit_rate"]) / 1000.0
+        if s.get("codec_type") == "video":
+            bitrate = _parse_finite_float(s.get("bit_rate"))
+            if bitrate is not None and bitrate >= 0:
+                v_bitrate = bitrate / 1000.0
             v_codec = s.get("codec_name")
-            if s.get("width"):
-                v_width = int(s.get("width"))
-            if s.get("height"):
-                v_height = int(s.get("height"))
+            width = _parse_finite_float(s.get("width"))
+            height = _parse_finite_float(s.get("height"))
+            if width is not None and width > 0:
+                v_width = int(width)
+            if height is not None and height > 0:
+                v_height = int(height)
         if s.get("codec_type") == "video":
             has_video = True
             # For some inputs, bit_rate may be missing on the stream; keep codec/size discovery regardless
             if s.get("codec_name") and not v_codec:
                 v_codec = s.get("codec_name")
-            if s.get("width") and not v_width:
-                v_width = int(s.get("width"))
-            if s.get("height") and not v_height:
-                v_height = int(s.get("height"))
+            width = _parse_finite_float(s.get("width"))
+            height = _parse_finite_float(s.get("height"))
+            if width is not None and width > 0 and not v_width:
+                v_width = int(width)
+            if height is not None and height > 0 and not v_height:
+                v_height = int(height)
             if not video_seen:
                 rotation_degrees = parse_stream_rotation_degrees(s, format_tags)
                 dar = s.get("display_aspect_ratio")
@@ -263,8 +304,9 @@ def ffprobe_info(input_path: str) -> dict:
         if s.get("codec_type") == "audio":
             has_audio = True
             # Bitrate on audio stream can be missing (VBR); only set when present
-            if s.get("bit_rate"):
-                a_bitrate = float(s["bit_rate"]) / 1000.0
+            bitrate = _parse_finite_float(s.get("bit_rate"))
+            if bitrate is not None and bitrate >= 0:
+                a_bitrate = bitrate / 1000.0
     if rotation_degrees == 0:
         inferred = infer_rotation_from_display_aspect_ratio(v_width, v_height, display_aspect_ratio)
         if inferred:
@@ -273,6 +315,8 @@ def ffprobe_info(input_path: str) -> dict:
         inferred_qt = infer_rotation_quicktime_landscape_storage(format_tags, v_width, v_height)
         if inferred_qt:
             rotation_degrees = inferred_qt
+    if not has_video and not (allow_audio_only and has_audio):
+        raise RuntimeError("Input has no usable video stream")
     disp_w, disp_h = coded_to_display_dimensions(v_width, v_height, rotation_degrees)
     return {
         "duration": duration,

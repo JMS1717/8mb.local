@@ -3,9 +3,10 @@
   import { onMount, onDestroy } from 'svelte';
   import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion, getBatchStatus, batchZipDownloadUrl } from '$lib/api';
   import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
+  import { availableCodecOptions, codecColor, codecIcon, encoderDisplayName, type CodecOption } from '$lib/codecs';
 
   /** Header badge default; bump with each release. API `/api/version` overrides when available. */
-  const DEFAULT_APP_VERSION = '137';
+  const DEFAULT_APP_VERSION = '138';
 
   let file: File | null = null;
   let uploadInput: HTMLInputElement | null = null; // reference to clear file input
@@ -208,7 +209,8 @@
   let appVersion: string = DEFAULT_APP_VERSION;
 
   // Available codecs from backend
-  let availableCodecs: Array<{value: string, label: string, group: string}> = [];
+  let availableCodecs: CodecOption[] = [];
+  let codecNotice: string | null = null;
   let hardwareType = 'cpu';
   let sysCaps: any = null;
   let sysCapsError: string | null = null;
@@ -216,8 +218,8 @@
   let encoderTests: Array<{ 
     codec: string; 
     actual_encoder: string; 
-    passed: boolean; 
-    encode_passed: boolean;
+    passed: boolean | null;
+    encode_passed: boolean | null;
     encode_message?: string;
     decode_passed?: boolean;
     decode_message?: string;
@@ -275,15 +277,17 @@
       // Tentatively set hardware based on worker-reported type; we'll refine after sysCaps
       hardwareType = codecData.hardware_type || 'cpu';
       availableCodecs = buildCodecList(codecData);
+      if (!availableCodecs.length) {
+        availableCodecs = availableCodecOptions(['libx264', 'libx265']);
+      }
     } catch (err) {
       console.warn('Failed to load available codecs, using fallback');
-      availableCodecs = [
-        { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
-        { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
-        { value: 'libaom-av1', label: 'AV1 (CPU)', group: 'cpu' },
-        { value: 'libsvtav1', label: 'AV1 (CPU - SVT-AV1)', group: 'cpu' },
-      ];
+      // A failed capability request must not expose hardware options that
+      // cannot be verified. CPU codecs are the reliable local fallback.
+      availableCodecs = availableCodecOptions(['libx264', 'libx265']);
     }
+
+    ensureSelectedCodec();
 
     // Load system capabilities (CPU, memory, GPUs)
     try {
@@ -313,8 +317,14 @@
     // Load preset profiles and size buttons
     try {
       const pp = await getPresetProfiles();
-      presetProfiles = pp.profiles || [];
-      selectedPreset = pp.default || (presetProfiles[0]?.name ?? null);
+      const availableValues = new Set(availableCodecs.map((codec) => codec.value));
+      presetProfiles = (pp.profiles || []).filter((profile: any) =>
+        availableValues.has(String(profile.video_codec)),
+      );
+      const requestedDefault = pp.default || null;
+      selectedPreset = presetProfiles.some((profile) => profile.name === requestedDefault)
+        ? requestedDefault
+        : (presetProfiles[0]?.name ?? null);
       if (selectedPreset) applyPreset(selectedPreset);
     } catch {}
     try {
@@ -354,6 +364,15 @@
     container = p.container;
     tune = p.tune;
     maxFpsCap = maxFpsFromProfile(p.max_output_fps);
+    ensureSelectedCodec();
+  }
+
+  function ensureSelectedCodec() {
+    if (!availableCodecs.length) return;
+    if (availableCodecs.some((codec) => codec.value === videoCodec)) return;
+    const previous = videoCodec;
+    videoCodec = availableCodecs[0].value;
+    codecNotice = `The selected encoder (${previous}) is not available on this worker. Switched to ${availableCodecs[0].label}.`;
   }
 
   function formatDurationTime(seconds: number): string {
@@ -368,31 +387,8 @@
     }
   }
 
-  function buildCodecList(codecData: any): Array<{value: string, label: string, group: string}> {
-    const list: Array<{value: string, label: string, group: string}> = [];
-    const enabledCodecs = codecData.enabled_codecs || [];
-    
-    // Build list of all possible codecs with labels
-    const codecDefinitions = [
-      // NVIDIA NVENC
-      { value: 'av1_nvenc', label: 'AV1 (NVIDIA - RTX 40/50 series)', group: 'nvidia' },
-      { value: 'hevc_nvenc', label: 'HEVC (H.265, NVIDIA)', group: 'nvidia' },
-      { value: 'h264_nvenc', label: 'H.264 (NVIDIA)', group: 'nvidia' },
-      // CPU / software
-      { value: 'libaom-av1', label: 'AV1 (CPU - Highest Quality)', group: 'cpu' },
-      { value: 'libsvtav1', label: 'AV1 (CPU - SVT-AV1)', group: 'cpu' },
-      { value: 'libx265', label: 'HEVC (H.265, CPU)', group: 'cpu' },
-      { value: 'libx264', label: 'H.264 (CPU)', group: 'cpu' },
-    ];
-    
-    // Filter to only include codecs that are enabled in settings
-    for (const codec of codecDefinitions) {
-      if (enabledCodecs.includes(codec.value)) {
-        list.push(codec);
-      }
-    }
-    
-    return list;
+  function buildCodecList(codecData: any): CodecOption[] {
+    return availableCodecOptions(codecData?.enabled_codecs);
   }
 
   // Auto-adjust audio bitrate for extreme compressions:
@@ -442,19 +438,11 @@
   })();
 
   function getCodecColor(group: string): string {
-    switch(group) {
-      case 'nvidia': return '#22c55e'; // green
-      case 'cpu': return '#6b7280';    // gray
-      default: return '#6b7280';
-    }
+    return codecColor(group);
   }
 
   function getCodecIcon(group: string): string {
-    switch(group) {
-      case 'nvidia': return '🟢';
-      case 'cpu': return '⚪';
-      default: return '⚪';
-    }
+    return codecIcon(group as any);
   }
 
   function formatSize(bytes: number): string {
@@ -556,9 +544,7 @@
     uploadProgress = 0;
     errorText = null;
     try {
-      console.log('Analyzing file...', file.name);
       jobInfo = await uploadWithProgress(file, targetMB, audioKbps, { onProgress: (p:number)=>{ uploadProgress = p; } });
-      console.log('Analysis complete:', jobInfo);
       uploadedFileName = file.name; // Mark this file as uploaded
       // Set warn based on current client-side estimate
       warnText = (estimated && estimated.video_kbps < 100) ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
@@ -619,32 +605,25 @@
         start_time: startTime.trim() || undefined,
         end_time: endTime.trim() || undefined,
       };
-      console.log('Starting compression...', payload);
       const { task_id } = await startCompress(payload);
       taskId = task_id;
-      
-      console.log('🔴 [DEBUG] About to open SSE for task_id:', task_id);
       
       // Open SSE progress stream
       logLines = ['✓ Job started. Opening progress stream...', ...logLines].slice(0, 500);
       
       const es = openProgressStream(task_id);
-      console.log('🔴 [DEBUG] openProgressStream returned:', es);
       esRef = es;
       
       es.onopen = () => {
-        console.log('SSE connection opened for task:', task_id);
         logLines = ['✅ Connected to progress stream', ...logLines].slice(0, 500);
       };
       
       es.onmessage = (ev) => {
         try {
           const data = JSON.parse(ev.data);
-          console.log('SSE event:', data.type, data);
           
           // Handle connection confirmation
           if (data.type === 'connected') {
-            console.log('SSE connection confirmed, task_id:', data.task_id);
             return; // Just log, don't show to user
           }
           
@@ -745,7 +724,6 @@
           
           // Handle completion
           if (data.type === 'done') {
-            console.log('Received done event, completing job');
             doneStats = data.stats;
             progress = 100;
             displayedProgress = 100;
@@ -837,7 +815,6 @@
       
       es.onerror = (err) => {
         console.error('SSE error:', err);
-        console.log('SSE readyState:', es.readyState, 'taskId:', taskId);
         
         // Don't immediately fail - the job might still be running
         // Only show warning, don't stop isCompressing
@@ -885,23 +862,18 @@
     // CRITICAL: Only trigger watchdog at EXACTLY 100%, not at high progress like 98%
     // This prevents "zombie stream" bug where client resets while server still encoding
     const shouldPoll = !!taskId && displayedProgress >= 99.9 && !isReady && !doneStats && isCompressing;
-    console.log('[Watchdog] Reactive check - shouldPoll:', shouldPoll, 'displayedProgress:', displayedProgress, 'isReady:', isReady, 'isCompressing:', isCompressing);
     if (shouldPoll && !finalizePoller) {
-      console.log('[Watchdog] Starting finalization poll for', taskId);
       finalizePoller = setInterval(async () => {
         if (!taskId) return;
         try {
-          console.log('[Watchdog] Polling download endpoint...');
           // Try GET request with short wait instead of HEAD (more reliable)
           const dlRes = await fetch(`${downloadUrl(taskId)}?wait=2`, { 
             method: 'GET',
             cache: 'no-store',
             redirect: 'manual' // Don't follow redirects, just check response
           });
-          console.log('[Watchdog] Response status:', dlRes.status, 'ok:', dlRes.ok);
           
           if (dlRes.ok && dlRes.status === 200) {
-            console.log('[Watchdog] File ready! Auto-downloading...');
             isReady = true;
             isFinalizing = false;
             showTryDownload = false;
@@ -911,17 +883,12 @@
             // Trigger download by navigating to URL
             window.location.href = downloadUrl(taskId!);
           } else if (dlRes.status === 404) {
-            const body = await dlRes.json().catch(() => ({}));
-            console.log('[Watchdog] File not ready yet (404):', body.detail?.state || 'unknown state');
-          } else {
-            console.log('[Watchdog] Unexpected status, will retry...');
+            // The output is still being finalized; the next interval retries.
           }
-        } catch (e) {
-          console.log('[Watchdog] Poll error:', e);
+        } catch {
         }
       }, 1000);
     } else if (!shouldPoll && finalizePoller) {
-      console.log('[Watchdog] Stopping finalization poll (shouldPoll=false)');
       clearInterval(finalizePoller);
       finalizePoller = null;
     }
@@ -1142,9 +1109,11 @@
               {#each encoderTests as t}
                 <li class="flex flex-col">
                   <div class="flex items-center justify-between">
-                    <span class="font-medium">{t.codec} <span class="opacity-60">({t.actual_encoder})</span></span>
-                    {#if t.passed}
+                    <span class="font-medium">{encoderDisplayName(t.codec)}{#if t.actual_encoder !== t.codec} <span class="opacity-60">({t.actual_encoder})</span>{/if}</span>
+                    {#if t.passed === true}
                       <span class="text-green-400">PASS</span>
+                    {:else if t.passed === null}
+                      <span class="text-gray-400">N/A</span>
                     {:else}
                       <span class="text-red-400">FAIL</span>
                     {/if}
@@ -1163,6 +1132,8 @@
                     <span>Encode:</span>
                     {#if t.encode_passed === true}
                       <span class="text-green-400 text-xs">✓ {t.encode_message || 'OK'}</span>
+                    {:else if t.encode_passed === null}
+                      <span class="text-gray-400 text-xs">— {t.encode_message || 'Not tested'}</span>
                     {:else}
                       <span class="text-red-400 text-xs" title={t.encode_message || 'Failed'}>✗ {t.encode_message || 'Failed'}</span>
                     {/if}
@@ -1189,6 +1160,7 @@
 
   <div class="card">
     <div class="border-2 border-dashed border-gray-700 rounded p-8 text-center"
+         role="region" aria-label="Video upload drop zone"
          on:drop={onDrop} on:dragover={allowDrop}>
       <p class="mb-2">Drag & drop a video here</p>
   <input bind:this={uploadInput} type="file" accept="video/*" on:change={(e:any)=>{ const f=e.target.files?.[0]||null; file=f; fileSizeLabel = f? formatSize(f.size): null; if(f) setTimeout(()=>doUpload(), 100); }} />
@@ -1229,13 +1201,13 @@
           {/each}
         </div>
         <div class="flex items-center gap-2 flex-wrap">
-          <label class="text-sm">Custom size (MB)</label>
-          <input class="input w-28" type="number" bind:value={targetMB} min="1" disabled={audioOnly} />
+          <label class="text-sm" for="target-mb">Custom size (MB)</label>
+          <input id="target-mb" class="input w-28" type="number" bind:value={targetMB} min="1" disabled={audioOnly} />
         </div>
       {:else}
         <div class="flex items-center gap-2 flex-wrap">
-          <label class="text-sm">Video bitrate (kbps)</label>
-          <input class="input w-32" type="number" bind:value={targetVideoKbps} min="50" max="200000" step="50" disabled={audioOnly} />
+          <label class="text-sm" for="target-video-kbps">Video bitrate (kbps)</label>
+          <input id="target-video-kbps" class="input w-32" type="number" bind:value={targetVideoKbps} min="50" max="200000" step="50" disabled={audioOnly} />
         </div>
         <p class="text-xs text-gray-500">Audio is still set separately below; total size is not capped in this mode.</p>
       {/if}
@@ -1250,8 +1222,8 @@
   <!-- Primary controls: Codec and Speed/Quality preset (visible without expanding) -->
   <div class="card grid sm:grid-cols-3 gap-4">
     <div>
-      <label class="block mb-1 text-sm">Video Codec</label>
-      <select class="input w-full codec-select" bind:value={videoCodec}>
+      <label class="block mb-1 text-sm" for="video-codec">Video Codec</label>
+      <select id="video-codec" class="input w-full codec-select" bind:value={videoCodec} on:change={() => { codecNotice = null; }}>
         {#each availableCodecs as codec}
           <option value={codec.value} data-group={codec.group}>
             {getCodecIcon(codec.group)} {codec.label}
@@ -1269,15 +1241,18 @@
           CPU encoding (no GPU detected)
         </p>
       {/if}
+      {#if codecNotice}
+        <p class="text-xs text-amber-300 mt-1" role="status">{codecNotice}</p>
+      {/if}
       <!-- Audio-only toggle moved here (out of Advanced) -->
       <div class="mt-2">
         <label class="flex items-center gap-2 cursor-pointer text-sm"><input type="checkbox" bind:checked={audioOnly} /><span>Extract audio only (.m4a)</span></label>
       </div>
     </div>
     <div>
-      <label class="block mb-1 text-sm">Resolution</label>
+      <label class="block mb-1 text-sm" for="resolution-select">Resolution</label>
       <div class="flex items-center gap-2">
-        <select class="input w-full" disabled={audioOnly || autoResolution}
+        <select id="resolution-select" class="input w-full" disabled={audioOnly || autoResolution}
           on:change={(e:any)=>{ const v = e.target.value; explicitHeight = parseExplicitHeight(v); }}>
           <option value="">Original</option>
           <option value="2160">2160p (4K)</option>
@@ -1308,11 +1283,14 @@
       {/if}
     </div>
     <div>
-      <label class="block mb-1 text-sm">Encoder preset (speed ↔ quality)</label>
-      <select class="input w-full" bind:value={preset} title="Encoder effort: faster presets spend less time per frame; slower presets often look better at the same file size.">
-        <option value="p1">Fast (P1)</option>
-        <option value="p5">Balanced (P5)</option>
-        <option value="p6">Default (P6)</option>
+      <label class="block mb-1 text-sm" for="encoder-preset">Encoder preset (speed ↔ quality)</label>
+      <select id="encoder-preset" class="input w-full" bind:value={preset} title="Encoder effort: faster presets spend less time per frame; slower presets often look better at the same file size.">
+        <option value="p1">Fastest (P1)</option>
+        <option value="p2">Faster (P2)</option>
+        <option value="p3">Fast (P3)</option>
+        <option value="p4">Balanced (P4)</option>
+        <option value="p5">Better (P5)</option>
+        <option value="p6">High Quality (P6)</option>
         <option value="p7">Best Quality (P7)</option>
         <option value="extraquality">Extra Quality (constant quality — CQ)</option>
       </select>
@@ -1337,23 +1315,23 @@
         <!-- Moved Speed/Quality to primary controls; remove here -->
         <!-- Audio Only moved to primary controls -->
         <div>
-          <label class="block mb-1 text-sm">Audio Codec</label>
-          <select class="input w-full" bind:value={audioCodec}>
+          <label class="block mb-1 text-sm" for="audio-codec">Audio Codec</label>
+          <select id="audio-codec" class="input w-full" bind:value={audioCodec}>
             <option value="libopus">Opus (Default)</option>
             <option value="aac">AAC</option>
             <option value="none">🔇 None (Mute)</option>
           </select>
         </div>
         <div>
-          <label class="block mb-1 text-sm">Container</label>
-          <select class="input w-full" bind:value={container}>
+          <label class="block mb-1 text-sm" for="container">Container</label>
+          <select id="container" class="input w-full" bind:value={container}>
             <option value="mp4">MP4 (Most compatible)</option>
             <option value="mkv">MKV (Best with Opus)</option>
           </select>
         </div>
         <div>
-          <label class="block mb-1 text-sm">Audio Bitrate (kbps)</label>
-          <select class="input w-full" bind:value={audioKbps} disabled={audioCodec === 'none' || autoAudioBitrate} on:change={(e:any)=>{ const v = parseInt(e.target.value); if (!Number.isNaN(v)) baseAudioKbps = v as any; }}>
+          <label class="block mb-1 text-sm" for="audio-bitrate">Audio Bitrate (kbps)</label>
+          <select id="audio-bitrate" class="input w-full" bind:value={audioKbps} disabled={audioCodec === 'none' || autoAudioBitrate} on:change={(e:any)=>{ const v = parseInt(e.target.value); if (!Number.isNaN(v)) baseAudioKbps = v as any; }}>
             <option value={32}>32</option>
             <option value={48}>48</option>
             <option value={64}>64</option>
@@ -1370,11 +1348,12 @@
           {/if}
         </div>
         <div>
-          <label class="block mb-1 text-sm flex items-center gap-1">
+          {#if nvencTuneApplies}
+          <label class="block mb-1 text-sm flex items-center gap-1" for="nvenc-tune">
             NVENC tuning <span class="text-[11px] opacity-70">(NVIDIA only)</span>
           </label>
-          {#if nvencTuneApplies}
             <select
+              id="nvenc-tune"
               class="input w-full"
               bind:value={tune}
               title="NVIDIA NVENC: HQ for normal files; low latency for screen/live; lossless ignores small size targets."
@@ -1388,14 +1367,17 @@
               Separate from the P-preset above: chooses quality vs turnaround for NVENC. For typical uploads, leave on High quality.
             </p>
           {:else}
+            <div class="block mb-1 text-sm flex items-center gap-1">
+              NVENC tuning <span class="text-[11px] opacity-70">(NVIDIA only)</span>
+            </div>
             <p class="text-xs opacity-70 rounded border border-gray-700 bg-gray-900/50 px-2 py-2">
               Not used for this codec. CPU / software encoders follow the encoder preset only (no separate NVENC tune).
             </p>
           {/if}
         </div>
         <div class="sm:col-span-2 lg:col-span-4">
-          <label class="block mb-1 text-sm">Max frame rate</label>
-          <select class="input w-full max-w-md" bind:value={maxFpsCap} disabled={audioOnly}>
+          <label class="block mb-1 text-sm" for="max-fps-cap">Max frame rate</label>
+          <select id="max-fps-cap" class="input w-full max-w-md" bind:value={maxFpsCap} disabled={audioOnly}>
             <option value="">Same as input (default)</option>
             {#each FPS_CAP_VALUES as v}
               <option value={v}>{v} fps (cap)</option>
@@ -1409,8 +1391,8 @@
         <div class="mt-4 pt-4 border-t border-gray-700">
           <h4 class="text-sm font-medium mb-2">Profiles</h4>
           <div class="max-w-sm">
-            <label class="block mb-1 text-xs">Select profile</label>
-            <select class="input w-full text-xs py-1 h-8" bind:value={selectedPreset} on:change={(e:any)=>applyPreset(e.target.value)}>
+            <label class="block mb-1 text-xs" for="selected-profile">Select profile</label>
+            <select id="selected-profile" class="input w-full text-xs py-1 h-8" bind:value={selectedPreset} on:change={(e:any)=>applyPreset(e.target.value)}>
               {#each presetProfiles as p}
                 <option value={p.name}>{p.name}</option>
               {/each}
@@ -1425,21 +1407,21 @@
         <h4 class="text-sm font-medium mb-3">Resolution & Trimming</h4>
         <div class="grid sm:grid-cols-4 gap-4">
           <div>
-            <label class="block mb-1 text-sm">Max Width (px)</label>
-            <input class="input w-full" type="number" bind:value={maxWidth} placeholder="Original" min="1" disabled={autoResolution || !!explicitHeight} />
+            <label class="block mb-1 text-sm" for="max-width">Max Width (px)</label>
+            <input id="max-width" class="input w-full" type="number" bind:value={maxWidth} placeholder="Original" min="1" disabled={autoResolution || !!explicitHeight} />
           </div>
           <div>
-            <label class="block mb-1 text-sm">Max Height (px)</label>
-            <input class="input w-full" type="number" bind:value={maxHeight} placeholder="Original" min="1" disabled={autoResolution || !!explicitHeight} />
+            <label class="block mb-1 text-sm" for="max-height">Max Height (px)</label>
+            <input id="max-height" class="input w-full" type="number" bind:value={maxHeight} placeholder="Original" min="1" disabled={autoResolution || !!explicitHeight} />
           </div>
           <div>
-            <label class="block mb-1 text-sm">Start Time</label>
-            <input class="input w-full" type="text" bind:value={startTime} placeholder="0 or 00:00:00" />
+            <label class="block mb-1 text-sm" for="start-time">Start Time</label>
+            <input id="start-time" class="input w-full" type="text" bind:value={startTime} placeholder="0 or 00:00:00" />
             <p class="mt-1 text-xs opacity-70">Format: seconds or HH:MM:SS</p>
           </div>
           <div>
-            <label class="block mb-1 text-sm">End Time</label>
-            <input class="input w-full" type="text" bind:value={endTime} placeholder="Full duration" />
+            <label class="block mb-1 text-sm" for="end-time">End Time</label>
+            <input id="end-time" class="input w-full" type="text" bind:value={endTime} placeholder="Full duration" />
             <p class="mt-1 text-xs opacity-70">Format: seconds or HH:MM:SS</p>
           </div>
         </div>
@@ -1689,6 +1671,7 @@
     id="support-popover"
     class="fixed bottom-16 right-4 w-64 bg-gray-900/95 text-gray-100 border border-gray-700 rounded-lg shadow-xl p-3 z-50"
     role="dialog"
+    tabindex="-1"
     aria-label="Support the project"
     on:keydown={onKey}
   >
@@ -1735,6 +1718,14 @@
   /* Color-code codec options based on hardware type */
   .codec-select option[data-group="nvidia"] {
     color: #22c55e;
+    font-weight: 500;
+  }
+  .codec-select option[data-group="intel"] {
+    color: #60a5fa;
+    font-weight: 500;
+  }
+  .codec-select option[data-group="vaapi"] {
+    color: #c084fc;
     font-weight: 500;
   }
   .codec-select option[data-group="cpu"] {

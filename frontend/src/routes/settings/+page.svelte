@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { FPS_CAP_VALUES, type FpsCap } from '$lib/fpsCap';
+  import { encoderDisplayName } from '$lib/codecs';
 
   type AuthSettings = { auth_enabled: boolean; auth_user: string | null };
   type DefaultPresets = {
@@ -16,6 +17,15 @@
 	h264_nvenc: boolean;
 	hevc_nvenc: boolean;
 	av1_nvenc: boolean;
+	h264_qsv: boolean;
+	hevc_qsv: boolean;
+	av1_qsv: boolean;
+	h264_vaapi: boolean;
+	hevc_vaapi: boolean;
+	av1_vaapi: boolean;
+	h264_amf: boolean;
+	hevc_amf: boolean;
+	av1_amf: boolean;
 	libx264: boolean;
 	libx265: boolean;
 	libsvtav1: boolean;
@@ -52,6 +62,15 @@
 	h264_nvenc: true,
 	hevc_nvenc: true,
 	av1_nvenc: true,
+	h264_qsv: true,
+	hevc_qsv: true,
+	av1_qsv: true,
+	h264_vaapi: true,
+	hevc_vaapi: true,
+	av1_vaapi: true,
+	h264_amf: true,
+	hevc_amf: true,
+	av1_amf: true,
 	libx264: true,
 	libx265: true,
 	libsvtav1: true,
@@ -100,6 +119,15 @@
 			h264_nvenc: !!c.h264_nvenc,
 			hevc_nvenc: !!c.hevc_nvenc,
 			av1_nvenc: !!c.av1_nvenc,
+			h264_qsv: c.h264_qsv !== undefined ? !!c.h264_qsv : true,
+			hevc_qsv: c.hevc_qsv !== undefined ? !!c.hevc_qsv : true,
+			av1_qsv: c.av1_qsv !== undefined ? !!c.av1_qsv : true,
+			h264_vaapi: c.h264_vaapi !== undefined ? !!c.h264_vaapi : true,
+			hevc_vaapi: c.hevc_vaapi !== undefined ? !!c.hevc_vaapi : true,
+			av1_vaapi: c.av1_vaapi !== undefined ? !!c.av1_vaapi : true,
+			h264_amf: c.h264_amf !== undefined ? !!c.h264_amf : true,
+			hevc_amf: c.hevc_amf !== undefined ? !!c.hevc_amf : true,
+			av1_amf: c.av1_amf !== undefined ? !!c.av1_amf : true,
 			libx264: !!c.libx264,
 			libx265: !!c.libx265,
 			libsvtav1: c.libsvtav1 !== undefined ? !!c.libsvtav1 : true,
@@ -179,8 +207,13 @@
   async function saveAuth() {
 	error = '';
 	message = '';
+	const wasAuthEnabled = authEnabled;
 	if (authEnabled && !username.trim()) {
 	  error = 'Username is required when authentication is enabled';
+	  return;
+	}
+	if (authEnabled && !wasAuthEnabled && !newPassword.trim()) {
+	  error = 'Set a password before enabling authentication';
 	  return;
 	}
 	if (authEnabled && newPassword && newPassword !== confirmPassword) {
@@ -201,6 +234,13 @@
 		message = data.message || 'Saved authentication settings';
 		newPassword = '';
 		confirmPassword = '';
+		if (authEnabled && !wasAuthEnabled) {
+		  // A page that was opened while auth was disabled will not reliably
+		  // trigger the browser's Basic-auth challenge on a later fetch. Reload
+		  // the protected SPA route so the browser can show its native prompt.
+		  message = 'Authentication enabled. Reloading to sign in…';
+		  window.setTimeout(() => window.location.reload(), 250);
+		}
 	  } else {
 		const data = await res.json();
 		error = data.detail || 'Failed to save authentication';
@@ -396,8 +436,7 @@
   {#if message}<div class="msg ok">{message}</div>{/if}
   {#if error}<div class="msg err">{error}</div>{/if}
 
-  <!-- Authentication (only show if enabled) -->
-  {#if authEnabled}
+	<!-- Authentication -->
 	<div class="card">
 	  <div class="title">Authentication</div>
 	  <div class="switch" style="margin-bottom:12px">
@@ -425,26 +464,22 @@
 	  <div style="margin-top:12px">
 		<button class="btn" on:click={saveAuth} disabled={saving}>{saving ? 'Saving…' : 'Save authentication'}</button>
 	  </div>
-	</div>
-  {:else}
-	<!-- Note when auth is disabled -->
-	<div class="card">
-	  <div class="title">Authentication</div>
-	  <p class="label" style="color:#9ca3af; margin-bottom:12px">
-		Authentication is currently disabled. To enable authentication and secure your instance, you'll need to configure it via the Docker container environment variables or configuration file.
-	  </p>
-	  <p class="label" style="color:#9ca3af; font-size:13px">
-		See the <a href="https://github.com/JMS1717/8mb.local" target="_blank" rel="noopener noreferrer" style="color:#3b82f6; text-decoration:underline">documentation</a> for setup instructions.
+	  <p class="label" style="color:#9ca3af; margin-top:12px; margin-bottom:0">
+		{#if authEnabled}
+		  Basic authentication is active. Saving changes reloads the page only when it is first enabled so the browser can ask for credentials.
+		{:else}
+		  Authentication is disabled. Set a username and password, then enable it to protect the UI and API.
+		{/if}
 	  </p>
 	</div>
-  {/if}
 
   <!-- Codec Visibility -->
   <div class="card">
 	<div class="title">Available Codecs</div>
 	<p class="label" style="margin-bottom:16px; color:#9ca3af">
-	  Select which codecs appear in the compression page dropdown. GPU options use NVIDIA NVENC; software options use the CPU.
-	  <a href="/gpu-support" style="color:#3b82f6; text-decoration:underline">View NVIDIA encoding support →</a>
+	  Select which codecs appear in the compression page dropdown. Hardware options
+	  use NVIDIA NVENC, Intel QSV, AMD AMF on Windows, or Linux VAAPI; software options use the CPU.
+	  <a href="/gpu-support" style="color:#3b82f6; text-decoration:underline">View hardware encoding support →</a>
 	</p>
 
 	<!-- NVIDIA Section -->
@@ -466,17 +501,36 @@
 	  </div>
 	</div>
 
+	<!-- Intel QSV / Linux VAAPI Section -->
+	<div style="margin-bottom:20px">
+	  <h3 style="color:#60a5fa; font-weight:600; font-size:15px; margin-bottom:8px">Intel Quick Sync / VAAPI</h3>
+	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
+		<div class="switch"><input id="av1_qsv" type="checkbox" bind:checked={codecSettings.av1_qsv} /><label class="label" for="av1_qsv" style="margin:0">AV1 (Intel QSV)</label></div>
+		<div class="switch"><input id="hevc_qsv" type="checkbox" bind:checked={codecSettings.hevc_qsv} /><label class="label" for="hevc_qsv" style="margin:0">HEVC (Intel QSV)</label></div>
+		<div class="switch"><input id="h264_qsv" type="checkbox" bind:checked={codecSettings.h264_qsv} /><label class="label" for="h264_qsv" style="margin:0">H.264 (Intel QSV)</label></div>
+		<div class="switch"><input id="av1_vaapi" type="checkbox" bind:checked={codecSettings.av1_vaapi} /><label class="label" for="av1_vaapi" style="margin:0">AV1 (VAAPI)</label></div>
+		<div class="switch"><input id="hevc_vaapi" type="checkbox" bind:checked={codecSettings.hevc_vaapi} /><label class="label" for="hevc_vaapi" style="margin:0">HEVC (VAAPI)</label></div>
+		<div class="switch"><input id="h264_vaapi" type="checkbox" bind:checked={codecSettings.h264_vaapi} /><label class="label" for="h264_vaapi" style="margin:0">H.264 (VAAPI)</label></div>
+	  </div>
+	</div>
+
+	<!-- Windows AMD Section -->
+	<div style="margin-bottom:20px">
+	  <h3 style="color:#f87171; font-weight:600; font-size:15px; margin-bottom:8px">AMD AMF (Windows)</h3>
+	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
+		<div class="switch"><input id="av1_amf" type="checkbox" bind:checked={codecSettings.av1_amf} /><label class="label" for="av1_amf" style="margin:0">AV1 (AMD AMF)</label></div>
+		<div class="switch"><input id="hevc_amf" type="checkbox" bind:checked={codecSettings.hevc_amf} /><label class="label" for="hevc_amf" style="margin:0">HEVC (AMD AMF)</label></div>
+		<div class="switch"><input id="h264_amf" type="checkbox" bind:checked={codecSettings.h264_amf} /><label class="label" for="h264_amf" style="margin:0">H.264 (AMD AMF)</label></div>
+	  </div>
+	</div>
+
 	<!-- CPU Section -->
 	<div style="margin-bottom:20px">
 	  <h3 style="color:#9ca3af; font-weight:600; font-size:15px; margin-bottom:8px">CPU (Software Encoding)</h3>
 	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
 		<div class="switch">
 		  <input id="libsvtav1" type="checkbox" bind:checked={codecSettings.libsvtav1} />
-		  <label class="label" for="libsvtav1" style="margin:0">AV1 (SVT-AV1, fast)</label>
-		</div>
-		<div class="switch">
-		  <input id="libaom_av1" type="checkbox" bind:checked={codecSettings.libaom_av1} />
-		  <label class="label" for="libaom_av1" style="margin:0">AV1 (libaom, slow)</label>
+		  <label class="label" for="libsvtav1" style="margin:0">AV1 (SVT-AV1, fast CPU fallback)</label>
 		</div>
 		<div class="switch">
 		  <input id="libx265" type="checkbox" bind:checked={codecSettings.libx265} />
@@ -509,10 +563,12 @@
 			<ul class="text-sm space-y-1">
 				{#each hwTests as t}
 					<li class="flex items-center justify-between">
-						<span>{t.codec} <span class="opacity-60">({t.actual_encoder})</span></span>
-						{#if t.passed}
-							<span class="text-green-400">PASS</span>
-						{:else}
+						<span>{encoderDisplayName(t.codec)}{#if t.actual_encoder !== t.codec} <span class="opacity-60">({t.actual_encoder})</span>{/if}</span>
+					{#if t.passed === true}
+						<span class="text-green-400">PASS</span>
+					{:else if t.passed === null}
+						<span class="text-gray-400">N/A</span>
+					{:else}
 							<span class="text-red-400">FAIL</span>
 						{/if}
 					</li>
@@ -561,8 +617,8 @@
 		</div>
 		<div class="row">
 			<div>
-				<label class="label">Add size (MB)</label>
-				<input class="input" type="number" min="1" bind:value={newSizeValue} />
+				<label class="label" for="new-size-value">Add size (MB)</label>
+				<input id="new-size-value" class="input" type="number" min="1" bind:value={newSizeValue} />
 			</div>
 			<div style="display:flex; align-items:flex-end">
 				<button class="btn" on:click={addSizeButton} disabled={saving}>Add</button>
@@ -578,9 +634,9 @@
 		<div class="title">Preset profiles</div>
 		<p class="label" style="color:#9ca3af">Create multiple presets you can select on the main screen (at least 5 supported).</p>
 		<div style="margin-bottom:8px">
-			<label class="label">Default preset</label>
+			<label class="label" for="default-preset">Default preset</label>
 			<div class="row">
-				<select class="select" bind:value={defaultPresetName}>
+				<select id="default-preset" class="select" bind:value={defaultPresetName}>
 					{#each presetProfiles as p}
 						<option value={p.name}>{p.name}</option>
 					{/each}
@@ -591,9 +647,9 @@
 		<div style="margin-top:12px">
 			<div class="row">
 				<div>
-					<label class="label">Max frame rate (stored in new presets)</label>
+					<label class="label" for="profile-max-fps">Max frame rate (stored in new presets)</label>
 					<p class="label" style="color:#6b7280; font-size:12px; margin:4px 0 8px">Defaults to same as input unless you choose a cap.</p>
-					<select class="select" bind:value={profileMaxFpsCap}>
+					<select id="profile-max-fps" class="select" bind:value={profileMaxFpsCap}>
 						<option value="">Same as input (default)</option>
 						{#each FPS_CAP_VALUES as v}
 							<option value={v}>{v} fps cap</option>
@@ -603,8 +659,8 @@
 			</div>
 			<div class="row" style="margin-top:12px">
 				<div>
-					<label class="label">New preset name</label>
-					<input class="input" type="text" bind:value={newPresetName} placeholder="e.g., H265 9.7MB (NVENC)" />
+					<label class="label" for="new-preset-name">New preset name</label>
+					<input id="new-preset-name" class="input" type="text" bind:value={newPresetName} placeholder="e.g., H265 9.7MB (NVENC)" />
 				</div>
 				<div style="display:flex; align-items:flex-end">
 					<button class="btn" on:click={addPresetFromCurrent} disabled={saving}>{saving ? 'Saving…' : 'Add from current defaults'}</button>
@@ -632,8 +688,8 @@
 		<p class="label" style="color:#9ca3af">How long files remain on the server before automatic deletion.</p>
 		<div class="row">
 			<div>
-				<label class="label">Hours</label>
-				<input class="input" type="number" min="0" bind:value={retentionHours} />
+				<label class="label" for="retention-hours">Hours</label>
+				<input id="retention-hours" class="input" type="number" min="0" bind:value={retentionHours} />
 			</div>
 			<div style="display:flex; align-items:flex-end">
 				<button class="btn" on:click={saveRetention} disabled={saving}>{saving ? 'Saving…' : 'Save retention'}</button>
@@ -650,8 +706,8 @@
 		
 		<div class="row">
 			<div>
-				<label class="label">Max concurrent jobs</label>
-				<input class="input" type="number" min="1" max="20" bind:value={workerConcurrency} />
+				<label class="label" for="worker-concurrency">Max concurrent jobs</label>
+				<input id="worker-concurrency" class="input" type="number" min="1" max="20" bind:value={workerConcurrency} />
 			</div>
 			<div style="display:flex; align-items:flex-end">
 				<button class="btn" on:click={saveConcurrency} disabled={saving}>{saving ? 'Saving…' : 'Save concurrency'}</button>
@@ -712,9 +768,21 @@
 			<option value="hevc_nvenc">HEVC / H.265 (NVENC)</option>
 			<option value="h264_nvenc">H.264 (NVENC)</option>
 		  </optgroup>
+		  <optgroup label="Intel Quick Sync / VAAPI (Hardware)">
+			<option value="av1_qsv">AV1 (Intel QSV)</option>
+			<option value="hevc_qsv">HEVC / H.265 (Intel QSV)</option>
+			<option value="h264_qsv">H.264 (Intel QSV)</option>
+			<option value="av1_vaapi">AV1 (VAAPI)</option>
+			<option value="hevc_vaapi">HEVC / H.265 (VAAPI)</option>
+			<option value="h264_vaapi">H.264 (VAAPI)</option>
+		  </optgroup>
+		  <optgroup label="AMD AMF (Windows Hardware)">
+			<option value="av1_amf">AV1 (AMD AMF)</option>
+			<option value="hevc_amf">HEVC / H.265 (AMD AMF)</option>
+			<option value="h264_amf">H.264 (AMD AMF)</option>
+		  </optgroup>
 		  <optgroup label="CPU (Software)">
-			<option value="libsvtav1">AV1 (SVT-AV1, CPU, fast)</option>
-			<option value="libaom-av1">AV1 (libaom, CPU, slow)</option>
+			<option value="libsvtav1">AV1 (SVT-AV1, fast CPU fallback)</option>
 			<option value="libx265">HEVC / H.265 (CPU)</option>
 			<option value="libx264">H.264 (CPU)</option>
 		  </optgroup>

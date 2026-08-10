@@ -6,34 +6,108 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .config import settings
 
-HISTORY_FILE = Path("/app/history.json")
+HISTORY_FILE = Path(
+    os.getenv("HISTORY_FILE", str(Path(settings.APP_DATA_DIR) / "history.json"))
+)
+HISTORY_LOCK_FILE = HISTORY_FILE.with_name(f".{HISTORY_FILE.name}.lock")
+_HISTORY_LOCK = threading.RLock()
+
+
+@contextmanager
+def _history_file_lock():
+    """Serialize history read/modify/write operations across worker processes."""
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(HISTORY_LOCK_FILE, "a+b") as lock_handle:
+        lock_handle.seek(0, os.SEEK_END)
+        if lock_handle.tell() == 0:
+            lock_handle.write(b"0")
+            lock_handle.flush()
+        lock_handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                import msvcrt
+
+                lock_handle.seek(0)
+                msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _read_history_unlocked() -> List[Dict[str, Any]]:
+    if not HISTORY_FILE.exists():
+        return []
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as history_handle:
+            value = json.load(history_handle)
+        return value if isinstance(value, list) else []
+    except (json.JSONDecodeError, OSError, TypeError):
+        return []
+
+
+def _write_history_unlocked(history: List[Dict[str, Any]]) -> None:
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(HISTORY_FILE.parent),
+            prefix=f".{HISTORY_FILE.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_name = temporary.name
+            json.dump(history, temporary, indent=2)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, HISTORY_FILE)
+        temporary_name = None
+        try:
+            os.chmod(HISTORY_FILE, 0o600)
+        except OSError:
+            pass
+    except OSError:
+        pass
+    finally:
+        if temporary_name:
+            try:
+                os.remove(temporary_name)
+            except OSError:
+                pass
 
 
 def _read_history() -> List[Dict[str, Any]]:
     """Read history from JSON file"""
-    if not HISTORY_FILE.exists():
-        return []
-
-    try:
-        with open(HISTORY_FILE, 'r') as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return []
+    with _HISTORY_LOCK:
+        with _history_file_lock():
+            return _read_history_unlocked()
 
 
 def _write_history(history: List[Dict[str, Any]]) -> None:
     """Write history to JSON file"""
-    try:
-        with open(HISTORY_FILE, 'w') as f:
-            json.dump(history, f, indent=2)
-        os.chmod(HISTORY_FILE, 0o600)
-    except IOError:
-        pass  # Silently fail if can't write
+    with _HISTORY_LOCK:
+        with _history_file_lock():
+            _write_history_unlocked(history)
 
 
 def add_history_entry(
@@ -55,6 +129,7 @@ def add_history_entry(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
     encoder: Optional[str] = None,
+    output_filename: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Add a compression history entry"""
     entry = {
@@ -88,15 +163,19 @@ def add_history_entry(
         entry['end_time'] = end_time
     if encoder is not None:
         entry['encoder'] = encoder
+    if output_filename is not None:
+        entry['output_filename'] = Path(output_filename).name
 
-    history = _read_history()
-    history.insert(0, entry)  # Add to beginning (newest first)
+    with _HISTORY_LOCK:
+        with _history_file_lock():
+            history = _read_history_unlocked()
+            history.insert(0, entry)  # Add to beginning (newest first)
 
-    # Keep only last 100 entries
-    if len(history) > 100:
-        history = history[:100]
+            # Keep only last 100 entries
+            if len(history) > 100:
+                history = history[:100]
 
-    _write_history(history)
+            _write_history_unlocked(history)
     return entry
 
 
@@ -124,18 +203,22 @@ def get_history_entry(task_id: str) -> Optional[Dict[str, Any]]:
 
 def clear_history() -> None:
     """Clear all history"""
-    _write_history([])
+    with _HISTORY_LOCK:
+        with _history_file_lock():
+            _write_history_unlocked([])
 
 
 def delete_history_entry(task_id: str) -> bool:
     """Delete a specific history entry by task_id"""
-    history = _read_history()
-    original_len = len(history)
+    with _HISTORY_LOCK:
+        with _history_file_lock():
+            history = _read_history_unlocked()
+            original_len = len(history)
 
-    history = [entry for entry in history if entry.get('task_id') != task_id]
+            history = [entry for entry in history if entry.get('task_id') != task_id]
 
-    if len(history) < original_len:
-        _write_history(history)
-        return True
+            if len(history) < original_len:
+                _write_history_unlocked(history)
+                return True
 
-    return False
+            return False

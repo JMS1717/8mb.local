@@ -1,5 +1,10 @@
 # Review Backlog Assessment
 
+> This backlog is the pre-remediation snapshot. The current local review has
+> completed items 1–10 and 13–14; item 8 is now best-effort rather than
+> job-fatal. Item 11–12 and 15–18 remain follow-up work. No changes from this
+> review have been pushed.
+
 ## Document Quality Snapshot
 - ✅ **Coverage:** The existing notes surface every high-signal issue we spotted while rescanning `backend-api/app` and the worker, so nothing critical is missing.
 - ⚠️ **Prioritization gaps:** Several items with very different risk levels were grouped together (e.g., ffprobe error handling and cosmetic logging tweaks), making it hard to see what should land first.

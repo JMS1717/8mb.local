@@ -1,5 +1,5 @@
 # Multi-stage unified 8mb.local container
-# Stage 1: Build FFmpeg with NVIDIA NVENC GPU support + CPU encoders
+# Stage 1: Build FFmpeg with NVIDIA NVENC, Linux VAAPI, and CPU encoders
 # Use CUDA 12.2 devel image: supports RTX 50-series and is compatible with NVIDIA driver 535+
 FROM nvidia/cuda:12.2.0-devel-ubuntu22.04 AS ffmpeg-build
 
@@ -9,13 +9,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     build-essential nasm yasm cmake pkg-config git wget ca-certificates \
     libnuma-dev libx264-dev libx265-dev libvpx-dev libopus-dev \
-    libaom-dev libdav1d-dev
+    libaom-dev libdav1d-dev libva-dev libdrm-dev
 
 WORKDIR /build
 
 # NVIDIA NVENC headers
 # Pin to NVENC API 12.1 for widest compatibility with driver 535.x, while CUDA 12.2 runtime covers RTX 50‑series
-RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
+RUN git clone --depth 1 --branch sdk/12.1 https://github.com/FFmpeg/nv-codec-headers.git && \
     cd nv-codec-headers && git checkout sdk/12.1 && make install && cd ..
 
 # SVT-AV1: Ubuntu 22.04's libsvtav1 (0.9.x) is too old for FFmpeg 6.1's libsvtav1 glue
@@ -30,12 +30,12 @@ RUN git clone --depth 1 --branch ${SVTAV1_VERSION} https://gitlab.com/AOMediaCod
     cmake --build . -j"$(nproc)" && cmake --install . && ldconfig && \
     cd /build && rm -rf SVT-AV1
 
-# Build FFmpeg with NVIDIA NVENC + CPU encoders
+# Build FFmpeg with NVIDIA NVENC, Linux VAAPI, and CPU encoders
 RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
         tar xf ffmpeg-6.1.1.tar.xz && cd ffmpeg-6.1.1 && \
                 ./configure \
       --enable-nonfree --enable-gpl \
-      --enable-cuda-nvcc --enable-libnpp --enable-nvenc \
+      --enable-cuda-nvcc --enable-libnpp --enable-nvenc --enable-vaapi --enable-libdrm \
       --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus --enable-libaom --enable-libsvtav1 --enable-libdav1d \
       --extra-cflags=-I/usr/local/cuda/include \
       --extra-ldflags=-L/usr/local/cuda/lib64 \
@@ -67,7 +67,7 @@ RUN npm run build && \
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
 # Build-time version (can be overridden)
-ARG BUILD_VERSION=137
+ARG BUILD_VERSION=138
 ENV APP_VERSION=${BUILD_VERSION}
 ARG BUILD_COMMIT=unknown
 ENV BUILD_COMMIT=${BUILD_COMMIT}
@@ -81,7 +81,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     python3.10 python3-pip supervisor redis-server \
     libopus0 libx264-163 libx265-199 libvpx7 libnuma1 \
-    libaom3 libdav1d5 \
+    libaom3 libdav1d5 libva2 libva-drm2 libdrm2 \
+    mesa-va-drivers intel-media-va-driver vainfo \
     && apt-get clean && rm -rf /tmp/*
 
 # Copy FFmpeg from build stage (only what we need)
@@ -114,6 +115,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Copy application code
 COPY backend-api/app /app/backend
 COPY worker/app /app/worker
+COPY shared /app/shared
 
 # Copy pre-built frontend
 COPY --from=frontend-build /frontend/build /app/frontend-build
@@ -139,5 +141,11 @@ COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8001
+
+# Expose a real container health signal for Compose/orchestrators.  This only
+# checks the API process; codec/device readiness remains available through
+# /api/system/encoder-tests and the startup probe cache.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=3).read()"
 
 ENTRYPOINT ["/app/entrypoint.sh"]

@@ -17,17 +17,17 @@ class UploadResponse(BaseModel):
 class CompressRequest(BaseModel):
     job_id: str
     filename: str
-    target_size_mb: float
+    target_size_mb: float = Field(gt=0, le=51200)
     # When set (>0), worker uses this video bitrate (kbps) instead of deriving from target_size_mb.
     target_video_bitrate_kbps: Optional[float] = Field(default=None, ge=0, le=2_000_000)
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
-    audio_bitrate_kbps: int = 128
+    audio_bitrate_kbps: int = Field(default=128, ge=0, le=2000)
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
     container: Literal['mp4','mkv'] = 'mp4'
     tune: Literal['hq','ll','ull','lossless'] = 'hq'
-    max_width: Optional[int] = None
-    max_height: Optional[int] = None
+    max_width: Optional[int] = Field(default=None, gt=0, le=16384)
+    max_height: Optional[int] = Field(default=None, gt=0, le=16384)
     start_time: Optional[str] = None  # Format: seconds (float) or "HH:MM:SS"
     end_time: Optional[str] = None    # Format: seconds (float) or "HH:MM:SS"
     # Prefer attempting GPU decoding (when available). Worker will still fall back if unsupported.
@@ -36,8 +36,8 @@ class CompressRequest(BaseModel):
     fast_mp4_finalize: Optional[bool] = False
     # Automatic resolution selection based on original bitrate/size
     auto_resolution: Optional[bool] = False
-    min_auto_resolution: Optional[int] = 240  # Do not downscale below this unless user overrides
-    target_resolution: Optional[int] = None   # Explicit target height (e.g., 1080, 720); overrides auto selection
+    min_auto_resolution: Optional[int] = Field(default=240, gt=0, le=16384)  # Do not downscale below this unless user overrides
+    target_resolution: Optional[int] = Field(default=None, gt=0, le=16384)   # Explicit target height (e.g., 1080, 720); overrides auto selection
     audio_only: Optional[bool] = False        # Convert to audio-only output (.m4a) ignoring video settings
     # When set (>0), output frame rate is capped to this value if the source is faster (no increase for low-fps sources).
     max_output_fps: Optional[float] = Field(default=None, ge=0, le=1000)
@@ -48,7 +48,7 @@ class StatusResponse(BaseModel):
     detail: Optional[str] = None
 
 class ProgressEvent(BaseModel):
-    type: Literal['progress','log','done','error']
+    type: Literal['progress','log','done','error','retry','canceled','connected','ping']
     task_id: str
     progress: Optional[float] = None
     message: Optional[str] = None
@@ -69,8 +69,8 @@ class PasswordChange(BaseModel):
     new_password: str
 
 class DefaultPresets(BaseModel):
-    target_mb: float = 9.7
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
+    target_mb: float = Field(default=9.7, gt=0, le=51200)
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
     audio_kbps: Literal[64,96,128,160,192,256] = 128
@@ -80,7 +80,7 @@ class DefaultPresets(BaseModel):
 
 class AvailableCodecsResponse(BaseModel):
     """Response containing hardware-detected codecs and user-enabled codecs."""
-    hardware_type: str  # nvidia, cpu
+    hardware_type: str  # nvidia, intel_qsv, amd_amf, intel_vaapi, amd_vaapi, vaapi, cpu
     available_encoders: dict  # {h264: "h264_nvenc", ...}
     enabled_codecs: list[str]  # ["h264_nvenc", "hevc_nvenc", ...]
     
@@ -90,6 +90,18 @@ class CodecVisibilitySettings(BaseModel):
     h264_nvenc: bool = True
     hevc_nvenc: bool = True
     av1_nvenc: bool = True
+    # Intel QSV (Linux uses the VAAPI render node as the backend)
+    h264_qsv: bool = True
+    hevc_qsv: bool = True
+    av1_qsv: bool = True
+    # Linux VAAPI (Intel and AMD)
+    h264_vaapi: bool = True
+    hevc_vaapi: bool = True
+    av1_vaapi: bool = True
+    # Windows AMD Advanced Media Framework
+    h264_amf: bool = True
+    hevc_amf: bool = True
+    av1_amf: bool = True
     # CPU
     libx264: bool = True
     libx265: bool = True
@@ -99,8 +111,8 @@ class CodecVisibilitySettings(BaseModel):
 
 class PresetProfile(BaseModel):
     name: str
-    target_mb: float
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','libx264','libx265','libsvtav1','libaom-av1']
+    target_mb: float = Field(gt=0, le=51200)
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','libx264','libx265','libsvtav1','libaom-av1']
     audio_codec: Literal['libopus','aac','none']
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality']
     audio_kbps: Literal[64,96,128,160,192,256]

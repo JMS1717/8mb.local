@@ -1,6 +1,9 @@
-"""
-Startup encoder tests to validate NVIDIA hardware acceleration on container boot.
-Populates ENCODER_TEST_CACHE so compress jobs don't pay the init test cost.
+"""Startup encoder tests for NVIDIA, Intel QSV, VAAPI, and CPU encoders.
+
+The worker caches the result so normal jobs do not pay the device-init cost.
+Hardware tests intentionally encode one frame with the same initialization and
+upload filters used by the job path; an ``ffmpeg -encoders`` listing alone is
+not sufficient evidence that a passed-through GPU works.
 """
 
 from __future__ import annotations
@@ -10,13 +13,16 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 from typing import Any, Dict, List, Tuple
+
+from .constants import AMF_ENCODERS, CPU_ENCODERS, QSV_ENCODERS, VAAPI_ENCODERS
 
 logger = logging.getLogger(__name__)
 
 
 def get_gpu_env() -> dict[str, str]:
-    """Get environment with NVIDIA GPU variables and library paths."""
+    """Get subprocess environment for CUDA and VAAPI/QSV."""
     env = os.environ.copy()
     env["NVIDIA_VISIBLE_DEVICES"] = env.get("NVIDIA_VISIBLE_DEVICES", "all")
     env["NVIDIA_DRIVER_CAPABILITIES"] = env.get(
@@ -29,6 +35,8 @@ def get_gpu_env() -> dict[str, str]:
         "/usr/local/cuda/lib",
         "/usr/lib/wsl/lib",
         "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib/x86_64-linux-gnu/dri",
+        "/usr/lib/dri",
     ]
     existing = env.get("LD_LIBRARY_PATH", "")
     add = ":".join(p for p in lib_paths if p)
@@ -95,13 +103,26 @@ def _wait_for_nv_runtime_ready(
 
 def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
     """Test hardware decoder separately."""
+    test_file: str | None = None
     try:
-        test_file = "/tmp/test_decode.mp4"
+        # Use the container's TMPDIR (set to the mounted upload volume by the
+        # entrypoint) and a unique name so concurrent worker starts cannot
+        # overwrite one another's seed file.
+        with tempfile.NamedTemporaryFile(
+            prefix="8mb_decode_", suffix=".mp4", delete=False
+        ) as handle:
+            test_file = handle.name
 
         if "av1" in decoder_name.lower():
-            # Prefer SVT-AV1 for the tiny test encode — ~10-50× faster than libaom
-            # at generating a few seed frames on container boot.
-            encoder = "libsvtav1" if is_encoder_available("libsvtav1") else "libaom-av1"
+            # SVT-AV1 is the approved software AV1 path. Do not hide a missing
+            # SVT build by creating the seed with the much slower libaom path.
+            encoder = "libsvtav1"
+            if not is_encoder_available(encoder):
+                try:
+                    os.unlink(test_file)
+                except OSError:
+                    pass
+                return False, "SVT-AV1 (libsvtav1) is not available for the decoder seed"
         elif "hevc" in decoder_name.lower() or "265" in decoder_name.lower():
             encoder = "libx265"
         else:
@@ -112,13 +133,15 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
             "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
             "-c:v", encoder, "-t", "0.1", "-frames:v", "3",
         ]
-        if encoder == "libaom-av1":
-            create_cmd.extend(["-cpu-used", "8", "-row-mt", "1"])
-        elif encoder == "libsvtav1":
+        if encoder == "libsvtav1":
             create_cmd.extend(["-preset", "12"])
         create_cmd.append(test_file)
         logger.debug("test_decoder: seed-encode cmd = %s", " ".join(create_cmd))
-        subprocess.run(create_cmd, capture_output=True, timeout=10, env=get_gpu_env())
+        seed = subprocess.run(
+            create_cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env()
+        )
+        if seed.returncode != 0:
+            return False, "Could not create decoder test file"
 
         cmd = ["ffmpeg", "-hide_banner"]
         cmd.extend(hw_flags)
@@ -160,25 +183,52 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
         return False, "Decode timeout"
     except Exception as e:
         return False, f"Decode exception: {str(e)}"
+    finally:
+        if test_file:
+            try:
+                os.unlink(test_file)
+            except OSError:
+                pass
 
 
 def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
-    """Test if encoder can actually be initialized."""
+    """Test if encoder can actually be initialized.
+
+    ``hw_flags`` are deliberately placed before the input. QSV needs the
+    VAAPI-to-QSV two-step device initialization and both QSV/VAAPI need a
+    hardware upload from the lavfi source.
+    """
     try:
-        common_args = [
-            "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
+        cmd = [
+            "ffmpeg", "-hide_banner", "-y",
+            *hw_flags,
+            "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1:r=1",
+        ]
+        if encoder_name in QSV_ENCODERS or encoder_name in VAAPI_ENCODERS:
+            upload_filter = "format=nv12,hwupload"
+            if encoder_name in VAAPI_ENCODERS:
+                upload_filter = "format=nv12|vaapi,hwupload"
+            cmd += ["-vf", upload_filter]
+        elif encoder_name in AMF_ENCODERS:
+            # AMF is a native Windows path and is most portable with the
+            # explicit 4:2:0 format used by the real job command.
+            cmd += ["-pix_fmt", "yuv420p"]
+        cmd += [
             "-c:v", encoder_name, "-t", "0.1", "-frames:v", "3",
             "-f", "null", "-",
         ]
-        cmd = ["ffmpeg", "-hide_banner", *common_args]
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=8, env=get_gpu_env()
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=15 if (encoder_name in QSV_ENCODERS or encoder_name in VAAPI_ENCODERS) else 8,
+            env=get_gpu_env(),
         )
 
         if result is None:
             return False, "Encode did not execute"
 
-        stderr_lower = result.stderr.lower()
+        stderr_lower = (result.stderr or "").lower()
 
         is_cpu_encoder = encoder_name.startswith("lib")
         if "operation not permitted" in stderr_lower:
@@ -219,7 +269,7 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
 
         return True, "Encode OK"
     except subprocess.TimeoutExpired:
-        return False, "Encode timeout (>10s)"
+        return False, "Encode timeout"
     except Exception as e:
         return False, f"Exception: {str(e)}"
 
@@ -243,214 +293,156 @@ def is_encoder_available(encoder_name: str) -> bool:
 
 
 def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
-    """Run encoder initialization tests for NVIDIA and CPU encoders."""
-    from .hw_detect import map_codec_to_hw
+    """Run and cache one-frame tests for each relevant encoder family."""
+    from .hw_detect import _is_vaapi_device, map_codec_to_hw
 
-    logger.info("GPU Environment Check:")
-    logger.info(
-        f"  NVIDIA_VISIBLE_DEVICES: {os.environ.get('NVIDIA_VISIBLE_DEVICES', 'NOT SET')}"
+    hw_type = str(hw_info.get("type", "cpu")).lower()
+    available_types = {str(value).lower() for value in (hw_info.get("available_types") or [])}
+    available_encoders = set((hw_info.get("available_encoders") or {}).values())
+    vaapi_devices = [
+        device for device in (hw_info.get("vaapi_devices") or [])
+        if isinstance(device, dict) and _is_vaapi_device(device)
+    ]
+    # ``vaapi_device`` may be a stale field from an older worker. Only a
+    # compatible, currently discovered device makes the Linux VAAPI path
+    # eligible; CUDA's NVIDIA render node must not trigger VAAPI probes.
+    has_dri = bool(vaapi_devices)
+    has_intel_dri = any(
+        str(device.get("vendor", "")).lower() == "intel"
+        for device in vaapi_devices
+        if isinstance(device, dict)
     )
-    logger.info(
-        f"  NVIDIA_DRIVER_CAPABILITIES: {os.environ.get('NVIDIA_DRIVER_CAPABILITIES', 'NOT SET')}"
+
+    has_nvenc = hw_type == "nvidia" or "nvidia" in available_types or any(
+        encoder.endswith("_nvenc") for encoder in available_encoders
     )
-    logger.info(f"  LD_LIBRARY_PATH: {os.environ.get('LD_LIBRARY_PATH', 'NOT SET')}")
-    logger.info("")
+    # Probe discovered DRI families again even if the first detection pass
+    # failed.  This makes the Settings rerun useful after a driver/container
+    # race, while the vendor check prevents AMD from being misidentified as QSV.
+    has_qsv = (
+        has_intel_dri
+        or "intel_qsv" in available_types
+        or hw_type == "intel_qsv"
+        or any("_qsv" in e for e in available_encoders)
+    ) and (os.name == "nt" or has_dri or hw_type == "intel_qsv")
+    has_vaapi = (
+        has_dri
+        or any("vaapi" in value for value in available_types)
+        or "vaapi" in hw_type
+        or hw_type == "intel_qsv"
+    )
+    has_amf = (
+        os.name == "nt"
+        and (
+            "amd_amf" in available_types
+            or hw_type == "amd_amf"
+            or any(encoder in AMF_ENCODERS for encoder in available_encoders)
+        )
+    )
 
-    _wait_for_nv_runtime_ready(timeout_s=30.0, interval_s=2.0)
+    if has_nvenc:
+        _wait_for_nv_runtime_ready(timeout_s=30.0, interval_s=2.0)
 
-    logger.info("")
-    logger.info("=" * 70)
-    logger.info("          ENCODER VALIDATION TESTS")
-    logger.info("=" * 70)
-    logger.info("")
-    sys.stdout.flush()
+    test_codecs: list[str] = []
+    if has_nvenc:
+        test_codecs.extend(["h264_nvenc", "hevc_nvenc", "av1_nvenc"])
+    if has_qsv:
+        test_codecs.extend(["h264_qsv", "hevc_qsv", "av1_qsv"])
+    if has_vaapi:
+        test_codecs.extend(["h264_vaapi", "hevc_vaapi", "av1_vaapi"])
+    if has_amf:
+        test_codecs.extend(["h264_amf", "hevc_amf", "av1_amf"])
+    test_codecs.extend(["libx264", "libx265", "libsvtav1"])
 
-    hw_type = hw_info.get("type", "unknown").upper()
-    hw_device = hw_info.get("device", "N/A")
-    logger.info(f"  Hardware Type:   {hw_type}")
-    logger.info(f"  Hardware Device: {hw_device}")
-    logger.info("")
-    logger.info("-" * 70)
-    sys.stdout.flush()
-
-    cache: Dict[str, bool] = {}
-    test_results = {}
-
-    test_codecs = []
-    hw_type_lower = hw_info.get("type", "cpu")
     hw_decoders = {}
-
-    if hw_type_lower == "nvidia":
-        test_codecs = ["h264_nvenc", "hevc_nvenc", "av1_nvenc"]
+    if has_nvenc:
         hw_decoders = {
             "h264_nvenc": ("h264", ["-hwaccel", "cuda", "-c:v", "h264_cuvid"]),
             "hevc_nvenc": ("hevc", ["-hwaccel", "cuda", "-c:v", "hevc_cuvid"]),
             "av1_nvenc": ("av1", ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]),
         }
 
-    test_codecs.extend(["libx264", "libx265", "libsvtav1", "libaom-av1"])
-
-    logger.info(f"  Testing {len(test_codecs)} encoder(s)...")
-    logger.info("-" * 70)
-    logger.info("")
+    logger.info(
+        "Encoder validation: type=%s vaapi_device=%s candidates=%s",
+        hw_type, hw_info.get("vaapi_device"), ", ".join(test_codecs),
+    )
+    cache: Dict[str, bool] = {}
+    test_results: dict[str, tuple[str, str, bool | None, str, bool]] = {}
 
     for codec in test_codecs:
         try:
-            actual_encoder, v_flags, init_hw_flags = map_codec_to_hw(codec, hw_info)
-
-            if actual_encoder in ("libx264", "libx265", "libsvtav1", "libaom-av1"):
-                if codec not in ("libx264", "libx265", "libsvtav1", "libaom-av1"):
-                    logger.info(
-                        f"  [{codec:15s}] SKIPPED - Maps to CPU fallback: {actual_encoder}"
-                    )
-                    continue
-
+            actual_encoder, _v_flags, init_hw_flags = map_codec_to_hw(codec, hw_info)
             if not is_encoder_available(actual_encoder):
-                logger.warning(
-                    f"  [{codec:15s}] UNAVAILABLE - Not in ffmpeg -encoders list"
-                )
-                if actual_encoder.endswith("_nvenc"):
-                    try:
-                        enc_result = subprocess.run(
-                            ["ffmpeg", "-hide_banner", "-encoders"],
-                            capture_output=True, text=True, timeout=2, env=get_gpu_env(),
-                        )
-                        similar = [
-                            line.strip()
-                            for line in enc_result.stdout.split("\n")
-                            if "nvenc" in line.lower()
-                        ]
-                        if similar:
-                            logger.info(
-                                f"    Available hardware encoders: {', '.join(similar[:3])}"
-                            )
-                        else:
-                            logger.warning(
-                                f"    No hardware encoders found in ffmpeg build"
-                            )
-                    except Exception:
-                        pass
-                cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
-                cache[cache_key] = False
-                test_results[codec] = (
-                    actual_encoder, "UNAVAILABLE", None, "Not in ffmpeg -encoders",
-                )
+                cache[f"{actual_encoder}:{':'.join(init_hw_flags)}"] = False
+                test_results[codec] = (actual_encoder, "UNAVAILABLE", None, "Not in ffmpeg -encoders", False)
+                logger.warning("[%s] unavailable in ffmpeg build", codec)
                 continue
 
-            decode_passed = None
-            decode_message = "N/A"
+            decode_passed: bool | None = None
             if codec in hw_decoders:
-                format_name, dec_flags = hw_decoders[codec]
-                logger.info(
-                    f"  [{codec:15s}] Testing decoder: {format_name} with {' '.join(dec_flags)}"
-                )
-                decode_success, decode_message = test_decoder(format_name, dec_flags)
-                decode_passed = decode_success
-                decode_status = "PASS" if decode_success else "FAIL"
-                logger.info(
-                    f"                  Decode: {decode_status} - {decode_message}"
-                )
+                format_name, decoder_flags = hw_decoders[codec]
+                decode_passed, decode_message = test_decoder(format_name, decoder_flags)
+                logger.info("[%s] decode=%s (%s)", codec, decode_passed, decode_message)
 
             cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
-            success, message = test_encoder_init(actual_encoder, init_hw_flags)
-            cache[cache_key] = success
-
-            encode_status = "PASS" if success else "FAIL"
-            logger.info(f"                  Encode: {encode_status} - {message}")
-
-            overall_passed = success and (decode_passed is None or decode_passed)
-            if overall_passed:
-                logger.info(f"  [{codec:15s}] OVERALL PASS")
-                test_results[codec] = (actual_encoder, "PASS", decode_passed, message)
-            else:
-                logger.error(f"  [{codec:15s}] OVERALL FAIL")
-                test_results[codec] = (actual_encoder, "FAIL", decode_passed, message)
-
+            encode_passed, encode_message = test_encoder_init(actual_encoder, init_hw_flags)
+            cache[cache_key] = encode_passed
+            test_results[codec] = (
+                actual_encoder,
+                "PASS" if encode_passed and (decode_passed is None or decode_passed) else "FAIL",
+                decode_passed,
+                encode_message,
+                encode_passed,
+            )
+            logger.info("[%s] encode=%s (%s)", codec, encode_passed, encode_message)
             sys.stdout.flush()
+        except Exception as exc:
+            logger.exception("[%s] startup test failed", codec)
+            test_results[codec] = ("unknown", "ERROR", None, str(exc), False)
 
-        except Exception as e:
-            logger.error(f"  [{codec:15s}] ERROR - Exception: {str(e)}")
-            test_results[codec] = ("unknown", "ERROR", None, str(e))
-            sys.stdout.flush()
+    passed = sum(status == "PASS" for _, status, _, _, _ in test_results.values())
+    failed = len(test_results) - passed
+    logger.info("Encoder validation complete: tested=%s passed=%s failed=%s", len(test_results), passed, failed)
 
-    logger.info("")
-    logger.info("-" * 70)
-    logger.info("  TEST SUMMARY")
-    logger.info("-" * 70)
-
-    passed = sum(1 for _, status, _, _ in test_results.values() if status == "PASS")
-    failed = sum(
-        1 for _, status, _, _ in test_results.values()
-        if status in ("FAIL", "ERROR", "UNAVAILABLE")
-    )
-    total_tested = len(test_results)
-
-    logger.info(f"  Total Encoders Tested: {total_tested}")
-    logger.info(f"  Passed:  {passed}")
-    logger.info(f"  Failed:  {failed}")
-    logger.info("")
-
-    if failed > 0:
-        failed_list = [
-            c for c, (_, status, _, _) in test_results.items()
-            if status in ("FAIL", "ERROR", "UNAVAILABLE")
-        ]
-        if failed_list:
-            logger.warning("  Failing encoders: %s", ", ".join(failed_list))
-        logger.warning(
-            "  Failed encoders will automatically fall back to CPU encoding."
-        )
-
-    logger.info("-" * 70)
-    logger.info("")
-    sys.stdout.flush()
-
-    # Store results in Redis
+    # Persist both the compact status and details consumed by the API.
     try:
-        from redis import Redis
-        redis_url = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
-        redis_client = Redis.from_url(redis_url, decode_responses=True)
-        for codec, (actual_encoder, encode_status, decode_status, encode_msg) in test_results.items():
-            try:
-                _, _, init_hw_flags = map_codec_to_hw(codec, hw_info)
-                cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
-                encode_passed = encode_status == "PASS"
-                overall_passed = encode_passed and (
-                    decode_status is None or decode_status is True
-                )
+        if os.getenv("LOCAL_RUNTIME", "").strip().lower() in {"1", "true", "yes", "on"}:
+            from shared.local_runtime import get_sync_redis
 
-                redis_client.setex(
-                    f"encoder_test:{codec}", 2592000, "1" if overall_passed else "0"
-                )
-                encode_detail = {
+            redis_client = get_sync_redis()
+        else:
+            from redis import Redis
+
+            redis_client = Redis.from_url(
+                os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"),
+                decode_responses=True,
+            )
+        for codec, (actual_encoder, status, decode_status, message, encode_passed) in test_results.items():
+            overall_passed = status == "PASS"
+            redis_client.setex(
+                f"encoder_test:{codec}", 2592000, "1" if overall_passed else "0"
+            )
+            redis_client.setex(
+                f"encoder_test_json:{codec}",
+                2592000,
+                json.dumps({
                     "codec": codec,
                     "actual_encoder": actual_encoder,
                     "passed": encode_passed,
-                    "message": encode_msg or ("OK" if encode_passed else "Failed during init"),
-                }
-                try:
-                    redis_client.setex(
-                        f"encoder_test_json:{codec}", 2592000, json.dumps(encode_detail)
-                    )
-                except Exception:
-                    pass
-
-                if decode_status is not None:
-                    decode_detail = {
+                    "message": message or ("OK" if encode_passed else "Failed during init"),
+                }),
+            )
+            if decode_status is not None:
+                redis_client.setex(
+                    f"encoder_test_decode_json:{codec}",
+                    2592000,
+                    json.dumps({
                         "codec": codec,
                         "passed": decode_status,
                         "message": "OK" if decode_status else "Decoder failed",
-                    }
-                    try:
-                        redis_client.setex(
-                            f"encoder_test_decode_json:{codec}",
-                            2592000, json.dumps(decode_detail),
-                        )
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.warning(f"Failed to store test result for {codec}: {e}")
-    except Exception as e:
-        logger.warning(f"Failed to store encoder test results in Redis: {e}")
+                    }),
+                )
+    except Exception as exc:
+        logger.warning("Failed to store encoder test results in Redis: %s", exc)
 
     return cache

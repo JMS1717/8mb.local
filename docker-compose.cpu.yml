@@ -4,13 +4,15 @@
 # BEFORE FIRST RUN: make sure `.env` is a FILE on the host, not a directory:
 #   cp .env.example .env     # or: touch .env
 # See the comment in docker-compose.yml for the `.env`-as-directory footgun.
+# `./uploads` is also the backing volume for multipart/FFmpeg temporary files;
+# keep it on a disk with enough free space for the largest input.
 services:
   8mblocal:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "137"
+        BUILD_VERSION: "138"
     image: jms1717/8mblocal:latest
     container_name: 8mblocal
     ports:
@@ -18,6 +20,8 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
+      - ./state:/app/state
+      - ./redis-data:/var/lib/redis
       - type: bind
         source: ./.env
         target: /app/.env
@@ -25,5 +29,9 @@ services:
           create_host_path: false
     environment:
       - REDIS_URL=redis://127.0.0.1:6379/0
+      - ENV_FILE=/app/.env
+      - SETTINGS_FILE=/app/state/settings.json
+      - HISTORY_FILE=/app/state/history.json
+      - TMPDIR=/app/uploads/.tmp
       - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-4}
     restart: unless-stopped

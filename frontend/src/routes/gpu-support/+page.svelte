@@ -37,7 +37,7 @@
 	<a href="/settings" class="btn">&larr; Back to Settings</a>
   </div>
 
-  <p class="subtitle">NVIDIA NVENC hardware encoders supported by 8mb.local</p>
+  <p class="subtitle">Runtime-probed NVIDIA, Intel, AMD, and CPU encoders supported by 8mb.local</p>
 
   <!-- Key -->
   <div class="key">
@@ -124,8 +124,8 @@
 
   <!-- Footer note -->
   <div style="background:#1f2937; border:1px solid #374151; border-radius:12px; padding:20px; margin-top:48px">
-	<p style="color:#9ca3af; font-size:14px; margin:0">
-	  <strong style="color:#d1d5db">Note:</strong> 8mb.local supports NVIDIA GPUs with NVENC hardware encoding. Systems without a supported NVIDIA GPU will use CPU software encoding (libx264, libx265, libaom-av1) which is slower but universally compatible. The codec dropdown on the main page will only show encoders that are actually available on your system.
+	  <p style="color:#9ca3af; font-size:14px; margin:0">
+	  <strong style="color:#d1d5db">Note:</strong> 8mb.local supports NVIDIA NVENC, Intel Quick Sync, Windows AMD AMF, and Linux VAAPI (including AMD) hardware encoding. Systems without a working GPU device or driver use the fast SVT-AV1 CPU path for AV1, with x264/x265 retained for H.264/HEVC compatibility. The codec dropdown only shows hardware encoders that pass a runtime probe on your system.
 	</p>
   </div>
 </div>

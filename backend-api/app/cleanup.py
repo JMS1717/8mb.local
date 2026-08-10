@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -12,8 +13,9 @@ from . import settings_manager
 
 logger = logging.getLogger(__name__)
 
-UPLOADS_DIR = "/app/uploads"
-OUTPUTS_DIR = "/app/outputs"
+_APP_DATA_DIR = Path(settings.APP_DATA_DIR)
+UPLOADS_DIR = Path(settings.UPLOADS_DIR) if settings.UPLOADS_DIR else _APP_DATA_DIR / "uploads"
+OUTPUTS_DIR = Path(settings.OUTPUTS_DIR) if settings.OUTPUTS_DIR else _APP_DATA_DIR / "outputs"
 
 # Module-level handle so the scheduler object is not garbage collected after
 # start_scheduler() returns (APScheduler keeps internal refs via the event

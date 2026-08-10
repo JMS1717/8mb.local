@@ -11,17 +11,17 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import configure_logging, settings
 from .cleanup import start_scheduler
+from .auth import basic_auth
 from .deps import (
     UPLOADS_DIR,
     OUTPUTS_DIR,
-    get_hw_info_cached,
     redis,
     sync_codec_settings_from_tests,
 )
@@ -148,15 +148,6 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"Startup initialization failed: {e}")
 
-    try:
-        # Warm the cache in the background so the first /api/hardware call
-        # doesn't pay the full round-trip. Runs in a thread so we don't
-        # block the event loop on the Celery RPC here.
-        asyncio.create_task(asyncio.to_thread(get_hw_info_cached))
-        logger.debug("startup: hw_info cache warm-up scheduled")
-    except Exception as e:
-        logger.debug("startup: hw_info warmup failed: %s", e)
-
     logger.info("startup: complete")
 
 
@@ -168,7 +159,7 @@ async def on_shutdown() -> None:
 # ---------------------------------------------------------------------------
 # Serve pre-built frontend (unified container deployment)
 # ---------------------------------------------------------------------------
-frontend_build = Path("/app/frontend-build")
+frontend_build = Path(settings.FRONTEND_BUILD_DIR)
 if frontend_build.exists():
     app.mount("/_app", StaticFiles(directory=frontend_build / "_app"), name="static-assets")
 
@@ -181,7 +172,7 @@ if frontend_build.exists():
         "stream/", "outputs/", "uploads/",
     )
 
-    @app.get("/{full_path:path}")
+    @app.get("/{full_path:path}", dependencies=[Depends(basic_auth)])
     async def serve_spa(full_path: str):
         """Serve SPA - return index.html for all non-API routes.
 

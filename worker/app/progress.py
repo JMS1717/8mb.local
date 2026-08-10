@@ -29,6 +29,25 @@ def parse_ffmpeg_bitrate(val: str) -> float:
     return float(br_str)
 
 
+def parse_ffmpeg_out_time(val: str) -> Optional[float]:
+    """Convert FFmpeg ``out_time_ms``/``out_time_us`` values to seconds.
+
+    Despite the historical ``out_time_ms`` name, FFmpeg's ``-progress``
+    protocol reports both fields in microseconds. ``N/A`` is emitted before
+    the first frame, so callers should ignore it rather than treating it as
+    zero progress.
+    """
+    if val is None or str(val).strip().upper() in {"", "N/A"}:
+        return None
+    try:
+        value = float(val)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return value / 1_000_000.0
+
+
 def parse_ffmpeg_speed(val: str) -> Optional[float]:
     """Extract numeric speed multiplier from ``'2.34x'``."""
     sval = (val or "").strip()
