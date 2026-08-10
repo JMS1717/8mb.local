@@ -6,8 +6,11 @@ import json
 import logging
 import os
 import subprocess
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
+
+from shared.subprocess_utils import hidden_process_kwargs
 
 from ..auth import basic_auth
 from ..celery_app import celery_app
@@ -203,12 +206,18 @@ async def get_available_codecs() -> AvailableCodecsResponse:
 async def system_capabilities():
     """Return detailed system capabilities including CPU, memory, GPUs and worker HW type."""
     from .. import deps as _deps_mod
-    if _deps_mod.SYSTEM_CAPS_CACHE is None:
+    now = time.monotonic()
+    cache_expired = (
+        _deps_mod.SYSTEM_CAPS_CACHE is None
+        or (now - _deps_mod.SYSTEM_CAPS_CACHE_TS) >= _deps_mod.SYSTEM_CAPS_TTL_SECONDS
+    )
+    if cache_expired:
         # get_system_capabilities() shells out to nvidia-smi and reads procfs;
         # offload to a thread so we don't block the event loop on cold start.
         caps = await asyncio.to_thread(get_system_capabilities)
         caps["hardware"] = await get_hw_info_cached_async()
         _deps_mod.SYSTEM_CAPS_CACHE = caps
+        _deps_mod.SYSTEM_CAPS_CACHE_TS = time.monotonic()
         logger.debug("system_capabilities: cached fresh snapshot")
     return _deps_mod.SYSTEM_CAPS_CACHE
 
@@ -394,7 +403,10 @@ async def gpu_diagnostics():
 
     def run_cmd(cmd: list[str], timeout: int = 6):
         try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            p = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout,
+                **hidden_process_kwargs(),
+            )
             logger.debug(
                 "diagnostics cmd=%s rc=%s stderr_len=%d",
                 cmd[0], p.returncode, len(p.stderr or ""),

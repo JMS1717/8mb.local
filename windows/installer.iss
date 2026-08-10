@@ -1,6 +1,6 @@
 #define MyAppName "8mb.local"
-#define MyAppVersion "1.0.0"
-#define MyAppPublisher "8mb.local"
+#define MyAppVersion "138"
+#define MyAppPublisher "JMS1717"
 #define MyAppExeName "8mblocal.exe"
 
 [Setup]
@@ -19,6 +19,7 @@ PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=dialog commandline
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=..\build\brand\8mblocal.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

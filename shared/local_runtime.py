@@ -351,7 +351,7 @@ def record_worker_event(task_id: str, event: dict[str, Any]) -> None:
         # ``done.stats`` because that is the Docker/SSE contract; flattening
         # here makes the desktop runtime behave the same way.
         stats = event.get("stats") if isinstance(event.get("stats"), dict) else {}
-        for key in ("output_path", "final_size_mb", "duration_s", "target_size_mb"):
+        for key in ("output_path", "final_size_mb", "duration_s", "target_size_mb", "encoder"):
             if stats.get(key) is not None:
                 info[key] = stats[key]
         info.setdefault("progress", 100.0)

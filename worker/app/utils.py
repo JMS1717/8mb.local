@@ -6,6 +6,8 @@ import os
 import subprocess
 from typing import Any, Optional
 
+from shared.subprocess_utils import hidden_process_kwargs
+
 
 def get_gpu_env() -> dict[str, str]:
     """
@@ -222,7 +224,8 @@ def ffprobe_info(input_path: str, allow_audio_only: bool = False) -> dict:
     ]
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, env=get_gpu_env(), timeout=45
+            cmd, capture_output=True, text=True, env=get_gpu_env(), timeout=45,
+            **hidden_process_kwargs(),
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("ffprobe timed out while analyzing the input") from exc
@@ -236,7 +239,8 @@ def ffprobe_info(input_path: str, allow_audio_only: bool = False) -> dict:
         ]
         try:
             proc = subprocess.run(
-                cmd_fb, capture_output=True, text=True, env=get_gpu_env(), timeout=30
+                cmd_fb, capture_output=True, text=True, env=get_gpu_env(), timeout=30,
+                **hidden_process_kwargs(),
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("ffprobe fallback timed out while analyzing the input") from exc

@@ -46,6 +46,7 @@ class StatusResponse(BaseModel):
     state: str
     progress: Optional[float] = None
     detail: Optional[str] = None
+    encoder: Optional[str] = None
 
 class ProgressEvent(BaseModel):
     type: Literal['progress','log','done','error','retry','canceled','connected','ping']

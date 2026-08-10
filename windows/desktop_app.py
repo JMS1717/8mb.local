@@ -7,6 +7,7 @@ in-process runtime when ``LOCAL_RUNTIME=1``.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import socket
 import sys
@@ -16,6 +17,8 @@ import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
+
+DESKTOP_VERSION = "138"
 
 
 def _bundle_root() -> Path:
@@ -101,28 +104,45 @@ def _ensure_stdio(data_dir: Path) -> None:
             setattr(sys, attr, stream)
 
 
-def _wait_and_open(url: str, no_browser: bool, timeout: float = 30.0) -> None:
+def _wait_until_ready(url: str, timeout: float = 30.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(url + "/healthz", timeout=1) as response:
                 if response.status == 200:
-                    if not no_browser:
-                        webbrowser.open(url)
-                    return
+                    return True
         except (OSError, urllib.error.URLError):
             time.sleep(0.2)
-    # A server that is still starting should remain usable; the log tells the
-    # user exactly where to open it if the browser was not launched in time.
-    print(f"8mb.local is starting at {url}", flush=True)
+    return False
+
+
+def _wait_and_open_browser(url: str, timeout: float = 30.0) -> None:
+    if _wait_until_ready(url, timeout):
+        webbrowser.open(url)
+    else:
+        # A server that is still starting should remain usable; the log tells
+        # the user exactly where to open it if startup takes unusually long.
+        print(f"8mb.local is starting at {url}", flush=True)
+
+
+def _show_native_error(message: str) -> None:
+    """Surface startup failures from the windowed executable."""
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(0, message, "8mb.local", 0x10)
+    except Exception:
+        logging.getLogger(__name__).error(message)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Launch the local 8mb.local web app")
     parser.add_argument("--data-dir", type=Path, default=None, help="Persistent app-data directory")
     parser.add_argument("--port", type=int, default=8001, help="Local HTTP port (default: 8001)")
-    parser.add_argument("--no-browser", action="store_true", help="Do not open the browser automatically")
-    parser.add_argument("--version", action="version", version="8mb.local desktop")
+    launch_group = parser.add_mutually_exclusive_group()
+    launch_group.add_argument("--browser", action="store_true", help="Open in the default browser instead of a native window")
+    launch_group.add_argument("--no-browser", action="store_true", help="Run the local server without opening a window")
+    parser.add_argument("--version", action="version", version=f"8mb.local v{DESKTOP_VERSION}")
     args = parser.parse_args(argv)
 
     port = _free_port(args.port)
@@ -140,13 +160,6 @@ def main(argv: list[str] | None = None) -> int:
     import logging
 
     logging.getLogger(__name__).info("Starting desktop app at %s (data=%s)", url, data_dir)
-    threading.Thread(
-        target=_wait_and_open,
-        args=(url, args.no_browser),
-        name="8mblocal-browser",
-        daemon=True,
-    ).start()
-
     config = uvicorn.Config(
         app,
         host="127.0.0.1",
@@ -155,10 +168,58 @@ def main(argv: list[str] | None = None) -> int:
         access_log=False,
     )
     server = uvicorn.Server(config)
-    try:
-        server.run()
-    except KeyboardInterrupt:
+
+    if args.no_browser or args.browser:
+        if args.browser:
+            threading.Thread(
+                target=_wait_and_open_browser,
+                args=(url,),
+                name="8mblocal-browser",
+                daemon=True,
+            ).start()
+        try:
+            server.run()
+        except KeyboardInterrupt:
+            server.should_exit = True
+        return 0
+
+    # The Windows release uses the installed Edge WebView2 runtime to provide
+    # a normal application window. The API and frontend remain the same code
+    # served by Docker; this is intentionally only a thin desktop shell.
+    server_thread = threading.Thread(target=server.run, name="8mblocal-server", daemon=True)
+    server_thread.start()
+    if not _wait_until_ready(url):
         server.should_exit = True
+        server_thread.join(timeout=10)
+        raise RuntimeError(f"8mb.local did not become ready at {url}")
+
+    try:
+        import webview
+
+        webview.create_window(
+            "8mb.local",
+            url,
+            width=1200,
+            height=820,
+            min_size=(760, 600),
+            text_select=True,
+        )
+        webview.start(gui="edgechromium", debug=False)
+    except (ImportError, RuntimeError, OSError) as exc:
+        # Do not leave an invisible server running indefinitely after an
+        # automatic browser fallback. Users who intentionally want browser
+        # mode can launch with --browser and manage that server explicitly.
+        logging.getLogger(__name__).error("Native window unavailable: %s", exc)
+        _show_native_error(
+            "8mb.local could not open its native window. The local server "
+            "has been stopped. Reinstall Microsoft Edge WebView2, or launch "
+            "8mblocal.exe --browser from a terminal."
+        )
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.should_exit = True
+        server_thread.join(timeout=10)
     return 0
 
 

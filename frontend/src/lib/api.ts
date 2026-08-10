@@ -149,6 +149,12 @@ export function downloadUrl(taskId: string) {
   return `${BACKEND}/api/jobs/${taskId}/download`;
 }
 
+export async function getJobStatus(taskId: string) {
+  const res = await fetch(`${BACKEND}/api/jobs/${encodeURIComponent(taskId)}/status`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export function batchZipDownloadUrl(batchId: string) {
   return `${BACKEND}/api/batches/${encodeURIComponent(batchId)}/download.zip`;
 }

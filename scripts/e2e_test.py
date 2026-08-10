@@ -3,9 +3,10 @@
 
 The test owns its temporary data directory and runtime process/container.  It
 uploads real generated media, queues multiple codecs, downloads the results,
-and exercises the batch ZIP path.  Explicit hardware codec requests are
-useful even on CPU-only hosts because the worker should report a controlled
-fallback rather than fail the job.
+and exercises the batch ZIP path. Explicit hardware codec requests are useful
+even on CPU-only hosts because the worker should report a controlled fallback
+rather than fail the job. Use ``--require-exact-codecs`` for hardware proof;
+that mode rejects CPU fallback and unknown final encoders.
 """
 
 from __future__ import annotations
@@ -156,6 +157,36 @@ def _multipart_request(
     if not isinstance(result, dict):
         raise E2EError(f"POST {url} returned a non-object JSON response")
     return result
+
+
+def _multipart_error(
+    url: str,
+    *,
+    fields: dict[str, str],
+    files: Iterable[tuple[str, Path]],
+    timeout: float = 60,
+) -> tuple[int, dict]:
+    """Submit multipart data and return a structured expected HTTP error."""
+    body, content_type = _multipart(fields, files)
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": content_type, "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+            raise E2EError(f"POST {url} unexpectedly returned HTTP {response.status}: {raw[:400]!r}")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as parse_error:
+            raise E2EError(f"POST {url} returned non-JSON HTTP {exc.code}: {raw[:400]!r}") from parse_error
+        if not isinstance(payload, dict):
+            raise E2EError(f"POST {url} returned non-object HTTP {exc.code} JSON")
+        return exc.code, payload
 
 
 def _wait_for_health(base_url: str, process: subprocess.Popen[bytes] | None, timeout: float) -> dict:
@@ -366,6 +397,18 @@ def _wait_job(base_url: str, task_id: str, timeout: float) -> dict:
     raise E2EError(f"Job {task_id} did not finish within {timeout:.0f}s: {last}")
 
 
+def _wait_for_states(base_url: str, task_id: str, states: set[str], timeout: float) -> dict:
+    deadline = time.monotonic() + timeout
+    last: dict = {}
+    expected = {state.upper() for state in states}
+    while time.monotonic() < deadline:
+        last = _json_request(f"{base_url}/api/jobs/{task_id}/status", timeout=10)
+        if str(last.get("state") or "").upper() in expected:
+            return last
+        time.sleep(0.25)
+    raise E2EError(f"Job {task_id} did not reach {sorted(expected)} within {timeout:.0f}s: {last}")
+
+
 def _wait_batch(base_url: str, batch_id: str, timeout: float) -> dict:
     deadline = time.monotonic() + timeout
     last: dict = {}
@@ -402,7 +445,7 @@ def _verify_media(path: Path, ffprobe: str) -> dict:
         "-loglevel",
         "error",
         "-show_entries",
-        "format=duration,size:stream=codec_name,codec_type,width,height",
+        "format=duration,size,format_name:stream=codec_name,codec_type,width,height",
         "-of",
         "json",
         str(path),
@@ -418,7 +461,55 @@ def _verify_media(path: Path, ffprobe: str) -> dict:
         raise E2EError(f"ffprobe returned malformed metadata for {path}") from exc
     if duration <= 0 or size <= 0:
         raise E2EError(f"Output has invalid duration/size: {path} ({duration}s, {size} bytes)")
-    return {"duration_s": duration, "size_bytes": size, "streams": metadata.get("streams") or []}
+    return {
+        "duration_s": duration,
+        "size_bytes": size,
+        "format_name": str((metadata.get("format") or {}).get("format_name") or ""),
+        "streams": metadata.get("streams") or [],
+    }
+
+
+def _expected_video_codec(encoder: str) -> str:
+    if encoder.startswith("h264_") or encoder == "libx264":
+        return "h264"
+    if encoder.startswith("hevc_") or encoder == "libx265":
+        return "hevc"
+    if encoder.startswith("av1_") or encoder in {"libsvtav1", "libaom-av1"}:
+        return "av1"
+    raise E2EError(f"No stream-codec expectation is defined for encoder {encoder!r}")
+
+
+def _assert_output_shape(
+    metadata: dict,
+    *,
+    encoder: str,
+    audio_codec: str,
+    audio_only: bool,
+) -> None:
+    streams = metadata["streams"]
+    video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
+    audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    if audio_only:
+        if video_streams or not audio_streams:
+            raise E2EError(f"Audio-only output has unexpected streams: {streams}")
+    else:
+        if len(video_streams) != 1:
+            raise E2EError(f"Expected exactly one video stream: {streams}")
+        video = video_streams[0]
+        expected_codec = _expected_video_codec(encoder)
+        if video.get("codec_name") != expected_codec:
+            raise E2EError(
+                f"Encoder {encoder!r} produced stream codec "
+                f"{video.get('codec_name')!r}, expected {expected_codec!r}"
+            )
+        if int(video.get("width") or 0) <= 0 or int(video.get("height") or 0) <= 0:
+            raise E2EError(f"Video output has invalid dimensions: {video}")
+        if audio_codec == "none" and audio_streams:
+            raise E2EError(f"Muted output unexpectedly contains audio: {audio_streams}")
+        if audio_codec != "none" and not audio_streams:
+            raise E2EError("Output unexpectedly lost its audio stream")
+    if "mp4" not in metadata["format_name"] and "mov" not in metadata["format_name"]:
+        raise E2EError(f"Expected an MP4/M4A container, got {metadata['format_name']!r}")
 
 
 def _run_single(
@@ -430,6 +521,7 @@ def _run_single(
     *,
     audio_codec: str = "aac",
     audio_only: bool = False,
+    require_exact_codec: bool = False,
     timeout: float,
 ) -> dict:
     upload = _multipart_request(
@@ -457,19 +549,99 @@ def _run_single(
     queued = _json_request(f"{base_url}/api/compress", method="POST", payload=request, timeout=30)
     task_id = str(queued["task_id"])
     status = _wait_job(base_url, task_id, timeout)
+    actual_encoder = status.get("encoder")
+    if not audio_only and require_exact_codec and actual_encoder != codec:
+        raise E2EError(
+            f"Requested encoder {codec!r}, but final encoder was "
+            f"{actual_encoder or 'unknown'!r}"
+        )
     data = _download_after_completion(base_url, task_id)
     suffix = ".m4a" if audio_only else ".mp4"
     output_path = output_dir / f"{_safe_label(source.stem)}-{_safe_label(codec)}{suffix}"
     output_path.write_bytes(data)
     metadata = _verify_media(output_path, ffprobe)
+    verified_encoder = str(actual_encoder or codec)
+    _assert_output_shape(
+        metadata,
+        encoder=verified_encoder,
+        audio_codec=audio_codec,
+        audio_only=audio_only,
+    )
     return {
         "source": source.name,
         "requested_codec": codec,
+        "actual_encoder": actual_encoder,
         "task_id": task_id,
         "state": status.get("state"),
         "output": str(output_path),
         **metadata,
     }
+
+
+def _enqueue_single(base_url: str, source: Path, codec: str, *, preset: str = "p1") -> str:
+    upload = _multipart_request(
+        f"{base_url}/api/upload",
+        fields={"target_size_mb": "1", "audio_bitrate_kbps": "64"},
+        files=[("file", source)],
+    )
+    queued = _json_request(
+        f"{base_url}/api/compress",
+        method="POST",
+        payload={
+            "job_id": str(upload["job_id"]),
+            "filename": str(upload["filename"]),
+            "target_size_mb": 1,
+            "target_video_bitrate_kbps": 500,
+            "video_codec": codec,
+            "audio_codec": "aac",
+            "audio_bitrate_kbps": 64,
+            "preset": preset,
+            "container": "mp4",
+            "tune": "hq",
+            "fast_mp4_finalize": True,
+        },
+    )
+    return str(queued["task_id"])
+
+
+def _assert_canceled(base_url: str, task_id: str, timeout: float = 45) -> dict:
+    status = _wait_for_states(base_url, task_id, {"REVOKED", "CANCELED", "CANCELLED"}, timeout)
+    try:
+        _download(f"{base_url}/api/jobs/{task_id}/download", timeout=10)
+    except E2EError as exc:
+        if "HTTP 404" not in str(exc):
+            raise
+    else:
+        raise E2EError(f"Canceled job {task_id} incorrectly exposed a successful download")
+    return status
+
+
+def _run_cancellation_scenarios(base_url: str, long_source: Path, *, queued: bool) -> dict:
+    active_task = _enqueue_single(base_url, long_source, "libsvtav1", preset="p7")
+    _wait_for_states(base_url, active_task, {"STARTED", "PROGRESS"}, timeout=30)
+    time.sleep(0.5)
+    _json_request(f"{base_url}/api/jobs/{active_task}/cancel", method="POST", timeout=15)
+    active_status = _assert_canceled(base_url, active_task)
+    result: dict = {"active": {"task_id": active_task, "state": active_status.get("state")}}
+
+    if queued:
+        blocker = _enqueue_single(base_url, long_source, "libsvtav1", preset="p7")
+        _wait_for_states(base_url, blocker, {"STARTED", "PROGRESS"}, timeout=30)
+        victim = _enqueue_single(base_url, long_source, "libx264", preset="p1")
+        # With one local worker, the second Future must remain pending until
+        # the blocker exits. Canceling it proves queued cancellation without
+        # racing a very fast encoder startup.
+        time.sleep(0.5)
+        victim_initial = _json_request(f"{base_url}/api/jobs/{victim}/status", timeout=10)
+        if str(victim_initial.get("state") or "").upper() != "PENDING":
+            raise E2EError(f"Queued cancellation precondition failed: {victim_initial}")
+        _json_request(f"{base_url}/api/jobs/{victim}/cancel", method="POST", timeout=15)
+        victim_status = _assert_canceled(base_url, victim)
+        _json_request(f"{base_url}/api/jobs/{blocker}/cancel", method="POST", timeout=15)
+        blocker_status = _assert_canceled(base_url, blocker)
+        result["queued"] = {"task_id": victim, "state": victim_status.get("state")}
+        result["blocker_cleanup"] = {"task_id": blocker, "state": blocker_status.get("state")}
+    return result
 
 
 def _run_batch(base_url: str, sources: list[Path], output_dir: Path) -> dict:
@@ -501,6 +673,10 @@ def _run_batch(base_url: str, sources: list[Path], output_dir: Path) -> dict:
             names = archive.namelist()
             if len(names) != len(sources):
                 raise E2EError(f"Batch ZIP contains {len(names)} files, expected {len(sources)}")
+            if any(Path(name).name != name or name.startswith(("/", "\\")) for name in names):
+                raise E2EError(f"Batch ZIP contains unsafe member names: {names}")
+            if len(set(name.casefold() for name in names)) != len(names):
+                raise E2EError(f"Batch ZIP contains colliding member names: {names}")
             zip_path = output_dir / f"batch-{batch_id}.zip"
             zip_path.write_bytes(zip_bytes)
     except zipfile.BadZipFile as exc:
@@ -514,10 +690,76 @@ def _run_batch(base_url: str, sources: list[Path], output_dir: Path) -> dict:
     }
 
 
+def _run_mixed_batch(base_url: str, valid: Path, invalid: Path, output_dir: Path) -> dict:
+    fields = {
+        "target_size_mb": "0.5",
+        "video_codec": "libx264",
+        "audio_codec": "aac",
+        "audio_bitrate_kbps": "64",
+        "preset": "p1",
+        "container": "mp4",
+        "tune": "hq",
+        "target_video_bitrate_kbps": "300",
+        "fast_mp4_finalize": "true",
+    }
+    response = _multipart_request(
+        f"{base_url}/api/batches/upload",
+        fields=fields,
+        files=[("files", valid), ("files", invalid)],
+    )
+    batch_id = str(response["batch_id"])
+    status = _wait_batch(base_url, batch_id, timeout=180)
+    items = status.get("items") or []
+    states = [str(item.get("state") or "").lower() for item in items]
+    if len(items) != 2 or sorted(states) != ["completed", "failed"]:
+        raise E2EError(f"Mixed batch did not preserve one success and one failure: {status}")
+    if str(status.get("state") or "").lower() != "completed_with_errors":
+        raise E2EError(f"Mixed batch has wrong terminal state: {status}")
+    zip_bytes = _download(f"{base_url}/api/batches/{batch_id}/download.zip", timeout=30)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+        names = archive.namelist()
+        if len(names) != 1 or Path(names[0]).name != names[0]:
+            raise E2EError(f"Mixed batch ZIP should contain only its successful safe output: {names}")
+    zip_path = output_dir / f"mixed-batch-{batch_id}.zip"
+    zip_path.write_bytes(zip_bytes)
+    return {"batch_id": batch_id, "state": status.get("state"), "states": states, "zip": str(zip_path)}
+
+
+def _verify_terminal_sse_replay(base_url: str, task_id: str) -> dict:
+    request = urllib.request.Request(
+        f"{base_url}/api/stream/{task_id}",
+        headers={"Accept": "text/event-stream", "Cache-Control": "no-cache"},
+    )
+    events: list[dict] = []
+    with urllib.request.urlopen(request, timeout=15) as response:
+        if "text/event-stream" not in response.headers.get("Content-Type", ""):
+            raise E2EError(f"SSE endpoint returned wrong content type: {response.headers}")
+        while len(events) < 4:
+            line = response.readline()
+            if not line:
+                break
+            decoded = line.decode("utf-8", errors="replace").strip()
+            if not decoded.startswith("data:"):
+                continue
+            event = json.loads(decoded[5:].strip())
+            events.append(event)
+            if event.get("type") in {"done", "error", "canceled"}:
+                break
+    kinds = [event.get("type") for event in events]
+    if not kinds or kinds[0] != "connected" or "done" not in kinds:
+        raise E2EError(f"Completed job SSE reconnect missed connected/done replay: {events}")
+    return {"task_id": task_id, "events": kinds}
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("local", "docker", "auto"), default="local")
     parser.add_argument("--codecs", default=DEFAULT_CODECS, help="Comma-separated video codecs to exercise")
+    parser.add_argument(
+        "--require-exact-codecs",
+        action="store_true",
+        help="Fail if a video job falls back or does not report its final encoder",
+    )
     parser.add_argument("--profile", choices=("quick", "extended"), default="extended")
     parser.add_argument("--skip-edge-cases", action="store_true")
     parser.add_argument("--skip-batch", action="store_true")
@@ -530,6 +772,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--data-dir", type=Path, help="Use this app-data directory instead of a temporary one")
     parser.add_argument(
+        "--allow-existing-data-dir",
+        action="store_true",
+        help="Explicitly allow tests to use a non-empty app-data directory",
+    )
+    parser.add_argument(
         "--local-executable",
         type=Path,
         help="Run this packaged local executable instead of windows/desktop_app.py",
@@ -541,7 +788,7 @@ def _parse_args() -> argparse.Namespace:
         help="Worker threads for local runtime tests (use 1 to force a queue)",
     )
     parser.add_argument("--keep", action="store_true", help="Keep generated media, outputs, and runtime log")
-    parser.add_argument("--docker-image", default="8mb.local:e2e")
+    parser.add_argument("--docker-image", default="jms1717/8mblocal:latest")
     parser.add_argument("--docker-build", action="store_true", help="Build --docker-image before starting Docker")
     parser.add_argument("--docker-gpu", choices=("none", "nvidia", "vaapi"), default="none")
     parser.add_argument("--ffmpeg", default="ffmpeg")
@@ -551,6 +798,16 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
+    if os.name == "nt":
+        bundled_bin = ROOT / "windows" / "ffmpeg" / "bin"
+        if args.ffmpeg == "ffmpeg" and shutil.which(args.ffmpeg) is None:
+            bundled_ffmpeg = bundled_bin / "ffmpeg.exe"
+            if bundled_ffmpeg.is_file():
+                args.ffmpeg = str(bundled_ffmpeg)
+        if args.ffprobe == "ffprobe" and shutil.which(args.ffprobe) is None:
+            bundled_ffprobe = bundled_bin / "ffprobe.exe"
+            if bundled_ffprobe.is_file():
+                args.ffprobe = str(bundled_ffprobe)
     if shutil.which(args.ffmpeg) is None or shutil.which(args.ffprobe) is None:
         raise SystemExit(f"Both {args.ffmpeg!r} and {args.ffprobe!r} must be available on PATH")
 
@@ -571,6 +828,16 @@ def main() -> int:
         root = args.data_dir.expanduser().resolve().parent / f"8mblocal-e2e-{uuid.uuid4().hex[:8]}"
         root.mkdir(parents=True, exist_ok=True)
         app_data = args.data_dir.expanduser().resolve()
+        if (
+            app_data.exists()
+            and any(app_data.iterdir())
+            and not args.allow_existing_data_dir
+        ):
+            raise E2EError(
+                f"Refusing to test against non-empty app data: {app_data}. "
+                "Use a disposable empty directory, or pass "
+                "--allow-existing-data-dir after verifying the target."
+            )
     elif args.keep:
         root = Path(tempfile.mkdtemp(prefix="8mblocal-e2e-"))
         app_data = root / "app-data"
@@ -602,6 +869,19 @@ def main() -> int:
             ]
         )
         generated = {path.name: path for path in media_dir.iterdir() if path.is_file()}
+        corrupt_media = media_dir / "corrupt-video.mp4"
+        corrupt_media.write_bytes(b"not a media file\x00\xff" * 64)
+        cancel_media = media_dir / "cancellation-source.mp4"
+        if args.profile == "extended":
+            _run_checked([
+                args.ffmpeg,
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30",
+                "-f", "lavfi", "-i", "sine=frequency=550:sample_rate=48000",
+                "-t", "12", "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "64k", str(cancel_media),
+            ], timeout=180)
         runtime_info = runtime.start()
         summary["runtime"] = runtime_info
         health = _wait_for_health(runtime.base_url, runtime.process, timeout=90)
@@ -615,10 +895,18 @@ def main() -> int:
                     codec,
                     output_dir,
                     args.ffprobe,
+                    require_exact_codec=args.require_exact_codecs,
                     timeout=args.timeout,
                 )
                 summary["jobs"].append(result)
-                print(f"PASS codec={codec} output={result['size_bytes']} bytes")
+                actual = result.get("actual_encoder")
+                if actual == codec:
+                    label = f"codec={codec}"
+                elif actual:
+                    label = f"fallback={codec}->{actual}"
+                else:
+                    label = f"codec={codec} actual=unknown"
+                print(f"PASS {label} output={result['size_bytes']} bytes")
             except (E2EError, KeyError) as exc:
                 failure = {"scenario": f"codec:{codec}", "error": str(exc)}
                 summary["failures"].append(failure)
@@ -640,6 +928,7 @@ def main() -> int:
                         args.ffprobe,
                         audio_codec=audio_codec,
                         audio_only=audio_only,
+                        require_exact_codec=args.require_exact_codecs,
                         timeout=args.timeout,
                     )
                     summary["jobs"].append(result)
@@ -657,6 +946,99 @@ def main() -> int:
             except (E2EError, KeyError) as exc:
                 summary["failures"].append({"scenario": "batch", "error": str(exc)})
                 print(f"FAIL batch: {exc}")
+
+        if args.profile == "extended":
+            try:
+                before_uploads = set((app_data / "uploads").glob("*")) if not args.base_url else set()
+                error_status, error_payload = _multipart_error(
+                    f"{runtime.base_url}/api/upload",
+                    fields={"target_size_mb": "0.5", "audio_bitrate_kbps": "64"},
+                    files=[("file", corrupt_media)],
+                )
+                if error_status != 400 or "analy" not in str(error_payload.get("detail") or "").lower():
+                    raise E2EError(f"Invalid upload returned an unclear response: HTTP {error_status} {error_payload}")
+                if not args.base_url:
+                    after_uploads = set((app_data / "uploads").glob("*"))
+                    leaked = after_uploads - before_uploads
+                    if leaked:
+                        raise E2EError(f"Invalid upload leaked temporary input files: {sorted(map(str, leaked))}")
+                summary["invalid_upload"] = {"status": error_status, "detail": error_payload.get("detail")}
+                print("PASS invalid media rejected and cleaned up")
+            except (E2EError, OSError) as exc:
+                summary["failures"].append({"scenario": "invalid-upload", "error": str(exc)})
+                print(f"FAIL invalid upload: {exc}")
+
+            if not args.skip_batch:
+                try:
+                    summary["mixed_batch"] = _run_mixed_batch(
+                        runtime.base_url, generated["baseline.mp4"], corrupt_media, output_dir
+                    )
+                    print("PASS mixed batch preserved success/failure and safe ZIP")
+                except (E2EError, KeyError, zipfile.BadZipFile) as exc:
+                    summary["failures"].append({"scenario": "mixed-batch", "error": str(exc)})
+                    print(f"FAIL mixed batch: {exc}")
+
+                try:
+                    duplicate_a = media_dir / "duplicate-a" / "same name.mp4"
+                    duplicate_b = media_dir / "duplicate-b" / "same name.mp4"
+                    duplicate_a.parent.mkdir()
+                    duplicate_b.parent.mkdir()
+                    shutil.copyfile(generated["baseline.mp4"], duplicate_a)
+                    shutil.copyfile(generated["baseline.mp4"], duplicate_b)
+                    summary["duplicate_batch"] = _run_batch(
+                        runtime.base_url, [duplicate_a, duplicate_b], output_dir
+                    )
+                    print("PASS duplicate filenames produced collision-free ZIP entries")
+                except (E2EError, OSError, zipfile.BadZipFile) as exc:
+                    summary["failures"].append({"scenario": "duplicate-batch", "error": str(exc)})
+                    print(f"FAIL duplicate batch: {exc}")
+
+            if summary["jobs"]:
+                try:
+                    summary["sse_reconnect"] = _verify_terminal_sse_replay(
+                        runtime.base_url, str(summary["jobs"][0]["task_id"])
+                    )
+                    print("PASS SSE reconnect replayed terminal done event")
+                except (E2EError, OSError, ValueError, json.JSONDecodeError) as exc:
+                    summary["failures"].append({"scenario": "sse-reconnect", "error": str(exc)})
+                    print(f"FAIL SSE reconnect: {exc}")
+
+            try:
+                summary["cancellation"] = _run_cancellation_scenarios(
+                    runtime.base_url,
+                    cancel_media,
+                    queued=(not args.base_url and args.mode == "local" and args.local_workers == 1),
+                )
+                label = "active and queued" if "queued" in summary["cancellation"] else "active"
+                print(f"PASS {label} cancellation with no successful download")
+            except (E2EError, KeyError, OSError) as exc:
+                summary["failures"].append({"scenario": "cancellation", "error": str(exc)})
+                print(f"FAIL cancellation: {exc}")
+
+        if not args.base_url and summary["jobs"]:
+            try:
+                recovery_job = summary["jobs"][0]
+                runtime.stop()
+                runtime.start()
+                _wait_for_health(runtime.base_url, runtime.process, timeout=90)
+                history = _json_request(f"{runtime.base_url}/api/history?limit=200", timeout=15)
+                entries = history.get("entries") or history.get("history") or []
+                if not any(str(entry.get("task_id")) == str(recovery_job["task_id"]) for entry in entries):
+                    raise E2EError(f"Completed job missing from history after restart: {history}")
+                recovered = _download_after_completion(runtime.base_url, str(recovery_job["task_id"]))
+                recovered_path = output_dir / f"restart-{recovery_job['task_id']}.mp4"
+                recovered_path.write_bytes(recovered)
+                recovered_meta = _verify_media(recovered_path, args.ffprobe)
+                summary["restart_recovery"] = {
+                    "task_id": recovery_job["task_id"],
+                    "history_entries": len(entries),
+                    "output": str(recovered_path),
+                    **recovered_meta,
+                }
+                print("PASS history and repeated download recovered after runtime restart")
+            except (E2EError, KeyError, OSError) as exc:
+                summary["failures"].append({"scenario": "restart-recovery", "error": str(exc)})
+                print(f"FAIL restart recovery: {exc}")
     finally:
         summary["runtime_log_tail"] = runtime.logs()
         runtime.stop()

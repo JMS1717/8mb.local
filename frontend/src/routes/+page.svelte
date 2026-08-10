@@ -1,7 +1,10 @@
 <script lang="ts">
   import '../app.css';
   import { onMount, onDestroy } from 'svelte';
-  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion, getBatchStatus, batchZipDownloadUrl } from '$lib/api';
+  import { goto } from '$app/navigation';
+  import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getJobStatus, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion, getBatchStatus, batchZipDownloadUrl } from '$lib/api';
+  import { autoDownloadOnce, clearActiveJobId, getActiveJobId, setActiveJobId, triggerBrowserDownload } from '$lib/activeJob';
+  import { stagePendingBatchFiles } from '$lib/pendingBatch';
   import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
   import { availableCodecOptions, codecColor, codecIcon, encoderDisplayName, type CodecOption } from '$lib/codecs';
 
@@ -333,15 +336,7 @@
       if (sb?.buttons?.length) sizeButtons = sb.buttons;
     } catch {}
 
-    // Fetch recent history (best-effort)
-    try {
-      const res = await fetch('/api/history');
-      if (res.ok) {
-        const data = await res.json();
-        historyEnabled = !!data.enabled;
-        history = (data.entries || []).slice(0,5);
-      }
-    } catch {}
+    await refreshRecentHistory();
 
     // Restore the currently tracked batch from the batch page
     try {
@@ -351,7 +346,28 @@
         await refreshActiveBatchStatus();
       }
     } catch {}
+
+    // Single-file jobs belong to the backend, not this page component. Restore
+    // and reconnect when the user returns from Queue, Settings, or History.
+    const trackedJob = getActiveJobId();
+    if (trackedJob) {
+      taskId = trackedJob;
+      logLines = ['Reconnected to the active background job.', ...logLines];
+      reconnectStream();
+    }
   });
+
+  async function refreshRecentHistory(): Promise<void> {
+    try {
+      const res = await fetch('/api/history', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      historyEnabled = !!data.enabled;
+      history = (data.entries || []).slice(0, 5);
+    } catch {
+      // History is best-effort and must not interfere with compression.
+    }
+  }
 
   function applyPreset(name: string){
     const p = presetProfiles.find(x => x.name === name);
@@ -522,7 +538,13 @@
   async function onDrop(e: DragEvent){
     e.preventDefault();
     if (!e.dataTransfer) return;
-    const f = e.dataTransfer.files?.[0];
+    const droppedFiles = Array.from(e.dataTransfer.files || []);
+    if (droppedFiles.length > 1) {
+      stagePendingBatchFiles(droppedFiles);
+      await goto('/batch');
+      return;
+    }
+    const f = droppedFiles[0];
     if (f) {
       file = f;
       fileSizeLabel = formatSize(f.size);
@@ -531,6 +553,20 @@
     }
   }
   function allowDrop(e: DragEvent){ e.preventDefault(); }
+
+  async function onFilesPicked(e: Event): Promise<void> {
+    const input = e.target as HTMLInputElement;
+    const pickedFiles = Array.from(input.files || []);
+    if (pickedFiles.length > 1) {
+      stagePendingBatchFiles(pickedFiles);
+      await goto('/batch');
+      return;
+    }
+    const picked = pickedFiles[0] || null;
+    file = picked;
+    fileSizeLabel = picked ? formatSize(picked.size) : null;
+    if (picked) setTimeout(() => doUpload(), 100);
+  }
 
   async function doUpload(){
     if (!file) return;
@@ -608,6 +644,7 @@
       };
       const { task_id } = await startCompress(payload);
       taskId = task_id;
+      setActiveJobId(task_id);
       
       // Open SSE progress stream
       logLines = ['✓ Job started. Opening progress stream...', ...logLines].slice(0, 500);
@@ -659,8 +696,9 @@
             if (data.progress >= 100 || data.phase === 'done') {
               progress = 100;
               displayedProgress = 100;
-              isCompressing = false;
-              isFinalizing = false;
+              // 100% progress means FFmpeg finished writing frames, not that
+              // history/output finalization and the durable done event landed.
+              isFinalizing = true;
               logLines = ['✅ 100% - Waiting for final confirmation...', ...logLines].slice(0, 500);
             }
             
@@ -731,6 +769,7 @@
             isCompressing = false;
             isFinalizing = false;
             isRetrying = false;
+            isCancelling = false;
             retryMessage = '';
             isReady = true;
             hasProgress = false;
@@ -738,6 +777,8 @@
             logLines = ['✅ Compression complete!', ...logLines].slice(0, 500);
             
             try { esRef?.close(); esRef = null; } catch {}
+            clearActiveJobId(task_id);
+            setTimeout(() => refreshRecentHistory(), 100);
             
             // Play sound if enabled (gentle success chime)
             if (playSoundWhenDone) {
@@ -750,7 +791,7 @@
             // Auto-download if enabled
             if (autoDownload && taskId) {
               setTimeout(() => {
-                window.location.href = downloadUrl(taskId!);
+                autoDownloadOnce(task_id, downloadUrl(task_id));
               }, 500);
             }
           }
@@ -761,6 +802,8 @@
             errorText = data.message;
             isCompressing = false;
             isFinalizing = false;
+            isCancelling = false;
+            clearActiveJobId(task_id);
             try { esRef?.close(); } catch {}
           }
           
@@ -806,6 +849,8 @@
             logLines = ['🚫 Job canceled', ...logLines];
             isCompressing = false;
             isFinalizing = false;
+            isCancelling = false;
+            clearActiveJobId(task_id);
             try { esRef?.close(); } catch {}
           }
           
@@ -850,8 +895,7 @@
     // If it's not ready, the backend will return a 404 with detail JSON, but at least
     // the finalization watchdog will keep polling and eventually succeed
     try {
-      // Use window.location with wait parameter; if it fails, browser shows download or error
-      window.location.href = `${url}?wait=2`;
+      triggerBrowserDownload(`${url}?wait=2`);
     } finally {
       // Reset state after a moment (the page may navigate away if download succeeds)
       setTimeout(() => { tryDownloading = false; }, 1000);
@@ -867,24 +911,16 @@
       finalizePoller = setInterval(async () => {
         if (!taskId) return;
         try {
-          // Try GET request with short wait instead of HEAD (more reliable)
-          const dlRes = await fetch(`${downloadUrl(taskId)}?wait=2`, { 
-            method: 'GET',
-            cache: 'no-store',
-            redirect: 'manual' // Don't follow redirects, just check response
-          });
-          
-          if (dlRes.ok && dlRes.status === 200) {
-            isReady = true;
-            isFinalizing = false;
-            showTryDownload = false;
-            isCompressing = false;
+          const status = await getJobStatus(taskId);
+          const state = String(status?.state || '').toUpperCase();
+          if (state === 'SUCCESS') {
             clearInterval(finalizePoller);
             finalizePoller = null;
-            // Trigger download by navigating to URL
-            window.location.href = downloadUrl(taskId!);
-          } else if (dlRes.status === 404) {
-            // The output is still being finalized; the next interval retries.
+            reconnectStream();
+          } else if (state === 'FAILURE' || state === 'REVOKED') {
+            clearInterval(finalizePoller);
+            finalizePoller = null;
+            reconnectStream();
           }
         } catch {
         }
@@ -897,42 +933,54 @@
 
   function reconnectStream(){
     if (!taskId) return;
+    const reconnectTaskId = taskId;
     errorText = null;
     try { esRef?.close(); } catch {}
-    const es = openProgressStream(taskId);
+    const es = openProgressStream(reconnectTaskId);
     esRef = es;
     isCompressing = true;
     es.onmessage = (ev) => {
       try { const data = JSON.parse(ev.data);
-        if (data.type === 'progress') { progress = data.progress; }
-        if (data.type === 'log' && data.message) { logLines = [data.message, ...logLines].slice(0, 500); }
-        if (data.type === 'done') { 
-          doneStats = data.stats; 
-          progress = 100;
-          isCompressing = false;
-          try { esRef?.close(); } catch {}
-          // Play sound when done if enabled (gentle success chime)
-          if (playSoundWhenDone) {
-            // Pleasant ascending chime (C-E-G major chord)
-            const audio = new Audio('data:audio/wav;base64,UklGRiQFAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAFAAB/goSGiIqMjo+RkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ6foKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr/AwcLDxMXGx8jJysvMzc7P0NHS09TV1tfY2drb3N3e3+Dh4uPk5ebn6Onq6+zt7u/w8fLz9PX29/j5+vv8/f7/gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v8=');
-            audio.volume = 0.4;
-            audio.play().catch(() => {});
-          }
-          // Auto-download if enabled
-          if (autoDownload && taskId) {
-            setTimeout(() => {
-              window.location.href = downloadUrl(taskId!);
-            }, 500);
-          }
+        if (data.type === 'progress') {
+          progress = Number(data.progress || 0);
+          displayedProgress = progress;
+          isFinalizing = data.phase === 'finalizing';
         }
-        if (data.type === 'error') { logLines = [data.message, ...logLines]; isCompressing = false; try { esRef?.close(); } catch {} }
+        if (data.type === 'log' && data.message) { logLines = [data.message, ...logLines].slice(0, 500); }
+        if (data.type === 'done') {
+          doneStats = data.stats;
+          progress = 100;
+          displayedProgress = 100;
+          isCompressing = false;
+          isFinalizing = false;
+          isCancelling = false;
+          isReady = true;
+          clearActiveJobId(reconnectTaskId);
+          try { esRef?.close(); } catch {}
+          setTimeout(() => refreshRecentHistory(), 100);
+          if (autoDownload) setTimeout(() => autoDownloadOnce(reconnectTaskId, downloadUrl(reconnectTaskId)), 500);
+        }
+        if (data.type === 'error') {
+          errorText = String(data.message || 'Compression failed');
+          logLines = [`Error: ${errorText}`, ...logLines];
+          isCompressing = false;
+          isFinalizing = false;
+          isCancelling = false;
+          clearActiveJobId(reconnectTaskId);
+          try { esRef?.close(); } catch {}
+        }
+        if (data.type === 'canceled') {
+          logLines = ['Job canceled', ...logLines];
+          isCompressing = false;
+          isFinalizing = false;
+          isCancelling = false;
+          clearActiveJobId(reconnectTaskId);
+          try { esRef?.close(); } catch {}
+        }
       } catch {}
     }
     es.onerror = () => {
-      logLines = ['[SSE] Connection error: lost progress stream.', ...logLines].slice(0, 500);
-      errorText = 'Lost connection to progress stream. Check server/network and try again.';
-      isCompressing = false;
-      try { esRef?.close(); } catch {}
+      logLines = ['Progress connection interrupted; reconnecting automatically...', ...logLines].slice(0, 500);
     }
   }
 
@@ -979,18 +1027,22 @@
   async function onCancel(){
     if (!taskId || isCancelling) return;
     isCancelling = true;
+    logLines = ['Cancellation requested; waiting for the encoder to stop…', ...logLines].slice(0, 500);
     try {
       await cancelJob(taskId);
-      logLines = ['Cancellation requested…', ...logLines].slice(0, 500);
+      if (!esRef) reconnectStream();
     } catch (e:any) {
       errorText = e?.message || 'Failed to cancel';
-    } finally {
       isCancelling = false;
     }
   }
 
   onDestroy(() => {
     stopActiveBatchPolling();
+    try { esRef?.close(); } catch {}
+    esRef = null;
+    if (finalizePoller) { clearInterval(finalizePoller); finalizePoller = null; }
+    if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
   });
 
   // Persist UI preferences
@@ -1188,7 +1240,7 @@
          role="region" aria-label="Video upload drop zone"
          on:drop={onDrop} on:dragover={allowDrop}>
       <p class="mb-2">Drag & drop a video here</p>
-  <input bind:this={uploadInput} type="file" accept="video/*" on:change={(e:any)=>{ const f=e.target.files?.[0]||null; file=f; fileSizeLabel = f? formatSize(f.size): null; if(f) setTimeout(()=>doUpload(), 100); }} />
+  <input bind:this={uploadInput} type="file" multiple accept="video/*" on:change={onFilesPicked} />
       {#if file}
         <div class="mt-2 flex items-center gap-2">
           <p class="text-sm text-gray-400">{file.name} {#if fileSizeLabel}<span class="opacity-70">• {fileSizeLabel}</span>{/if}</p>
@@ -1552,7 +1604,7 @@
     {#if taskId && isCompressing}
       <button class="btn" on:click={onCancel} disabled={isCancelling}>{isCancelling ? 'Canceling…' : 'Cancel'}</button>
     {/if}
-    <button class="btn" on:click={reset} disabled={!file && !taskId}>Reset</button>
+    <button class="btn" on:click={reset} disabled={isCompressing || isCancelling || (!file && !taskId)}>Reset</button>
   </div>
 
   <!-- Download Ready Card - Prominent when file is ready -->

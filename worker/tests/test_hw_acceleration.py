@@ -132,7 +132,7 @@ class TestHardwareFallbackHelpers(unittest.TestCase):
     def test_cpu_filter_chain_removes_embedded_hw_filters(self):
         filters = cpu_filter_chain([
             "scale_npp=1280:-2,hwdownload,format=yuv420p",
-            "fps=30,format=nv12,hwupload",
+            "fps=30,format=nv12,hwupload=extra_hw_frames=64",
         ])
         self.assertEqual(filters, ["scale=1280:-2,format=yuv420p,fps=30"])
 
@@ -162,7 +162,7 @@ class TestStartupProbeCommand(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("vaapi=va:/dev/dri/renderD128", command)
         self.assertIn("qsv=hw@va", command)
-        self.assertIn("format=nv12,hwupload", command)
+        self.assertIn("format=nv12,hwupload=extra_hw_frames=64", command)
 
     @patch("worker.app.startup_tests.subprocess.run")
     def test_vaapi_startup_probe_allows_vaapi_frames(self, run):

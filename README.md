@@ -28,7 +28,7 @@
 
 - **NVIDIA NVENC, Intel QSV, Windows AMD AMF, and Linux VAAPI hardware encoding** with automatic CPU fallback when a GPU or driver is unavailable
 - **Robust encoder validation** at startup — tests actual encoder initialization, not just availability
-- **AV1, HEVC (H.265), and H.264** encoding via NVENC, QSV, VAAPI, or CPU software encoders
+- **AV1, HEVC (H.265), and H.264** encoding via NVENC, QSV, AMF, VAAPI, or CPU software encoders
 - Drag-and-drop UI with helpful presets and advanced options (codec, container, tune, audio bitrate)
 - **Configurable codec visibility** — enable/disable specific codecs in the Settings page
 - **Resolution control** — set max width/height while maintaining aspect ratio
@@ -127,7 +127,9 @@ All components run in a single container via supervisord.
 The Windows installer packages the same frontend, backend, worker, and FFmpeg
 path in one executable. It replaces only Redis/Celery transport with an
 in-process bounded queue, stores data under the user's local application data
-directory, binds to localhost, and opens the browser automatically. See
+directory, binds to localhost, and opens a native WebView2 window without
+visible terminal windows. The standalone `8mblocal.exe` does not require
+Docker, Redis, Python, Node.js, or a separate FFmpeg installation. See
 [`windows/README.md`](windows/README.md).
 
 ## Installation
@@ -245,10 +247,11 @@ docker compose -f docker-compose.cpu.yml up -d --build
 For a Docker-free Windows install, run the manual **Build native Windows
 executable** GitHub Actions workflow and download `8mblocal-Setup.exe` from its
 `8mblocal-windows` artifact. The per-user installer creates a Start Menu
-shortcut and optionally a Desktop shortcut; launching it opens the same web UI
-on localhost. The executable probes NVENC, Quick Sync, and AMD AMF before
-falling back to CPU encoding. See [`windows/README.md`](windows/README.md) for
-the installer, development, hardware-probe, and build details.
+shortcut and optionally a Desktop shortcut. The release also includes a
+standalone `8mblocal.exe` that can run without installation. Both open the same
+native WebView2 interface on localhost and probe NVENC, Quick Sync, and AMD AMF
+before falling back to CPU encoding. See [`windows/README.md`](windows/README.md)
+for the installer, Windows security warning, hardware probes, and build details.
 
 ### Repeatable end-to-end validation
 

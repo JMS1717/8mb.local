@@ -1,9 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = ['shared.local_runtime', 'celery.backends.cache', 'celery.loaders.app', 'kombu.transport.memory', 'worker.app.tasks', 'worker.app.startup_tests']
+hiddenimports = ['shared.local_runtime', 'shared.subprocess_utils', 'celery.backends.cache', 'celery.loaders.app', 'kombu.transport.memory', 'worker.app.tasks', 'worker.app.startup_tests']
 hiddenimports += collect_submodules('app')
 hiddenimports += collect_submodules('worker.app')
+hiddenimports += collect_submodules('webview')
 
 
 a = Analysis(
@@ -40,4 +41,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version='windows/version_info.txt',
+    icon=['build/brand/8mblocal.ico'],
 )

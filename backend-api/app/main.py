@@ -154,6 +154,15 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     logger.info("shutdown: FastAPI stopping")
+    # The Docker API has a normal Celery client and no local executor. The
+    # desktop runtime exposes shutdown() so closing the native window also
+    # cancels active FFmpeg work and joins its worker threads.
+    from .celery_app import celery_app
+
+    shutdown = getattr(celery_app, "shutdown", None)
+    if callable(shutdown):
+        await asyncio.to_thread(shutdown)
+        logger.info("shutdown: local worker stopped")
 
 
 # ---------------------------------------------------------------------------

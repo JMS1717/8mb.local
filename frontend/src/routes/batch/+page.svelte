@@ -13,6 +13,7 @@
   } from '$lib/api';
   import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
   import { availableCodecOptions, codecIcon, type CodecOption } from '$lib/codecs';
+  import { takePendingBatchFiles } from '$lib/pendingBatch';
 
   type BatchItem = {
     index: number;
@@ -555,6 +556,12 @@
   }
 
   onMount(async () => {
+    const stagedFiles = takePendingBatchFiles();
+    if (stagedFiles.length > 0) {
+      applySelection(stagedFiles);
+      selectionNotice = `Switched to Batch automatically for ${stagedFiles.length} selected files.`;
+    }
+
     try {
       const res = await fetch('/api/settings/presets');
       if (res.ok) {

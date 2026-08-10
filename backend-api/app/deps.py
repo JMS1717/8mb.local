@@ -21,6 +21,8 @@ import psutil
 from fastapi import HTTPException, UploadFile
 from redis.asyncio import Redis
 
+from shared.subprocess_utils import hidden_process_kwargs
+
 from .celery_app import celery_app
 from .config import settings
 from .models import JobMetadata
@@ -63,11 +65,13 @@ VIDEO_EXTENSIONS: set[str] = {
 HW_INFO_CACHE: dict | None = None
 HW_INFO_CACHE_TS: float = 0.0
 SYSTEM_CAPS_CACHE: dict | None = None
+SYSTEM_CAPS_CACHE_TS: float = 0.0
 
 # TTL after which get_hw_info_cached() will trigger a fresh worker probe in the
 # background. Short enough to pick up hardware changes (GPU driver reload,
 # encoder tests re-run) without hammering Celery on every hw-info request.
 HW_INFO_TTL_SECONDS: int = 60
+SYSTEM_CAPS_TTL_SECONDS: int = 30
 
 # Hardware probing runs a real one-frame FFmpeg test for each encoder.  A
 # native Windows process can need several seconds to initialize both NVIDIA
@@ -246,7 +250,9 @@ def ffprobe(input_path: Path) -> dict:
         str(input_path),
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, **hidden_process_kwargs()
+        )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("ffprobe timed out while analyzing the upload") from exc
     if proc.returncode != 0:
@@ -434,9 +440,13 @@ def get_system_capabilities() -> dict:
 
     try:
         q = "index,name,memory.total,memory.used,driver_version,uuid"
+        # nvidia-smi may need a few seconds to wake a powered-down laptop GPU.
+        # A two-second cold-start timeout produced a permanently cached empty
+        # GPU list even while the worker's NVENC initialization probes passed.
         res = subprocess.run(
             ["nvidia-smi", f"--query-gpu={q}", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=2,
+            capture_output=True, text=True, timeout=8,
+            **hidden_process_kwargs(),
         )
         if res.returncode == 0 and res.stdout.strip():
             lines = [l.strip() for l in res.stdout.strip().splitlines() if l.strip()]
@@ -452,8 +462,10 @@ def get_system_capabilities() -> dict:
                         "uuid": gpu_uuid,
                     })
                     info["nvidia_driver"] = drv
-    except Exception:
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.info("NVIDIA inventory unavailable: %s", exc)
+    except Exception as exc:
+        logger.warning("NVIDIA inventory failed: %s", exc)
 
     try:
         info["dri_devices"] = [
@@ -619,8 +631,12 @@ async def sync_codec_settings_from_tests(timeout_s: int = 60) -> None:
 
 
 def _ensure_default_preset_matches_hardware(_sm, visibility: dict[str, bool]) -> None:
-    """If the current default_preset uses a codec that isn't available,
-    switch it to the best available codec's profile."""
+    """Keep an auto-managed default on the fastest preferred working codec.
+
+    A detected hardware encoder may not have a built-in profile (historically
+    only NVENC did). In that case clone the matching codec-family template and
+    keep one managed profile instead of silently dropping to a CPU profile.
+    """
     try:
         data = _sm._read_settings()
         profiles = data.get('preset_profiles', [])
@@ -638,28 +654,70 @@ def _ensure_default_preset_matches_hardware(_sm, visibility: dict[str, bool]) ->
         if current_codec == 'libaom-av1':
             vis_key = 'libaom_av1'
         _vis_def = False if vis_key == 'libaom_av1' else True
-        if vis_key and visibility.get(vis_key, _vis_def):
+        current_available = bool(vis_key and visibility.get(vis_key, _vis_def))
+        managed_default = bool(data.get('default_preset_managed', False))
+        if current_available and not managed_default:
             return
 
         codec_priority = [
-            'av1_nvenc', 'hevc_nvenc', 'h264_nvenc',
-            'av1_qsv', 'hevc_qsv', 'h264_qsv',
-            'av1_amf', 'hevc_amf', 'h264_amf',
-            'av1_vaapi', 'hevc_vaapi', 'h264_vaapi',
+            'av1_nvenc', 'av1_qsv', 'av1_amf', 'av1_vaapi',
+            'hevc_nvenc', 'hevc_qsv', 'hevc_amf', 'hevc_vaapi',
+            'h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_vaapi',
             'libsvtav1', 'libx265', 'libx264',
         ]
         codec_to_vis = {'libaom-av1': 'libaom_av1'}
-        for codec in codec_priority:
-            vk = codec_to_vis.get(codec, codec)
-            _vk_def = False if vk == 'libaom_av1' else True
-            if not visibility.get(vk, _vk_def):
-                continue
-            for p in profiles:
-                if p.get('video_codec') == codec:
-                    data['default_preset'] = p['name']
-                    _sm._write_settings(data)
-                    logger.info("Default preset auto-switched to '%s' based on available hardware", p['name'])
-                    return
+        best_codec = next((
+            codec for codec in codec_priority
+            if visibility.get(codec_to_vis.get(codec, codec), False)
+        ), None)
+        if not best_codec or (current_available and current_codec == best_codec):
+            return
+
+        for p in profiles:
+            if p.get('video_codec') == best_codec:
+                data['default_preset'] = p['name']
+                data['default_preset_managed'] = True
+                _sm._write_settings(data)
+                logger.info("Default preset auto-switched to '%s' based on available hardware", p['name'])
+                return
+
+        def codec_family(codec: str) -> str:
+            lowered = codec.lower()
+            if 'av1' in lowered:
+                return 'av1'
+            if 'hevc' in lowered or '265' in lowered:
+                return 'hevc'
+            return 'h264'
+
+        family = codec_family(best_codec)
+        template = next((p for p in profiles if codec_family(str(p.get('video_codec', ''))) == family), None)
+        if template is None:
+            return
+
+        labels = {
+            'av1_qsv': 'AV1 9.7MB (Intel Quick Sync)',
+            'hevc_qsv': 'HEVC 9.7MB (Intel Quick Sync)',
+            'h264_qsv': 'H264 8MB (Intel Quick Sync)',
+            'av1_amf': 'AV1 9.7MB (AMD AMF)',
+            'hevc_amf': 'HEVC 9.7MB (AMD AMF)',
+            'h264_amf': 'H264 8MB (AMD AMF)',
+            'av1_vaapi': 'AV1 9.7MB (VAAPI)',
+            'hevc_vaapi': 'HEVC 9.7MB (VAAPI)',
+            'h264_vaapi': 'H264 8MB (VAAPI)',
+        }
+        managed_profile = dict(template)
+        managed_profile.update({
+            'name': labels.get(best_codec, f'{family.upper()} (Auto hardware)'),
+            'video_codec': best_codec,
+            '_auto_hardware_profile': True,
+        })
+        profiles = [p for p in profiles if not p.get('_auto_hardware_profile')]
+        profiles.append(managed_profile)
+        data['preset_profiles'] = profiles
+        data['default_preset'] = managed_profile['name']
+        data['default_preset_managed'] = True
+        _sm._write_settings(data)
+        logger.info("Default preset auto-created and switched to '%s'", managed_profile['name'])
     except Exception as e:
         logger.warning(f"Failed to auto-switch default preset: {e}")
 

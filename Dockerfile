@@ -1,5 +1,6 @@
 # Multi-stage unified 8mb.local container
-# Stage 1: Build FFmpeg with NVIDIA NVENC, Linux VAAPI, and CPU encoders
+# Stage 1: Build FFmpeg with NVIDIA NVENC, Intel oneVPL QSV, Linux VAAPI,
+# and CPU encoders.
 # Use CUDA 12.2 devel image: supports RTX 50-series and is compatible with NVIDIA driver 535+
 FROM nvidia/cuda:12.2.0-devel-ubuntu22.04 AS ffmpeg-build
 
@@ -7,11 +8,56 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    build-essential nasm yasm cmake pkg-config git wget ca-certificates \
+    build-essential nasm yasm cmake meson ninja-build pkg-config git wget ca-certificates \
     libnuma-dev libx264-dev libx265-dev libvpx-dev libopus-dev \
-    libaom-dev libdav1d-dev libva-dev libdrm-dev
+    libaom-dev libdav1d-dev libva-dev libdrm-dev \
+    libx11-dev libxext-dev libxfixes-dev libx11-xcb-dev libxcb1-dev \
+    libxcb-dri3-dev libwayland-dev
 
 WORKDIR /build
+
+# Ubuntu 22.04 provides VA-API 1.14, but oneVPL's Linux device selection
+# requires vaGetDriverNameByIndex (VA-API 1.15+). Build a current libva so
+# QSV can bind the requested /dev/dri render node instead of failing before
+# the Intel implementation is loaded.
+ARG LIBVA_VERSION=2.21.0
+RUN git clone --depth 1 --branch ${LIBVA_VERSION} https://github.com/intel/libva.git && \
+    meson setup libva/build libva --prefix=/usr/local --libdir=lib \
+      -Dwith_x11=yes -Dwith_wayland=yes -Dwith_glx=no && \
+    meson compile -C libva/build -j"$(nproc)" && \
+    meson install -C libva/build && ldconfig && rm -rf libva
+
+# Match the exact GmmLib dependency published for media-driver 24.1.5.
+# Building media-driver against Jammy's older headers omits newer product
+# families and fails late in the compile with undefined IGFX_* symbols.
+ARG GMMLIB_VERSION=intel-gmmlib-22.3.18
+RUN git clone --depth 1 --branch ${GMMLIB_VERSION} https://github.com/intel/gmmlib.git && \
+    cmake -S gmmlib -B gmmlib/build \
+      -DCMAKE_BUILD_TYPE=ReleaseInternal -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    cmake --build gmmlib/build -j"$(nproc)" && \
+    cmake --install gmmlib/build && ldconfig && rm -rf gmmlib
+
+# Keep the Intel iHD driver aligned with the VA-API runtime. Jammy's 22.3
+# driver cannot report the render-node device ID required by oneVPL, and it
+# omits HEVC encode entrypoints exposed by current Intel hardware/drivers.
+ARG INTEL_MEDIA_DRIVER_VERSION=intel-media-24.1.5
+RUN git clone --depth 1 --branch ${INTEL_MEDIA_DRIVER_VERSION} \
+      https://github.com/intel/media-driver.git && \
+    cmake -S media-driver -B media-driver/build \
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DINSTALL_DRIVER_SYSCONF=OFF && \
+    cmake --build media-driver/build -j"$(nproc)" && \
+    cmake --install media-driver/build && rm -rf media-driver
+
+# Intel oneVPL dispatcher. Ubuntu 22.04's package is older than the oneVPL
+# 2.6 minimum required by FFmpeg 6.1, so pin the latest upstream release.
+ARG LIBVPL_VERSION=v2023.4.0
+RUN git clone --depth 1 --branch ${LIBVPL_VERSION} https://github.com/intel/libvpl.git && \
+    cmake -S libvpl -B libvpl/build \
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DBUILD_TOOLS=OFF -DBUILD_EXAMPLES=OFF && \
+    cmake --build libvpl/build -j"$(nproc)" && \
+    cmake --install libvpl/build && ldconfig && rm -rf libvpl
 
 # NVIDIA NVENC headers
 # Pin to NVENC API 12.1 for widest compatibility with driver 535.x, while CUDA 12.2 runtime covers RTX 50‑series
@@ -30,12 +76,12 @@ RUN git clone --depth 1 --branch ${SVTAV1_VERSION} https://gitlab.com/AOMediaCod
     cmake --build . -j"$(nproc)" && cmake --install . && ldconfig && \
     cd /build && rm -rf SVT-AV1
 
-# Build FFmpeg with NVIDIA NVENC, Linux VAAPI, and CPU encoders
-RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
-        tar xf ffmpeg-6.1.1.tar.xz && cd ffmpeg-6.1.1 && \
+# Build FFmpeg with NVIDIA NVENC, Intel oneVPL QSV, Linux VAAPI, and CPU encoders
+RUN git clone --depth 1 --branch n6.1.1 https://github.com/FFmpeg/FFmpeg.git ffmpeg-6.1.1 && \
+        cd ffmpeg-6.1.1 && \
                 ./configure \
       --enable-nonfree --enable-gpl \
-      --enable-cuda-nvcc --enable-libnpp --enable-nvenc --enable-vaapi --enable-libdrm \
+      --enable-cuda-nvcc --enable-libnpp --enable-nvenc --enable-libvpl --enable-vaapi --enable-libdrm \
       --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus --enable-libaom --enable-libsvtav1 --enable-libdav1d \
       --extra-cflags=-I/usr/local/cuda/include \
       --extra-ldflags=-L/usr/local/cuda/lib64 \
@@ -44,7 +90,7 @@ RUN wget -q https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz && \
     # Strip binaries to reduce size
     strip --strip-all /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
     # Clean up build artifacts
-        cd .. && rm -rf ffmpeg-6.1.1 ffmpeg-6.1.1.tar.xz nv-codec-headers /build
+        cd .. && rm -rf ffmpeg-6.1.1 nv-codec-headers /build
 
 # Stage 2: Build Frontend
 FROM node:20-alpine AS frontend-build
@@ -81,7 +127,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     python3.10 python3-pip supervisor redis-server \
     libopus0 libx264-163 libx265-199 libvpx7 libnuma1 \
-    libaom3 libdav1d5 libva2 libva-drm2 libdrm2 \
+    libaom3 libdav1d5 libva2 libva-drm2 libdrm2 libmfx1 libmfx-gen1.2 \
     mesa-va-drivers intel-media-va-driver vainfo \
     && apt-get clean && rm -rf /tmp/*
 
@@ -90,6 +136,17 @@ COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg-build /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 # SVT-AV1 is built from source in ffmpeg-build (not Ubuntu packages)
 COPY --from=ffmpeg-build /usr/local/lib/libSvtAv1Enc.so* /usr/local/lib/
+# Intel oneVPL dispatcher built above (the GPU implementation is supplied by
+# the runtime's libmfx-gen package and uses /dev/dri on Linux hosts).
+COPY --from=ffmpeg-build /usr/local/lib/libvpl.so* /usr/local/lib/
+# oneVPL needs VA-API 1.15+ for explicit Linux render-node selection. These
+# libraries take precedence over Ubuntu 22.04's older /usr/lib copies.
+COPY --from=ffmpeg-build /usr/local/lib/libva.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/lib/libva-drm.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/lib/libva-x11.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/lib/libva-wayland.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/lib/libigdgmm.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/lib/dri/iHD_drv_video.so /usr/local/lib/dri/
 # Copy only FFmpeg libraries (not entire /usr/local/lib)
 COPY --from=ffmpeg-build /usr/local/lib/libavcodec.so* /usr/local/lib/
 COPY --from=ffmpeg-build /usr/local/lib/libavformat.so* /usr/local/lib/
@@ -132,6 +189,11 @@ RUN mkdir -p /app/uploads /app/outputs /var/log/supervisor /var/lib/redis /var/l
 # Set NVIDIA driver capabilities for NVENC/NVDEC support
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 ENV NVIDIA_VISIBLE_DEVICES=all
+ENV LIBVA_DRIVERS_PATH=/usr/local/lib/dri
+# Keep the source-built Intel stack ahead of Jammy's older VA/Gmm libraries.
+# Worker probes append system paths for GPU discovery, so relying only on
+# ldconfig would allow an incompatible system libigdgmm to win.
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
 
 # Configure supervisord
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf

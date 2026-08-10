@@ -47,7 +47,7 @@ render nodes when the variable is empty and checks the sysfs vendor before it
 attempts QSV, so an AMD node is never misidentified as Intel QSV.
 
 The encoder path uses software decode and scaling followed by an explicit
-hardware upload: `format=nv12,hwupload` for QSV and
+hardware upload: `format=nv12,hwupload=extra_hw_frames=64` for QSV and
 `format=nv12|vaapi,hwupload` for VAAPI. This is intentional: it preserves
 rotation metadata and makes scaling/fps filters consistent across Intel and
 AMD driver versions.
@@ -102,3 +102,16 @@ Hardware support still depends on the GPU generation, driver, FFmpeg build, and
 codec support. For example, many Intel/AMD devices do not expose AV1 encode;
 the detector will keep H.264/HEVC or CPU AV1 instead of presenting a false
 option.
+
+## v138 hardware validation
+
+The v138 release candidate completed application-level H.264 and HEVC jobs on
+Intel QSV and Intel VAAPI through `/dev/dri`, plus H.264, HEVC, and AV1 jobs on
+NVIDIA NVENC. FFmpeg reported the requested hardware encoder and each output
+was verified with FFprobe. AV1 QSV was unavailable on the tested Intel GPU and
+correctly fell back to SVT-AV1.
+
+Windows AMD AMF support uses the same one-frame initialization test, runtime
+encoder reporting, and controlled CPU fallback. The AMF path was also
+user-validated on compatible Windows AMD hardware for v138; individual codec
+availability still depends on the GPU generation and driver.

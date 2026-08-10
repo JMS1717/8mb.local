@@ -130,6 +130,7 @@ if _local_enabled():
             self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="8mblocal")
             self._futures: dict[str, Future[Any]] = {}
             self._lock = threading.RLock()
+            self._shutting_down = False
             self.control = _LocalControl(self)
 
         def signature(
@@ -154,6 +155,9 @@ if _local_enabled():
             **_: Any,
         ) -> LocalTaskResult:
             task_id = str(task_id or uuid.uuid4())
+            with self._lock:
+                if self._shutting_down:
+                    raise RuntimeError("Local worker is shutting down")
             _ensure_task(task_id)
             future = self._executor.submit(
                 self._execute, task_id, name, tuple(args or ()), dict(kwargs or {})
@@ -215,11 +219,13 @@ if _local_enabled():
                 return value
             except Exception as exc:
                 snapshot = _task_snapshot(task_id) or {}
-                if snapshot.get("state") == "REVOKED" or _is_cancel_requested(task_id):
+                canceled = snapshot.get("state") == "REVOKED" or _is_cancel_requested(task_id)
+                if canceled:
                     _update_task(task_id, state="REVOKED", info=snapshot.get("info") or {}, error=str(exc))
+                    logger.info("local task canceled id=%s name=%s", task_id, name)
                 else:
                     _update_task(task_id, state="FAILURE", info=snapshot.get("info") or {}, error=str(exc))
-                logger.exception("local task failed id=%s name=%s", task_id, name)
+                    logger.exception("local task failed id=%s name=%s", task_id, name)
                 raise
 
         def _revoke(self, task_id: str) -> None:
@@ -234,7 +240,25 @@ if _local_enabled():
                 _update_task(str(task_id), state="REVOKED", info={"detail": "Cancellation requested"})
 
         def shutdown(self) -> None:
-            self._executor.shutdown(wait=False, cancel_futures=True)
+            """Cancel local jobs and wait for FFmpeg workers to stop.
+
+            Active encodes poll the shared cancellation flag every 250 ms and
+            terminate their FFmpeg process. Waiting here prevents a windowed
+            desktop process from surviving invisibly after its UI closes.
+            """
+            with self._lock:
+                if self._shutting_down:
+                    return
+                self._shutting_down = True
+                active = [
+                    (task_id, future)
+                    for task_id, future in self._futures.items()
+                    if not future.done()
+                ]
+            for task_id, future in active:
+                _cancel_task(task_id)
+                future.cancel()
+            self._executor.shutdown(wait=True, cancel_futures=True)
 
 
     def _is_cancel_requested(task_id: str) -> bool:

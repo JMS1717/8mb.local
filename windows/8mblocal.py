@@ -24,6 +24,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
 
+from shared.subprocess_utils import hidden_process_kwargs
+
 
 VERSION = "native-1"
 CPU_ENCODERS = {
@@ -77,7 +79,9 @@ def _binary(name: str) -> str:
 
 
 def _run(command: list[str], timeout: float = 60) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(
+        command, capture_output=True, text=True, timeout=timeout, **hidden_process_kwargs()
+    )
 
 
 def _ffprobe(input_path: Path) -> dict:

@@ -199,21 +199,33 @@ async def upload_batch(
         max_output_fps,
     )
 
-    accepted_files = [f for f in files if is_video_upload(f)]
-    if not accepted_files:
-        raise HTTPException(status_code=400, detail="No video files found in upload")
-
     batch_id = str(uuid.uuid4())
     batch_items: list[dict] = []
     signatures = []
     saved_files: list[Path] = []
 
     try:
-        for index, upload_file in enumerate(accepted_files):
+        for index, upload_file in enumerate(files):
             original_filename = upload_file.filename or f"file_{index + 1}"
             safe_name = safe_filename(original_filename)
 
             job_id = str(uuid.uuid4())
+            if not is_video_upload(upload_file):
+                batch_items.append({
+                    "index": index,
+                    "job_id": job_id,
+                    "task_id": "",
+                    "original_filename": original_filename,
+                    "stored_filename": "",
+                    "output_filename": "",
+                    "output_path": None,
+                    "state": "failed",
+                    "progress": 100.0,
+                    "error": "Unsupported file type",
+                    "download_url": "",
+                })
+                continue
+
             stored_filename = f"{job_id}_{safe_name}"
             input_path = UPLOADS_DIR / stored_filename
             await save_upload_file(upload_file, input_path)
@@ -221,11 +233,29 @@ async def upload_batch(
 
             try:
                 await asyncio.to_thread(ffprobe, input_path)
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unable to analyze uploaded video: {original_filename}",
-                ) from exc
+            except Exception:
+                # A corrupt item should not discard valid files in the same
+                # batch. Keep a terminal item for the UI, but remove the bad
+                # upload immediately and do not dispatch a task for it.
+                try:
+                    input_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("batch: failed to remove invalid input %s", input_path)
+                saved_files.remove(input_path)
+                batch_items.append({
+                    "index": index,
+                    "job_id": job_id,
+                    "task_id": "",
+                    "original_filename": original_filename,
+                    "stored_filename": stored_filename,
+                    "output_filename": "",
+                    "output_path": None,
+                    "state": "failed",
+                    "progress": 100.0,
+                    "error": "Unable to analyze uploaded video",
+                    "download_url": "",
+                })
+                continue
 
             task_id = str(uuid.uuid4())
             output_name = build_output_name(input_path, task_id, container, bool(audio_only))
@@ -283,7 +313,7 @@ async def upload_batch(
             try:
                 await redis.publish(
                     f"progress:{task_id}",
-                    orjson.dumps({"type": "log", "message": f"Batch queued ({index + 1}/{len(accepted_files)})"}).decode(),
+                    orjson.dumps({"type": "log", "message": f"Batch queued ({index + 1}/{len(files)})"}).decode(),
                 )
             except Exception:
                 pass
@@ -310,29 +340,6 @@ async def upload_batch(
     if not signatures:
         raise HTTPException(status_code=400, detail="No valid video files to process")
 
-    try:
-        # Each item is independent. A chain made every file wait for the
-        # previous file and also caused one failure to skip the rest, even
-        # when the worker had spare concurrency. A group preserves the
-        # per-item task IDs while letting Celery schedule items in parallel.
-        group(*signatures).apply_async()
-    except Exception as e:
-        for saved in saved_files:
-            try:
-                saved.unlink(missing_ok=True)
-            except Exception:
-                pass
-        for item in batch_items:
-            task_id = str(item.get("task_id") or "")
-            if not task_id:
-                continue
-            try:
-                await redis.delete(f"job:{task_id}")
-                await redis.zrem("jobs:active", task_id)
-            except Exception:
-                pass
-        raise HTTPException(status_code=500, detail=f"Failed to enqueue batch: {e}")
-
     batch_payload = {
         "batch_id": batch_id,
         "state": "queued",
@@ -349,7 +356,68 @@ async def upload_batch(
         "execution": "parallel",
         "items": batch_items,
     }
-    await redis.setex(f"batch:{batch_id}", BATCH_TTL_SECONDS, orjson.dumps(batch_payload).decode())
+
+    # Persist the parent record before publishing any tasks. If Redis cannot
+    # record the batch, no worker is allowed to start and all staging data can
+    # still be rolled back safely.
+    try:
+        await redis.setex(
+            f"batch:{batch_id}", BATCH_TTL_SECONDS,
+            orjson.dumps(batch_payload).decode(),
+        )
+    except Exception as e:
+        for saved in saved_files:
+            try:
+                saved.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for item in batch_items:
+            task_id = str(item.get("task_id") or "")
+            if task_id:
+                try:
+                    await redis.delete(f"job:{task_id}")
+                    await redis.zrem("jobs:active", task_id)
+                except Exception:
+                    pass
+        raise HTTPException(status_code=500, detail=f"Failed to persist batch: {e}")
+
+    try:
+        # Each item is independent. A chain made every file wait for the
+        # previous file and also caused one failure to skip the rest, even
+        # when the worker had spare concurrency. A group preserves the
+        # per-item task IDs while letting Celery schedule items in parallel.
+        group(*signatures).apply_async()
+    except Exception as e:
+        # A broker can accept part of a group before raising. Revoke every
+        # preassigned task ID and retain its metadata/staging file until the
+        # normal cleanup path confirms workers have stopped. This avoids both
+        # racing a live FFmpeg process and creating invisible orphan jobs.
+        for item in batch_items:
+            task_id = str(item.get("task_id") or "")
+            if not task_id:
+                continue
+            try:
+                await redis.set(f"cancel:{task_id}", "1", ex=3600)
+                celery_app.control.revoke(task_id, terminate=True)
+            except Exception:
+                pass
+            item["state"] = "failed"
+            item["progress"] = 100.0
+            item["error"] = "Batch dispatch failed; cancellation requested"
+            item["download_url"] = ""
+        batch_payload["state"] = "failed"
+        batch_payload["items"] = batch_items
+        try:
+            await redis.setex(
+                f"batch:{batch_id}", BATCH_TTL_SECONDS,
+                orjson.dumps(batch_payload).decode(),
+            )
+        except Exception:
+            logger.exception("batch: failed to record dispatch failure batch_id=%s", batch_id)
+        raise HTTPException(
+            status_code=503,
+            detail={"message": f"Failed to enqueue batch: {e}", "batch_id": batch_id},
+        )
 
     return BatchCreateResponse(
         batch_id=batch_id,

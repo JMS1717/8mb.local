@@ -16,6 +16,8 @@ import re
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
+from shared.subprocess_utils import hidden_process_kwargs
+
 from .constants import (
     AMF_ENCODERS,
     AV1_NVENC,
@@ -85,6 +87,7 @@ def _run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
         text=True,
         timeout=timeout,
         env=get_gpu_env(),
+        **hidden_process_kwargs(),
     )
 
 
@@ -186,7 +189,7 @@ def _test_qsv(encoder_name: str, device: str) -> bool:
         "-init_hw_device", "qsv=hw@va",
         "-filter_hw_device", "hw",
         "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1:r=1",
-        "-vf", "format=nv12,hwupload",
+        "-vf", "format=nv12,hwupload=extra_hw_frames=64",
         "-c:v", encoder_name,
         "-frames:v", "1",
         "-f", "null", "-",

@@ -54,12 +54,17 @@ class TestLocalRuntime(unittest.TestCase):
             "task-2",
             {
                 "type": "done",
-                "stats": {"output_path": "/tmp/output.m4a", "final_size_mb": 0.02},
+                "stats": {
+                    "output_path": "/tmp/output.m4a",
+                    "final_size_mb": 0.02,
+                    "encoder": "libsvtav1",
+                },
             },
         )
         snapshot = task_snapshot("task-2")
         self.assertEqual(snapshot["state"], "SUCCESS")
         self.assertEqual(snapshot["info"]["output_path"], "/tmp/output.m4a")
+        self.assertEqual(snapshot["info"]["encoder"], "libsvtav1")
         self.assertEqual(snapshot["info"]["progress"], 100.0)
 
     def test_cancel_request_does_not_clobber_terminal_task_state(self):

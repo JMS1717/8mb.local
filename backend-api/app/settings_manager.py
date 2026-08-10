@@ -100,6 +100,18 @@ def _ensure_defaults() -> Dict[str, Any]:
     if 'default_preset' not in data:
         data['default_preset'] = _pick_initial_default(data.get('preset_profiles', []))
         changed = True
+    if 'default_preset_managed' not in data:
+        # A legacy settings file may contain an explicit user choice. Only
+        # treat known stock defaults as application-managed; never replace a
+        # custom preset during an upgrade merely because hardware appeared.
+        stock_names = {
+            "AV1 9.7MB (NVENC)",
+            "AV1 9.7MB (SVT-AV1, CPU)",
+            "H.264 9.7MB (NVENC)",
+            "H.264 9.7MB (CPU)",
+        }
+        data['default_preset_managed'] = data.get('default_preset') in stock_names
+        changed = True
     if 'codec_visibility' not in data:
         data['codec_visibility'] = {
             'h264_nvenc': True,
@@ -372,6 +384,7 @@ def update_default_presets(
     if not replaced:
         data['preset_profiles'].append(new_values)
         data['default_preset'] = default_name
+    data['default_preset_managed'] = False
     _write_settings(data)
 
 
@@ -463,6 +476,7 @@ def set_default_preset(name: str):
     if name not in names:
         raise ValueError("preset not found")
     data['default_preset'] = name
+    data['default_preset_managed'] = False
     _write_settings(data)
 
 

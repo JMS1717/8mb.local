@@ -16,6 +16,8 @@ import sys
 import tempfile
 from typing import Any, Dict, List, Tuple
 
+from shared.subprocess_utils import hidden_process_kwargs
+
 from .constants import AMF_ENCODERS, CPU_ENCODERS, QSV_ENCODERS, VAAPI_ENCODERS
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,7 @@ def _ffmpeg_has_nvenc(env: dict[str, str]) -> bool:
         res = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],
             capture_output=True, text=True, timeout=5, env=env,
+            **hidden_process_kwargs(),
         )
         out = (res.stdout or "") + "\n" + (res.stderr or "")
         return (
@@ -72,6 +75,7 @@ def _wait_for_nv_runtime_ready(
         res = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],
             capture_output=True, text=True, timeout=5, env=env,
+            **hidden_process_kwargs(),
         )
         if res.returncode == 0:
             out = (res.stdout or "") + "\n" + (res.stderr or "")
@@ -138,7 +142,8 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
         create_cmd.append(test_file)
         logger.debug("test_decoder: seed-encode cmd = %s", " ".join(create_cmd))
         seed = subprocess.run(
-            create_cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env()
+            create_cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env(),
+            **hidden_process_kwargs(),
         )
         if seed.returncode != 0:
             return False, "Could not create decoder test file"
@@ -152,7 +157,8 @@ def test_decoder(decoder_name: str, hw_flags: List[str]) -> Tuple[bool, str]:
         result = None
         for i in range(1, attempts + 1):
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env()
+                cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env(),
+                **hidden_process_kwargs(),
             )
             stderr_lower = (result.stderr or "").lower()
             if result.returncode != 0:
@@ -205,7 +211,7 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
             "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1:r=1",
         ]
         if encoder_name in QSV_ENCODERS or encoder_name in VAAPI_ENCODERS:
-            upload_filter = "format=nv12,hwupload"
+            upload_filter = "format=nv12,hwupload=extra_hw_frames=64"
             if encoder_name in VAAPI_ENCODERS:
                 upload_filter = "format=nv12|vaapi,hwupload"
             cmd += ["-vf", upload_filter]
@@ -223,6 +229,7 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
             text=True,
             timeout=15 if (encoder_name in QSV_ENCODERS or encoder_name in VAAPI_ENCODERS) else 8,
             env=get_gpu_env(),
+            **hidden_process_kwargs(),
         )
 
         if result is None:
@@ -280,6 +287,7 @@ def is_encoder_available(encoder_name: str) -> bool:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],
             capture_output=True, text=True, timeout=2, env=get_gpu_env(),
+            **hidden_process_kwargs(),
         )
         for line in result.stdout.split("\n"):
             if encoder_name in line:

@@ -10,7 +10,8 @@ param(
     [string]$InstallerPath = '',
     [ValidateSet('all-users', 'current-user')]
     [string]$InstallMode = 'all-users',
-    [switch]$UseDefaultInstallDir
+    [switch]$UseDefaultInstallDir,
+    [switch]$TestNativeWindow
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +44,8 @@ $client = $null
 $installDir = $null
 $uninstaller = $null
 $desktopShortcut = $null
+$dataSentinel = Join-Path $AppData 'preserve-on-uninstall.txt'
+[System.IO.File]::WriteAllText($dataSentinel, '8mb.local release-test user data')
 
 function Invoke-JsonGet {
     param([string]$Uri)
@@ -296,6 +299,84 @@ try {
         Write-Host "PASS upload/transcode/status/download/ffprobe (bytes=$((Get-Item $OutputFile).Length))"
     }
 
+    if ($TestNativeWindow) {
+        # Stop the headless smoke-test instance before exercising the real
+        # WebView shell on a separate port.
+        # Kill the owned launcher tree while the one-file child is still
+        # attached. Stopping only the outer PyInstaller process orphans the
+        # extracted server child and leaves its port open.
+        & taskkill.exe /PID $process.Id /T /F *> $null
+        $process.WaitForExit(10000) | Out-Null
+        $process = $null
+
+        $nativePort = $Port + 1
+        $resolvedNativeExecutable = [System.IO.Path]::GetFullPath($Executable)
+        $preexistingNativePids = @(
+            Get-CimInstance Win32_Process -Filter "Name='8mblocal.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.ExecutablePath -eq $resolvedNativeExecutable } |
+                ForEach-Object { [int]$_.ProcessId }
+        )
+        $native = Start-Process -FilePath $Executable -ArgumentList @(
+            '--data-dir', "`"$AppData`"", '--port', "$nativePort"
+        ) -PassThru
+        $process = $native
+        $windowHandle = [IntPtr]::Zero
+        $windowProcess = $null
+        for ($attempt = 0; $attempt -lt 120; $attempt++) {
+            Start-Sleep -Milliseconds 250
+            if ($native.HasExited) {
+                throw "Native desktop process exited during startup with code $($native.ExitCode)"
+            }
+            # A PyInstaller one-file executable starts an extracted child
+            # process that owns the WebView window. Locate the window by the
+            # verified executable path instead of assuming the outer launcher
+            # owns it.
+            $candidates = Get-CimInstance Win32_Process -Filter "Name='8mblocal.exe'" -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.ExecutablePath -eq $resolvedNativeExecutable -and
+                    [int]$_.ProcessId -notin $preexistingNativePids
+                }
+            foreach ($candidate in $candidates) {
+                $candidateProcess = Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue
+                if ($null -eq $candidateProcess) { continue }
+                $candidateProcess.Refresh()
+                if ($candidateProcess.MainWindowHandle -ne [IntPtr]::Zero) {
+                    $windowProcess = $candidateProcess
+                    $windowHandle = $candidateProcess.MainWindowHandle
+                    break
+                }
+            }
+            if ($windowHandle -ne [IntPtr]::Zero) { break }
+        }
+        if ($windowHandle -eq [IntPtr]::Zero) {
+            throw 'Native WebView window did not appear'
+        }
+        $nativeHealth = Invoke-JsonGet "http://127.0.0.1:$nativePort/healthz"
+        if ($nativeHealth.ok -ne $true) {
+            throw 'Native WebView runtime did not expose a healthy local API'
+        }
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class NativeWindowClose {
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+}
+'@
+        [void][NativeWindowClose]::SendMessage($windowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+        if (-not $native.WaitForExit(30000)) {
+            throw 'Closing the native window did not stop the desktop process within 30 seconds'
+        }
+        $process = $null
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$nativePort/healthz" -TimeoutSec 2 | Out-Null
+            throw 'Local API remained reachable after closing the native window'
+        } catch {
+            if ($_.Exception.Message -eq 'Local API remained reachable after closing the native window') { throw }
+        }
+        Write-Host 'PASS native WebView launch/window close/process shutdown'
+    }
+
     Write-Host 'Windows release smoke test passed.'
 } catch {
     Write-Error $_
@@ -320,7 +401,20 @@ try {
         }
     }
     if ($null -ne $uninstaller -and (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
-        Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -ErrorAction SilentlyContinue
+        $uninstallResult = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+        if ($uninstallResult.ExitCode -ne 0) {
+            throw "Uninstaller exited with code $($uninstallResult.ExitCode)"
+        }
+        if ($Executable -and (Test-Path -LiteralPath $Executable)) {
+            throw "Uninstaller left the application executable behind: $Executable"
+        }
+        if ($desktopShortcut -and (Test-Path -LiteralPath $desktopShortcut)) {
+            throw "Uninstaller left the Desktop shortcut behind: $desktopShortcut"
+        }
+        if (-not (Test-Path -LiteralPath $dataSentinel -PathType Leaf)) {
+            throw "Uninstaller removed user data: $dataSentinel"
+        }
+        Write-Host 'PASS uninstall/application removal/user-data preservation'
     }
     if (-not $KeepData -and (Test-Path -LiteralPath $RunRoot)) {
         Remove-Item -LiteralPath $RunRoot -Recurse -Force -ErrorAction SilentlyContinue

@@ -30,6 +30,45 @@ class TestSettingsValidation(unittest.TestCase):
                 self.assertEqual(saved["size_buttons"], [4.0, 8.0])
                 self.assertFalse(list(path.parent.glob(".settings.json.*.tmp")))
 
+    def test_explicit_default_preset_disables_hardware_auto_management(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            with patch.object(settings_manager, "SETTINGS_FILE", path):
+                data = settings_manager._ensure_defaults()
+                selected = data["preset_profiles"][-1]["name"]
+                settings_manager.set_default_preset(selected)
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(saved["default_preset"], selected)
+                self.assertFalse(saved["default_preset_managed"])
+
+    def test_legacy_custom_default_is_not_marked_as_managed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps({
+                "default_preset": "My CPU Choice",
+                "preset_profiles": [{
+                    "name": "My CPU Choice",
+                    "video_codec": "libsvtav1",
+                }],
+            }), encoding="utf-8")
+            with patch.object(settings_manager, "SETTINGS_FILE", path):
+                data = settings_manager._ensure_defaults()
+            self.assertFalse(data["default_preset_managed"])
+
+    def test_legacy_stock_default_remains_hardware_managed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps({
+                "default_preset": "AV1 9.7MB (SVT-AV1, CPU)",
+                "preset_profiles": [{
+                    "name": "AV1 9.7MB (SVT-AV1, CPU)",
+                    "video_codec": "libsvtav1",
+                }],
+            }), encoding="utf-8")
+            with patch.object(settings_manager, "SETTINGS_FILE", path):
+                data = settings_manager._ensure_defaults()
+            self.assertTrue(data["default_preset_managed"])
+
 
 if __name__ == "__main__":
     unittest.main()

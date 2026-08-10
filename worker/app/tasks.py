@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Dict, Optional
 from redis import Redis
 
+from shared.subprocess_utils import hidden_process_kwargs
+
 from .celery_app import celery_app
 from .constants import (
     CPU_FALLBACK, CPU_ENCODERS, HW_ENCODERS,
@@ -164,6 +166,15 @@ def _is_cancelled(task_id: str) -> bool:
         return str(val) == '1'
     except Exception:
         return False
+
+
+def _history_filename(job_id: str, input_path: str) -> str:
+    """Recover the user-facing name from the UUID-prefixed staging path."""
+    name = Path(input_path).name
+    prefix = f"{job_id}_"
+    if name.startswith(prefix) and len(name) > len(prefix):
+        return name[len(prefix):]
+    return name
 
 
 def _force_stop_ffmpeg(proc: subprocess.Popen) -> None:
@@ -410,6 +421,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             }
             if sys.platform != "win32":
                 popen_kwargs["start_new_session"] = True
+            popen_kwargs.update(hidden_process_kwargs())
             audio_proc = subprocess.Popen(cmd, **popen_kwargs)
             while audio_proc.poll() is None:
                 if _is_cancelled(self.request.id):
@@ -480,7 +492,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 except ModuleNotFoundError:
                     history = importlib.import_module("app.history_manager")
                 history.add_history_entry(
-                    filename=Path(input_path).name,
+                    filename=_history_filename(job_id, input_path),
                     original_size_mb=os.path.getsize(input_path) / (1024 * 1024),
                     compressed_size_mb=stats["final_size_mb"],
                     video_codec="audio-only",
@@ -675,7 +687,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         try:
             r = subprocess.run([
                 "ffmpeg", "-hide_banner", "-decoders"
-            ], capture_output=True, text=True, timeout=5, env=get_gpu_env())
+            ], capture_output=True, text=True, timeout=5, env=get_gpu_env(), **hidden_process_kwargs())
             return (r.returncode == 0) and (dec_name in (r.stdout or ""))
         except Exception:
             return False
@@ -690,7 +702,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 "-i", path,
                 "-f", "null", "-"
             ]
-            r = subprocess.run(test_cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env())
+            r = subprocess.run(test_cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env(), **hidden_process_kwargs())
             stderr = (r.stderr or "").lower()
             fail_patterns = [
                 "doesn't support hardware accelerated", "failed setup for format cuda",
@@ -716,7 +728,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 "-i", path,
                 "-f", "null", "-"
             ]
-            r = subprocess.run(test_cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env())
+            r = subprocess.run(test_cmd, capture_output=True, text=True, timeout=10, env=get_gpu_env(), **hidden_process_kwargs())
             stderr = (r.stderr or "").lower()
             fail_patterns = [
                 "not found", "unknown decoder", "cannot load", "init failed",
@@ -809,7 +821,10 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # scaling remain the most reliable path across Intel/AMD driver versions.
     # Upload only after all software filters (scale/fps) have been applied.
     if actual_encoder in QSV_ENCODERS:
-        vf_filters.append("format=nv12,hwupload")
+        # QSV requires a fixed hardware-frame pool when software-decoded frames
+        # are uploaded. Without this, Intel media-driver fails at runtime with
+        # "QSV requires a fixed frame pool size" despite a healthy device.
+        vf_filters.append("format=nv12,hwupload=extra_hw_frames=64")
         _publish(self.request.id, {
             "type": "log",
             "message": f"Encoder: {actual_encoder} with software decode and QSV hardware upload",
@@ -876,6 +891,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         }
         if sys.platform != "win32":
             _popen_kw["start_new_session"] = True
+        _popen_kw.update(hidden_process_kwargs())
         proc_i = subprocess.Popen(command, **_popen_kw)
         logger.debug("ffmpeg Popen pid=%s", proc_i.pid)
         local_stderr = []
@@ -1440,6 +1456,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     stats = {
         "input_path": input_path,
         "output_path": output_path,
+        # This is the encoder that produced the final output, which may be a
+        # CPU encoder after a controlled hardware fallback.
+        "encoder": actual_encoder,
         "duration_s": duration,
         "target_size_mb": target_size_mb,
         "final_size_mb": final_size_mb,
@@ -1476,8 +1495,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             original_size = os.path.getsize(input_path)
             original_size_mb = original_size / (1024*1024)
             
-            # Extract filename from path
-            filename = Path(input_path).name
+            filename = _history_filename(job_id, input_path)
             
             # Get compression duration (time taken)
             compression_duration = max(time.time() - start_ts, 0)

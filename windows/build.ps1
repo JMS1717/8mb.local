@@ -35,6 +35,11 @@ function Invoke-BuildPython {
 }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+$BrandAssetsScript = Join-Path $PSScriptRoot 'brand-assets.ps1'
+. $BrandAssetsScript
+$BrandDir = Join-Path $RepoRoot 'build\brand'
+$BrandIcon = Join-Path $BrandDir '8mblocal.ico'
+Write-8mbLocalBrandIco -Path $BrandIcon
 $BundleDir = Join-Path $PSScriptRoot 'ffmpeg'
 $BinDir = Join-Path $BundleDir 'bin'
 $Archive = Join-Path $env:TEMP 'ffmpeg-release-full.7z'
@@ -104,11 +109,14 @@ try {
 
     Write-Host 'Installing the backend runtime used by the frozen application…'
     Invoke-BuildPython @('-m', 'pip', 'install', '-r', (Join-Path $RepoRoot 'requirements.txt'))
+    Invoke-BuildPython @('-m', 'pip', 'install', 'pywebview==6.2.1')
     Invoke-BuildPython @('-m', 'pip', 'install', '--upgrade', 'pyinstaller')
     Invoke-BuildPython @(
         '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile',
         '--name', '8mblocal',
         '--windowed',
+        '--icon', $BrandIcon,
+        '--version-file', 'windows\version_info.txt',
         '--paths', "$RepoRoot\backend-api",
         '--paths', "$RepoRoot",
         '--add-data', "$RepoRoot\frontend\build;frontend-build",
@@ -116,7 +124,9 @@ try {
         '--add-binary', "$($BinDir)\ffprobe.exe;bin",
         '--collect-submodules', 'app',
         '--collect-submodules', 'worker.app',
+        '--collect-submodules', 'webview',
         '--hidden-import', 'shared.local_runtime',
+        '--hidden-import', 'shared.subprocess_utils',
         '--hidden-import', 'celery.backends.cache',
         '--hidden-import', 'celery.loaders.app',
         '--hidden-import', 'kombu.transport.memory',

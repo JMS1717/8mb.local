@@ -58,7 +58,12 @@ async def job_status(task_id: str):
     res = celery_app.AsyncResult(task_id)
     state = res.state
     meta = res.info if isinstance(res.info, dict) else {}
-    return StatusResponse(state=state, progress=meta.get("progress"), detail=meta.get("detail"))
+    return StatusResponse(
+        state=state,
+        progress=meta.get("progress"),
+        detail=meta.get("detail"),
+        encoder=meta.get("encoder"),
+    )
 
 
 @router.get("/api/jobs/{task_id}/download", dependencies=[Depends(basic_auth)])
