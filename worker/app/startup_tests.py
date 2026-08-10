@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Tuple
 from shared.subprocess_utils import hidden_process_kwargs
 
 from .constants import AMF_ENCODERS, CPU_ENCODERS, QSV_ENCODERS, VAAPI_ENCODERS
+from .qsv_filters import qsv_input_filter, qsv_probe_size
 
 logger = logging.getLogger(__name__)
 
@@ -205,13 +206,14 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
     hardware upload from the lavfi source.
     """
     try:
+        source_size = qsv_probe_size(sys.platform) if encoder_name in QSV_ENCODERS else "256x256"
         cmd = [
             "ffmpeg", "-hide_banner", "-y",
             *hw_flags,
-            "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1:r=1",
+            "-f", "lavfi", "-i", f"color=black:s={source_size}:d=0.1:r=1",
         ]
         if encoder_name in QSV_ENCODERS or encoder_name in VAAPI_ENCODERS:
-            upload_filter = "format=nv12,hwupload=extra_hw_frames=64"
+            upload_filter = qsv_input_filter(sys.platform)
             if encoder_name in VAAPI_ENCODERS:
                 upload_filter = "format=nv12|vaapi,hwupload"
             cmd += ["-vf", upload_filter]

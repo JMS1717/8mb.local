@@ -30,6 +30,7 @@ from .hw_detect import get_hw_info, map_codec_to_hw, choose_best_codec
 from .ffmpeg_helpers import cpu_filter_chain, replace_bitrate_args
 from .startup_tests import run_startup_tests
 from .progress import parse_ffmpeg_out_time, parse_time_string
+from .qsv_filters import qsv_input_filter
 
 logger = logging.getLogger(__name__)
 
@@ -821,13 +822,17 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # scaling remain the most reliable path across Intel/AMD driver versions.
     # Upload only after all software filters (scale/fps) have been applied.
     if actual_encoder in QSV_ENCODERS:
-        # QSV requires a fixed hardware-frame pool when software-decoded frames
-        # are uploaded. Without this, Intel media-driver fails at runtime with
-        # "QSV requires a fixed frame pool size" despite a healthy device.
-        vf_filters.append("format=nv12,hwupload=extra_hw_frames=64")
+        # Linux oneVPL requires a fixed pool; native Windows QSV performs its
+        # own upload because explicit D3D11 hwupload rejects some real-world
+        # rotated/vertical AV1 surfaces with E_INVALIDARG (0x80070057).
+        qsv_filter = qsv_input_filter(sys.platform)
+        vf_filters.append(qsv_filter)
         _publish(self.request.id, {
             "type": "log",
-            "message": f"Encoder: {actual_encoder} with software decode and QSV hardware upload",
+            "message": (
+                f"Encoder: {actual_encoder} with software decode and "
+                + ("QSV internal upload" if sys.platform == "win32" else "QSV hardware upload")
+            ),
         })
     elif actual_encoder in VAAPI_ENCODERS:
         # Allow an already-uploaded VAAPI frame as well as software nv12.
