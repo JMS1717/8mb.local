@@ -46,11 +46,12 @@ specific render node (for example `/dev/dri/renderD129`). The worker discovers
 render nodes when the variable is empty and checks the sysfs vendor before it
 attempts QSV, so an AMD node is never misidentified as Intel QSV.
 
-The encoder path uses software decode and scaling followed by an explicit
-hardware upload: `format=nv12,hwupload=extra_hw_frames=64` for QSV and
-`format=nv12|vaapi,hwupload` for VAAPI. This is intentional: it preserves
-rotation metadata and makes scaling/fps filters consistent across Intel and
-AMD driver versions.
+The encoder path uses software decode and scaling. Linux QSV then uses
+`format=nv12,hwupload=extra_hw_frames=64`, while native Windows QSV receives
+NV12 software frames and performs its upload internally. This platform split
+avoids D3D11 texture-pool failures on rotated/vertical AV1 inputs while keeping
+the fixed pool required by Linux oneVPL. VAAPI uses
+`format=nv12|vaapi,hwupload`.
 The startup test and the job command use the same VAAPI/QSV initialization
 sequence.
 

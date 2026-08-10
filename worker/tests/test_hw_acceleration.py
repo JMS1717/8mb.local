@@ -7,6 +7,7 @@ import worker.app.hw_detect as hw_detect
 from worker.app.startup_tests import test_encoder_init as run_encoder_init
 from worker.app.ffmpeg_helpers import cpu_filter_chain, replace_bitrate_args
 from worker.app.tasks import _publish
+from worker.app.qsv_filters import qsv_input_filter, qsv_probe_size
 
 
 class TestHardwareMapping(unittest.TestCase):
@@ -124,6 +125,17 @@ class TestHardwareMapping(unittest.TestCase):
 
 
 class TestHardwareFallbackHelpers(unittest.TestCase):
+    def test_windows_qsv_uses_internal_upload_for_real_surfaces(self):
+        self.assertEqual(qsv_input_filter("win32"), "format=nv12")
+        self.assertEqual(qsv_probe_size("win32"), "1080x1920")
+
+    def test_linux_qsv_keeps_fixed_hardware_frame_pool(self):
+        self.assertEqual(
+            qsv_input_filter("linux"),
+            "format=nv12,hwupload=extra_hw_frames=64",
+        )
+        self.assertEqual(qsv_probe_size("linux"), "256x256")
+
     @patch("worker.app.tasks._redis")
     def test_progress_publish_failure_does_not_raise(self, redis_factory):
         redis_factory.return_value.publish.side_effect = ConnectionError("redis unavailable")
@@ -143,6 +155,25 @@ class TestHardwareFallbackHelpers(unittest.TestCase):
 
 
 class TestStartupProbeCommand(unittest.TestCase):
+    @patch("worker.app.startup_tests.sys.platform", "win32")
+    @patch("worker.app.startup_tests.subprocess.run")
+    def test_windows_qsv_probe_matches_vertical_internal_upload_path(self, run):
+        class Result:
+            returncode = 0
+            stderr = ""
+
+        run.return_value = Result()
+        ok, _message = run_encoder_init(
+            "av1_qsv",
+            ["-init_hw_device", "qsv=hw", "-filter_hw_device", "hw"],
+        )
+        self.assertTrue(ok)
+        command = run.call_args.args[0]
+        self.assertIn("color=black:s=1080x1920:d=0.1:r=1", command)
+        self.assertIn("format=nv12", command)
+        self.assertNotIn("hwupload", " ".join(command))
+
+    @patch("worker.app.startup_tests.sys.platform", "linux")
     @patch("worker.app.startup_tests.subprocess.run")
     def test_qsv_startup_probe_contains_correct_device_init(self, run):
         class Result:
