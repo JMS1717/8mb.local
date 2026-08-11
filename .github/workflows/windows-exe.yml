@@ -1,21 +1,27 @@
-name: Build native Windows executable
+name: Build native Windows artifacts
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
-  build-windows-exe:
+  build-windows-artifacts:
+    name: Build portable EXE, installer, and MSIX
     runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      WINDOWS_MSIX_VERSION: '139.0.0.0'
+
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Install Inno Setup
+      - name: Install Windows packaging tools
         shell: pwsh
-        run: choco install innosetup --no-progress -y
+        run: choco install 7zip innosetup --no-progress -y
 
       - name: Build, install, and exercise the release
         shell: pwsh
@@ -28,20 +34,52 @@ jobs:
             -PackageIdentityName 'jms1717.8mb.local' `
             -Publisher 'CN=AAE66F20-996E-4A3C-B08E-182952BAD9F7' `
             -PublisherDisplayName 'jms1717' `
+            -Version $env:WINDOWS_MSIX_VERSION `
             -StoreSubmission
 
-      - name: Upload desktop installer and executable
+      - name: Create SHA-256 checksums
+        shell: pwsh
+        run: |
+          $paths = @(
+            'dist\8mblocal.exe',
+            'dist\8mblocal-Setup.exe',
+            "dist\8mblocal_$env:WINDOWS_MSIX_VERSION`_x64.msix"
+          )
+          $lines = foreach ($path in $paths) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+            "$hash *$([IO.Path]::GetFileName($path))"
+          }
+          $lines | Set-Content -LiteralPath 'dist\SHA256SUMS.txt' -Encoding ascii
+          Get-Content -LiteralPath 'dist\SHA256SUMS.txt'
+
+      - name: Upload portable executable
         uses: actions/upload-artifact@v4
         with:
-          name: 8mblocal-windows
-          path: |
-            dist/8mblocal.exe
-            dist/8mblocal-Setup.exe
+          name: 8mblocal-windows-portable
+          path: dist/8mblocal.exe
           if-no-files-found: error
+          retention-days: 14
 
-      - name: Upload unsigned Store-submission MSIX separately
+      - name: Upload Inno Setup installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: 8mblocal-windows-installer
+          path: dist/8mblocal-Setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Store-submission MSIX
         uses: actions/upload-artifact@v4
         with:
           name: 8mblocal-msix-store-submission
-          path: dist/8mblocal_138.0.0.0_x64.msix
+          path: dist/8mblocal_${{ env.WINDOWS_MSIX_VERSION }}_x64.msix
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Windows checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: 8mblocal-windows-checksums
+          path: dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
