@@ -1,66 +1,164 @@
-name: docker-publish-unified
+name: Build and publish Docker and Windows artifacts
 
 on:
   push:
-    branches: [ main, master ]
-    tags: [ 'v*.*.*' ]
+    branches: [main, master]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the manually built image to Docker Hub
+        required: false
+        default: false
+        type: boolean
+      app_version:
+        description: Numeric application version to bake into the image
+        required: false
+        default: '139'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: docker.io/jms1717/8mblocal
+  DEFAULT_APP_VERSION: '139'
 
 jobs:
-  build-and-push:
+  build-and-publish:
+    name: Build unified linux/amd64 image
     runs-on: ubuntu-latest
+    timeout-minutes: 180
+
     steps:
-      - name: Checkout
+      - name: Check out source
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
+      - name: Resolve build and publish settings
+        id: vars
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          MANUAL_PUBLISH: ${{ inputs.publish || 'false' }}
+          MANUAL_APP_VERSION: ${{ inputs.app_version || '' }}
+        run: |
+          set -euo pipefail
+
+          app_version="${MANUAL_APP_VERSION:-${DEFAULT_APP_VERSION}}"
+          if [[ ! "$app_version" =~ ^[0-9]+$ ]]; then
+            echo "::error::app_version must contain only digits; received '$app_version'."
+            exit 1
+          fi
+
+          publish=false
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            publish=true
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" && "$MANUAL_PUBLISH" == "true" ]]; then
+            publish=true
+          fi
+
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "Build version: $app_version"
+          echo "Publish enabled: $publish"
+
+      - name: Prepare deterministic image tags
+        id: tags
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          APP_VERSION: ${{ steps.vars.outputs.app_version }}
+        run: |
+          set -euo pipefail
+
+          tags=("${IMAGE}:sha-${SHA:0:7}")
+
+          if [[ "$REF" == "refs/heads/main" || "$REF" == "refs/heads/master" ]]; then
+            tags+=("${IMAGE}:latest" "${IMAGE}:v${APP_VERSION}")
+          fi
+
+          if [[ "$REF" == refs/tags/* ]]; then
+            tags+=("${IMAGE}:${REF#refs/tags/}")
+          fi
+
+          {
+            echo 'tags<<EOF'
+            printf '%s\n' "${tags[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          printf 'Image tags:\n%s\n' "$(printf '%s\n' "${tags[@]}")"
+
+      - name: Check Docker Hub credentials
+        if: steps.vars.outputs.publish == 'true'
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DOCKERHUB_USERNAME:-}" || -z "${DOCKERHUB_TOKEN:-}" ]]; then
+            echo '::error::Docker Hub credentials are missing. Configure DOCKERHUB_USERNAME and DOCKERHUB_TOKEN in the JMS1717/8mb.local repository secrets.'
+            exit 1
+          fi
+          echo "Docker Hub username is configured: ${DOCKERHUB_USERNAME}"
+
+      - name: Log in to Docker Hub
+        if: steps.vars.outputs.publish == 'true'
         uses: docker/login-action@v3
         with:
+          registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Compute tags
-        id: vars
-        run: |
-          # Stable application version baked into image; also keep sha tag for traceability
-          APP_VERSION=138
-          echo "app_version=${APP_VERSION}" >> $GITHUB_OUTPUT
-          SHA_TAG=sha-${GITHUB_SHA::7}
-          echo "sha_tag=${SHA_TAG}" >> $GITHUB_OUTPUT
-          if [[ "${GITHUB_REF}" == refs/heads/main || "${GITHUB_REF}" == refs/heads/master || "${GITHUB_EVENT_NAME}" == workflow_dispatch ]]; then
-            echo "latest_tag=latest" >> $GITHUB_OUTPUT
-            echo "stable_tag=v${APP_VERSION}" >> $GITHUB_OUTPUT
-          fi
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG_NAME=${GITHUB_REF#refs/tags/}
-            echo "ref_tag=${TAG_NAME}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Prepare tag list
-        id: taglist
-        run: |
-          IMAGE="jms1717/8mblocal"
-          TAGS="$IMAGE:${{ steps.vars.outputs.sha_tag }}"
-          if [[ -n "${{ steps.vars.outputs.latest_tag }}" ]]; then TAGS="$TAGS\n$IMAGE:${{ steps.vars.outputs.latest_tag }}"; fi
-          if [[ -n "${{ steps.vars.outputs.stable_tag }}" ]]; then TAGS="$TAGS\n$IMAGE:${{ steps.vars.outputs.stable_tag }}"; fi
-          if [[ -n "${{ steps.vars.outputs.ref_tag }}" ]]; then TAGS="$TAGS\n$IMAGE:${{ steps.vars.outputs.ref_tag }}"; fi
-          {
-            echo "tags<<EOF"
-            echo -e "$TAGS"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build and push unified container
+      - name: Build image and optionally publish
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          push: true
           platforms: linux/amd64
-          tags: ${{ steps.taglist.outputs.tags }}
+          pull: true
+          push: ${{ steps.vars.outputs.publish == 'true' }}
+          tags: ${{ steps.tags.outputs.tags }}
           build-args: |
             BUILD_VERSION=${{ steps.vars.outputs.app_version }}
             BUILD_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=8mb-local-linux-amd64
+          cache-to: type=gha,mode=max,scope=8mb-local-linux-amd64
+          provenance: false
+          sbom: false
+          progress: plain
+
+      - name: Verify published image tags
+        if: steps.vars.outputs.publish == 'true'
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          APP_VERSION: ${{ steps.vars.outputs.app_version }}
+        run: |
+          set -euo pipefail
+
+          docker buildx imagetools inspect "${IMAGE}:sha-${SHA:0:7}"
+          if [[ "$REF" == "refs/heads/main" || "$REF" == "refs/heads/master" ]]; then
+            docker buildx imagetools inspect "${IMAGE}:latest"
+            docker buildx imagetools inspect "${IMAGE}:v${APP_VERSION}"
+          fi
+          if [[ "$REF" == refs/tags/* ]]; then
+            docker buildx imagetools inspect "${IMAGE}:${REF#refs/tags/}"
+          fi
+
+  windows-artifacts:
+    name: Build Windows portable EXE, installer, and MSIX
+    uses: ./.github/workflows/windows-exe.yml
+    permissions:
+      contents: read
