@@ -278,6 +278,46 @@ Then run:
 docker compose up -d
 ```
 
+#### Configure memory-backed temporary uploads
+
+The maximum application memory budget is user-configurable in the host `.env`
+file. `MEDIA_MEMORY_LIMIT_GB` is the application admission ceiling, while
+`MEDIA_SHM_SIZE` is the Docker `/dev/shm` capacity ceiling. Neither value
+reserves that amount of host RAM up front.
+
+Recommended adaptive mode: use memory when the live budget fits, and fall back
+to disk automatically when it does not:
+
+```bash
+cp .env.example .env
+# Edit .env:
+MEDIA_STORAGE=auto
+MEDIA_MEMORY_LIMIT_GB=10
+MEDIA_SHM_SIZE=10g
+
+docker compose up -d --build
+docker compose exec 8mblocal df -h /dev/shm
+```
+
+To require memory-backed uploads on Linux/Docker, choose a budget that fits
+the host and set the shared-memory ceiling at least as high. Jobs that cannot
+safely fit are rejected instead of silently writing to disk:
+
+```bash
+# Edit .env:
+MEDIA_STORAGE=memory
+MEDIA_MEMORY_LIMIT_GB=4
+MEDIA_SHM_SIZE=4g
+
+docker compose up -d --build
+```
+
+To force disk-backed temporary uploads, use `MEDIA_STORAGE=disk`. You can
+change `MEDIA_MEMORY_LIMIT_GB` and `MEDIA_SHM_SIZE` to another host-appropriate
+value, then recreate the container with `docker compose up -d`. In `auto`
+mode, `MEDIA_MEMORY_LIMIT_GB` is still enforced as the maximum application
+budget; available shared memory and host headroom can reduce the amount used.
+
 ### Building from Source
 
 **Default (NVIDIA GPU):** requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) and a working `docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi` on the host.

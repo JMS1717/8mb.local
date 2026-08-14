@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     # normal pathname and applies FILE_ATTRIBUTE_TEMPORARY so Windows can
     # keep the data cached while still spilling safely under memory pressure.
     MEDIA_STORAGE: str = Field(default="auto")
+    # User-configurable application budget, supplied through .env or the
+    # process environment. This is an admission ceiling, not reserved RAM.
     MEDIA_MEMORY_LIMIT_GB: float = Field(default=10.0, gt=0, le=1024)
     MAX_BATCH_FILES: int = Field(default=200)
     BATCH_METADATA_TTL_HOURS: int = Field(default=24)
