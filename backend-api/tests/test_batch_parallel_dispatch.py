@@ -69,9 +69,10 @@ async def _run_two_file_batch(testcase, temp_path, fake_redis, fake_group):
         testcase.assertTrue(immutable)
         return _FakeSignature(kwargs["job_id"])
 
-    async def fake_save(_file, destination):
+    async def fake_save(_file, destination, **_kwargs):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"video")
+        return destination
 
     fake_files = [
         SimpleNamespace(filename="one.mp4", content_type="video/mp4"),
@@ -123,12 +124,13 @@ class TestBatchParallelDispatch(unittest.TestCase):
                 revoked = []
                 with patch.object(
                     upload.celery_app.control, "revoke",
-                    side_effect=lambda task_id, **_kwargs: revoked.append(task_id),
+                    side_effect=lambda task_id, **kwargs: revoked.append((task_id, kwargs)),
                 ):
                     with self.assertRaises(HTTPException) as raised:
                         await _run_two_file_batch(self, temp_path, fake_redis, fake_group)
                 self.assertEqual(raised.exception.status_code, 503)
                 self.assertEqual(len(revoked), 2)
+                self.assertTrue(all(call[1].get("terminate") is False for call in revoked))
                 self.assertEqual(len(fake_redis.cancelled), 2)
                 self.assertIn('"state":"failed"', fake_redis.batch_payload)
                 # Keep staging files until cancellation/periodic cleanup so a
@@ -152,9 +154,10 @@ class TestBatchParallelDispatch(unittest.TestCase):
                     self.assertTrue(immutable)
                     return _FakeSignature(kwargs["job_id"])
 
-                async def fake_save(_file, destination):
+                async def fake_save(_file, destination, **_kwargs):
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(b"video")
+                    return destination
 
                 fake_files = [
                     SimpleNamespace(filename="one.mp4", content_type="video/mp4"),
@@ -224,9 +227,10 @@ class TestBatchParallelDispatch(unittest.TestCase):
                         raise RuntimeError("invalid media")
                     return {"duration": 1.0}
 
-                async def fake_save(_file, destination):
+                async def fake_save(_file, destination, **_kwargs):
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(b"video")
+                    return destination
 
                 fake_files = [
                     SimpleNamespace(filename="one.mp4", content_type="video/mp4"),

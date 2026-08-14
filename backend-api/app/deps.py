@@ -11,7 +11,9 @@ import logging
 import math
 import os
 import platform
+import shutil
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -34,8 +36,206 @@ logger = logging.getLogger(__name__)
 # launches may override APP_DATA_DIR, UPLOADS_DIR, and OUTPUTS_DIR.
 # ---------------------------------------------------------------------------
 _APP_DATA_DIR = Path(settings.APP_DATA_DIR)
-UPLOADS_DIR = Path(settings.UPLOADS_DIR) if settings.UPLOADS_DIR else _APP_DATA_DIR / "uploads"
+_DISK_UPLOADS_DIR = Path(settings.UPLOADS_DIR) if settings.UPLOADS_DIR else _APP_DATA_DIR / "uploads"
 OUTPUTS_DIR = Path(settings.OUTPUTS_DIR) if settings.OUTPUTS_DIR else _APP_DATA_DIR / "outputs"
+MEMORY_UPLOADS_DIR = Path('/dev/shm/8mb.local/uploads')
+WINDOWS_FILE_ATTRIBUTE_TEMPORARY = 0x00000100
+_WINDOWS_INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+_GIB = 1024 * 1024 * 1024
+_MEMORY_ADMISSION_LOCK = threading.Lock()
+_MEMORY_RESERVED_BYTES = 0
+
+
+def _media_storage_mode() -> str:
+    mode = str(settings.MEDIA_STORAGE or "auto").strip().lower()
+    if mode not in {"disk", "memory", "auto"}:
+        logger.warning("Unknown MEDIA_STORAGE=%r; using disk", mode)
+        return "disk"
+    return mode
+
+
+def _windows_ram_preferred_mode() -> bool:
+    """Return whether native Windows uploads should receive the cache hint."""
+    return os.name == "nt" and _media_storage_mode() in {"auto", "memory"}
+
+
+def mark_file_temporary(path: Path) -> bool:
+    """Apply FILE_ATTRIBUTE_TEMPORARY without changing pathname semantics.
+
+    This is deliberately not FILE_FLAG_DELETE_ON_CLOSE: FFmpeg and retry
+    logic must be able to reopen the source by its normal filesystem path.
+    Windows may still spill the cached data to disk under memory pressure.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_attributes = kernel32.GetFileAttributesW
+        get_attributes.argtypes = [ctypes.c_wchar_p]
+        get_attributes.restype = ctypes.c_uint32
+        set_attributes = kernel32.SetFileAttributesW
+        set_attributes.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+        set_attributes.restype = ctypes.c_int
+        current = get_attributes(str(path))
+        if current == _WINDOWS_INVALID_FILE_ATTRIBUTES:
+            return False
+        return bool(set_attributes(str(path), current | WINDOWS_FILE_ATTRIBUTE_TEMPORARY))
+    except (AttributeError, OSError, ImportError) as exc:
+        logger.warning("windows-temp: could not apply FILE_ATTRIBUTE_TEMPORARY to %s: %s", path, exc)
+        return False
+
+
+def _windows_memory_upload_limit_bytes() -> int:
+    """Calculate a conservative per-upload budget for explicit memory mode.
+
+    The source, output, FFmpeg working set, concurrent jobs, and a 25% OS
+    headroom reserve are accounted for. This is an admission limit, not a
+    claim that Windows provides guaranteed RAM-only storage.
+    """
+    configured = int(settings.MEDIA_MEMORY_LIMIT_GB * _GIB)
+    try:
+        available = int(psutil.virtual_memory().available)
+    except Exception:
+        available = configured
+    os_headroom = max(_GIB, int(available * 0.25))
+    usable = max(0, min(configured, available - os_headroom))
+    concurrent_jobs = max(1, int(settings.WORKER_CONCURRENCY))
+    # Reserve roughly half of each job's budget for output and FFmpeg working
+    # memory; the input remains a normal pathname with a cache hint.
+    per_job_upload_budget = usable // concurrent_jobs // 2
+    configured_max = int(settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024)
+    return max(1024 * 1024, min(configured_max, per_job_upload_budget or 1024 * 1024))
+
+
+def _resolve_uploads_dir() -> tuple[Path, str, int | None]:
+    """Select temporary upload storage without moving persistent outputs/settings.
+
+    Linux ``memory`` and eligible ``auto`` use ``/dev/shm``. Native Windows
+    keeps the configured disk path but applies FILE_ATTRIBUTE_TEMPORARY for
+    ``memory`` and ``auto``. The returned limit prevents memory mode from
+    admitting more work than the configured safe budget.
+    """
+    mode = _media_storage_mode()
+    if os.name == "nt":
+        if mode == "memory":
+            return _DISK_UPLOADS_DIR, "windows-ram-preferred", _windows_memory_upload_limit_bytes()
+        if mode == "auto":
+            return _DISK_UPLOADS_DIR, "windows-ram-preferred", None
+        return _DISK_UPLOADS_DIR, "disk", None
+    shm = Path('/dev/shm')
+    if os.name == 'nt' or not shm.is_dir() or mode == 'disk':
+        return _DISK_UPLOADS_DIR, 'disk', None
+    try:
+        free = shutil.disk_usage(shm).free
+    except OSError:
+        free = 0
+    # Auto mode requires enough room for a useful bounded upload and leaves
+    # tmpfs headroom for the OS/container. Explicit memory mode is opt-in and
+    # still receives a safe per-upload cap.
+    if mode == 'auto' and free < 512 * 1024 * 1024:
+        return _DISK_UPLOADS_DIR, 'disk', None
+    target = MEMORY_UPLOADS_DIR
+    limit = int(min(
+        settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024,
+        free * 0.8,
+        settings.MEDIA_MEMORY_LIMIT_GB * 1024 * 1024 * 1024,
+    ))
+    return target, 'memory', max(1024 * 1024, limit)
+
+
+UPLOADS_DIR, MEDIA_STORAGE_ACTIVE, _MEDIA_UPLOAD_LIMIT_BYTES = _resolve_uploads_dir()
+
+
+def _memory_capacity_bytes() -> int:
+    """Return the current safe capacity for new RAM-backed upload bytes.
+
+    This is sampled for every upload rather than only at process startup. The
+    configured limit is an application budget; the shared-memory free space
+    and current host availability are the live admission signals.
+    """
+    try:
+        shm_free = int(shutil.disk_usage(MEMORY_UPLOADS_DIR).free)
+    except OSError:
+        return 0
+    try:
+        available = int(psutil.virtual_memory().available)
+    except Exception:
+        available = settings.MEDIA_MEMORY_LIMIT_GB * _GIB
+    headroom = max(_GIB, int(available * 0.25))
+    host_budget = max(0, available - headroom)
+    configured = int(settings.MEDIA_MEMORY_LIMIT_GB * _GIB)
+    return max(0, min(configured, int(shm_free * 0.8), host_budget))
+
+
+def _reserve_memory_upload(expected_size: int | None) -> bool:
+    """Reserve an in-flight upload against the current memory budget."""
+    global _MEMORY_RESERVED_BYTES
+    if expected_size is None or expected_size <= 0:
+        return False
+    with _MEMORY_ADMISSION_LOCK:
+        capacity = _memory_capacity_bytes()
+        if expected_size > max(0, capacity - _MEMORY_RESERVED_BYTES):
+            return False
+        _MEMORY_RESERVED_BYTES += expected_size
+        return True
+
+
+def _release_memory_upload(expected_size: int | None) -> None:
+    global _MEMORY_RESERVED_BYTES
+    if expected_size is None or expected_size <= 0:
+        return
+    with _MEMORY_ADMISSION_LOCK:
+        _MEMORY_RESERVED_BYTES = max(0, _MEMORY_RESERVED_BYTES - expected_size)
+
+
+def choose_upload_destination(destination: Path, expected_size: int | None) -> tuple[Path, int | None]:
+    """Choose memory or disk immediately before an upload starts.
+
+    ``auto`` falls back to disk when the current shared-memory/host budget is
+    insufficient. Explicit ``memory`` reports 507 instead of silently using
+    disk. A missing size is treated conservatively: auto uses disk because it
+    cannot safely reserve an unknown amount before writing.
+    """
+    mode = _media_storage_mode()
+    disk_destination = _DISK_UPLOADS_DIR / destination.name
+    if os.name == 'nt' or mode == 'disk' or not Path('/dev/shm').is_dir():
+        if mode == 'memory' and os.name != 'nt' and not Path('/dev/shm').is_dir():
+            raise HTTPException(status_code=507, detail="Memory-backed temporary storage is unavailable")
+        return destination, None
+    if expected_size is None or expected_size <= 0 or not _reserve_memory_upload(int(expected_size)):
+        if mode == 'memory':
+            raise HTTPException(
+                status_code=507,
+                detail="Insufficient available shared memory for this upload; use MEDIA_STORAGE=auto or disk",
+            )
+        logger.info("upload admission: using disk because current RAM budget cannot fit %s", destination.name)
+        return disk_destination, None
+    try:
+        MEMORY_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        _release_memory_upload(int(expected_size))
+        if mode == 'memory':
+            raise HTTPException(status_code=507, detail="Memory-backed temporary storage could not be created")
+        return disk_destination, None
+    return MEMORY_UPLOADS_DIR / destination.name, int(expected_size)
+
+
+def resolve_uploaded_path(filename: str) -> Path:
+    """Find an upload whether admission placed it in RAM-backed storage or disk."""
+    safe_name = safe_filename(filename)
+    candidates = [UPLOADS_DIR, _DISK_UPLOADS_DIR, MEMORY_UPLOADS_DIR]
+    seen: set[str] = set()
+    for root in candidates:
+        key = os.path.normcase(os.path.abspath(str(root)))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidate = root / safe_name
+        if candidate.exists():
+            return candidate
+    return _DISK_UPLOADS_DIR / safe_name
 
 # ---------------------------------------------------------------------------
 # Redis async client (shared across all routers)
@@ -50,7 +250,7 @@ else:
 # ---------------------------------------------------------------------------
 # Upload / batch limits (read once at import time from settings)
 # ---------------------------------------------------------------------------
-MAX_UPLOAD_SIZE_BYTES: int = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+MAX_UPLOAD_SIZE_BYTES: int = _MEDIA_UPLOAD_LIMIT_BYTES or settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 MAX_BATCH_FILES: int = settings.MAX_BATCH_FILES
 BATCH_TTL_SECONDS: int = settings.BATCH_METADATA_TTL_HOURS * 3600
 
@@ -327,11 +527,38 @@ def safe_filename(filename: str | None) -> str:
     return safe or "upload.bin"
 
 
-async def save_upload_file(upload: UploadFile, destination: Path) -> None:
+async def save_upload_file(
+    upload: UploadFile,
+    destination: Path,
+    *,
+    allow_dynamic_storage: bool = False,
+) -> Path:
+    reservation: int | None = None
+    if allow_dynamic_storage:
+        expected_size = getattr(upload, "size", None)
+        try:
+            expected_size = int(expected_size) if expected_size is not None else None
+        except (TypeError, ValueError):
+            expected_size = None
     total_size = 0
     try:
+        if allow_dynamic_storage:
+            destination, reservation = choose_upload_destination(destination, expected_size)
+            destination.parent.mkdir(parents=True, exist_ok=True)
         with destination.open("wb") as out:
-            while chunk := await upload.read(8192):
+            if _windows_ram_preferred_mode():
+                marked = mark_file_temporary(destination)
+                if not marked and _media_storage_mode() == "memory":
+                    raise HTTPException(
+                        status_code=507,
+                        detail="Windows RAM-preferred temporary storage could not be enabled",
+                    )
+                if not marked:
+                    logger.warning(
+                        "windows-temp: continuing in auto mode without FILE_ATTRIBUTE_TEMPORARY for %s",
+                        destination,
+                    )
+            while chunk := await upload.read(1024 * 1024):
                 total_size += len(chunk)
                 if total_size > MAX_UPLOAD_SIZE_BYTES:
                     raise HTTPException(
@@ -348,6 +575,15 @@ async def save_upload_file(upload: UploadFile, destination: Path) -> None:
         except OSError:
             logger.warning("upload: could not remove oversized partial file %s", destination)
         raise
+    except Exception:
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("upload: could not remove failed partial file %s", destination)
+        raise
+    finally:
+        _release_memory_upload(reservation)
+    return destination
 
 
 def is_video_upload(upload: UploadFile) -> bool:
@@ -369,7 +605,15 @@ def build_output_name(input_path: Path, task_id: str, container: str, audio_only
 # ---------------------------------------------------------------------------
 # Job metadata helpers
 # ---------------------------------------------------------------------------
-async def store_job_metadata(task_id: str, job_id: str, filename: str, target_size_mb: float, video_codec: str) -> None:
+async def store_job_metadata(
+    task_id: str,
+    job_id: str,
+    filename: str,
+    target_size_mb: float,
+    video_codec: str,
+    input_path: str | None = None,
+    output_path: str | None = None,
+) -> None:
     try:
         job_meta = JobMetadata(
             task_id=task_id,
@@ -380,6 +624,8 @@ async def store_job_metadata(task_id: str, job_id: str, filename: str, target_si
             state='queued',
             progress=0.0,
             created_at=time.time(),
+            input_path=input_path,
+            output_path=output_path,
         )
         await redis.setex(f"job:{task_id}", 86400, orjson.dumps(job_meta.dict()).decode())
         await redis.zadd("jobs:active", {task_id: time.time()})
@@ -496,12 +742,14 @@ async def load_batch_payload(batch_id: str) -> dict:
 
 
 async def sync_codec_settings_from_tests(timeout_s: int = 60) -> None:
-    """Initialize codec visibility and default preset based on detected hardware.
+    """Refresh hardware availability without changing user codec visibility.
 
-    - CPU codecs are always enabled.
-    - Hardware codecs are enabled when the worker reports them available and tests pass.
-    - After updating visibility, ensures the default_preset points to the best
-      available codec (NVENC > QSV > VAAPI > CPU).
+    Hardware probing determines which encoders work on this worker. The
+    settings page owns the user's visibility choices. Keeping those concerns
+    separate prevents a startup probe from undoing saved choices.
+
+    An automatically managed default may still move to the best working codec,
+    but only among codecs that are both available and visible.
     """
     import asyncio
     import json as _json
@@ -612,10 +860,17 @@ async def sync_codec_settings_from_tests(timeout_s: int = 60) -> None:
                 else:
                     payload[codec] = bool(default_enabled)
 
-        _sm.update_codec_visibility_settings(payload)
-        logger.info("Codec visibility synced: %s", ', '.join(k for k, v in payload.items() if v))
+        saved_visibility = _sm.get_codec_visibility_settings()
+        effective_visibility = {
+            codec: bool(is_available) and bool(saved_visibility.get(codec, True))
+            for codec, is_available in payload.items()
+        }
+        logger.info(
+            "Codec availability detected: %s; saved visibility preferences preserved",
+            ', '.join(k for k, v in payload.items() if v) or 'none',
+        )
 
-        _ensure_default_preset_matches_hardware(_sm, payload)
+        _ensure_default_preset_matches_hardware(_sm, effective_visibility)
 
         try:
             await redis.set("startup:codec_visibility_synced", "1")
@@ -671,6 +926,18 @@ def _ensure_default_preset_matches_hardware(_sm, visibility: dict[str, bool]) ->
             if visibility.get(codec_to_vis.get(codec, codec), False)
         ), None)
         if not best_codec or (current_available and current_codec == best_codec):
+            return
+
+        # The Discord profile is an application-managed target-size default.
+        # When hardware changes, keep its 19.7 MB headroom while adapting only
+        # the encoder, instead of selecting an older 9.7 MB stock profile.
+        if default_name == 'Discord 19.7 MB' and managed_default:
+            discord_profile = next((p for p in profiles if p.get('name') == default_name), None)
+            if discord_profile is not None and discord_profile.get('video_codec') != best_codec:
+                discord_profile['video_codec'] = best_codec
+                data['default_preset_managed'] = True
+                _sm._write_settings(data)
+                logger.info("Discord default encoder adapted to '%s' while retaining 19.7 MB target", best_codec)
             return
 
         for p in profiles:

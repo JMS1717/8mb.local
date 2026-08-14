@@ -13,18 +13,30 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Read and verify shared version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Get-Content -LiteralPath VERSION -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+            throw "VERSION must contain a full four-part version; got '$version'"
+          }
+          "full=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          .\scripts\check-version.ps1 -RepositoryRoot $PWD
+
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --no-progress -y
 
       - name: Build, install, and exercise the release
         shell: pwsh
-        run: .\windows\test-release.ps1 -Build -Install
+        run: .\windows\test-release.ps1 -Build -Install -ExpectedVersion '${{ steps.version.outputs.full }}'
 
       - name: Build Microsoft Store MSIX
         shell: pwsh
         run: |
           .\windows\build-msix.ps1 `
+            -Version '${{ steps.version.outputs.full }}' `
             -PackageIdentityName 'jms1717.8mb.local' `
             -Publisher 'CN=AAE66F20-996E-4A3C-B08E-182952BAD9F7' `
             -PublisherDisplayName 'jms1717' `
@@ -43,5 +55,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: 8mblocal-msix-store-submission
-          path: dist/8mblocal_138.0.0.0_x64.msix
+          path: dist/8mblocal_${{ steps.version.outputs.full }}_x64.msix
           if-no-files-found: error

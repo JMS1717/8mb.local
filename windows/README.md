@@ -47,7 +47,15 @@ not rely on the unsigned GitHub executable's reputation.
 
 ## Build
 
-On Windows with PowerShell, Node.js, Python 3.11+, and (optionally) Inno Setup:
+The active version comes from the root `VERSION` file. For the complete local
+release workflow, use the versioned command from the repository root:
+
+```powershell
+.\release-local.ps1 -Version 140.0.0.0
+```
+
+For only the native Windows build, use Windows PowerShell with Node.js,
+Python 3.11+, and (optionally) Inno Setup:
 
 ```powershell
 .\windows\build.ps1
@@ -71,21 +79,44 @@ submission with:
 ```
 
 Copy the identity and publisher values exactly from Partner Center after
-reserving the app name. The v138 Partner Center identity is
+reserving the app name. The currently configured Partner Center identity is
 `jms1717.8mb.local`, publisher
 `CN=AAE66F20-996E-4A3C-B08E-182952BAD9F7`, and display name `jms1717`.
 The script downloads the command-line Windows SDK build
 tools into a per-user build cache when `MakeAppx.exe` is not already installed.
 `-StoreSubmission` rejects the development placeholder identity so a CI test
 package cannot be uploaded accidentally. The resulting
-`dist\8mblocal_138.0.0.0_x64.msix` is intentionally unsigned;
+`dist\8mblocal_<version>_x64.msix` is intentionally unsigned;
 Microsoft signs it after Store certification. For a local structural build,
 omit the identity arguments to use clearly marked development placeholders.
 
-The MSIX declares unvirtualized AppData access so history and output media
-remain in `%LOCALAPPDATA%\8mb.local`, are shared with the portable/Inno builds,
-and are not removed when the Store package is uninstalled. This restricted
-capability must be explained in the Partner Center submission.
+The MSIX deliberately omits `unvirtualizedResources` and
+`FileSystemWriteVirtualization`. It retains only the `runFullTrust`
+capability required by the current packaged Win32 architecture, which launches
+the local Python/FastAPI runtime, FFmpeg/FFprobe, and WebView2. The package is
+still unsigned locally; Microsoft signs the submitted package after Store
+certification.
+
+## Temporary media and Folder Watch
+
+Native Windows uploads use normal filesystem paths. In `MEDIA_STORAGE=auto`
+or `memory` mode, transient upload files receive the Windows
+`FILE_ATTRIBUTE_TEMPORARY` cache hint so Windows can prefer keeping them in
+memory while still allowing safe disk spill under pressure. This is
+RAM-preferred temporary storage, not a guaranteed RAM disk and does not require
+ImDisk, WinFsp, a driver, pipes, or whole-file Python buffers. `disk` mode
+disables the hint. The configured `MEDIA_MEMORY_LIMIT_GB` budget and admission
+checks protect the host, and temporary API inputs are removed after encoding,
+retries, fallback, and validation finish.
+
+The **Folder Watch (Advanced)** panel is at the bottom of Settings and is
+collapsed by default. It can watch a local, UNC, or mounted Linux folder and
+uses the normal compression queue. **Stable seconds** is the quiet period: the
+file size and modified time must remain unchanged for that many seconds before
+processing begins. It is not the video's duration or total encode time. Five
+seconds is a good local default; use a longer value for slower network copies.
+The polling interval is separate. Folder Watch remains disabled until enabled
+and saved by the user.
 
 For development without packaging:
 

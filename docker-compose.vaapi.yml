@@ -14,11 +14,13 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "138"
+        BUILD_VERSION: "${APP_VERSION:-140.0.0.0}"
     image: jms1717/8mblocal:vaapi
     container_name: 8mblocal
     ports:
       - "8001:8001"
+    # Keep the VAAPI profile's auto/memory upload behavior RAM-preferred too.
+    shm_size: "${MEDIA_SHM_SIZE:-10g}"
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
@@ -38,6 +40,8 @@ services:
       - REDIS_URL=redis://127.0.0.1:6379/0
       - ENV_FILE=/app/.env
       - SETTINGS_FILE=/app/state/settings.json
+      - MEDIA_STORAGE=${MEDIA_STORAGE:-auto}
+      - MEDIA_MEMORY_LIMIT_GB=${MEDIA_MEMORY_LIMIT_GB:-10}
       - HISTORY_FILE=/app/state/history.json
       - TMPDIR=/app/uploads/.tmp
       - VAAPI_DEVICE=${VAAPI_DEVICE:-}

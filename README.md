@@ -95,6 +95,67 @@ Public instances run by people who offer their **8mb.local** install for anyone 
 |------|--------|
 | [fits.video](https://fits.video/) | Online compressor (free and open source) |
 
+## Local Release Workflow
+
+This repository is one shared source codebase for the frontend, backend, worker, Windows packages, and Docker image. The root `VERSION` file is the single active application-version source. Generated UI/backend version modules and packaging metadata are synchronized by `scripts\set-version.ps1` and verified by `scripts\check-version.ps1`.
+
+One command runs the automated checks and builds the portable EXE, installer EXE, Store-submission MSIX, and local Docker image:
+
+```powershell
+.\release-local.ps1 -Version 140.0.0.0
+```
+
+GitHub is not required to generate these files. GitHub Actions may still provide an independent compatibility check later. The local workflow never pushes its Docker image, publishes a release, deploys the application, or submits the MSIX; Microsoft Partner Center remains a separate manual submission step.
+
+The UI, backend API, EXE metadata, installer metadata, MSIX manifest, Docker metadata/tag, artifact names, and release directory all derive from the requested four-part version. By default, outputs and stage logs are written to `dist\release\<version>\`:
+
+- `8mblocal.exe`
+- `8mblocal-Setup.exe`
+- `8mblocal_<version>_x64.msix`
+- `8mblocal-docker.tar`
+- `SHA256SUMS.txt`
+- `BUILD-MANIFEST.json`
+- `TEST-RESULTS.md`
+
+Required tools depend on the selected stages: Python 3.11-3.13, Node.js, npm, Docker with Compose, Inno Setup, Windows SDK MakeAppx, and 7-Zip when the Windows build must download its tested FFmpeg bundle. The script checks tools before building and fails with a clear missing-tool message; it does not install unrelated software or perform system upgrades.
+
+Prepare the Python test environment once after cloning:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt httpx==0.27.2
+```
+
+Useful commands:
+
+```powershell
+# Validate tools and show the plan without changing versions or building
+.\release-local.ps1 -Version 140.0.0.0 -DryRun
+
+# Full local release
+.\release-local.ps1 -Version 140.0.0.0
+
+# Windows artifacts only
+.\release-local.ps1 -Version 140.0.0.0 -SkipDocker
+
+# Docker artifact only
+.\release-local.ps1 -Version 140.0.0.0 -SkipWindows
+
+# Windows EXE and installer without MSIX
+.\release-local.ps1 -Version 140.0.0.0 -SkipMsix
+```
+
+`-SkipTests` is troubleshooting-only and marks the result incomplete. `-OutputDir` selects another output folder, `-KeepTemp` preserves temporary files, and `-Overwrite` may reuse only a release directory previously created and marked by this script. Arbitrary existing directories, source directories, and ancestor paths are protected from overwrite.
+
+Verify generated checksums from the release directory:
+
+```powershell
+Get-Content .\dist\release\140.0.0.0\SHA256SUMS.txt
+Get-FileHash .\dist\release\140.0.0.0\8mblocal.exe -Algorithm SHA256
+```
+
+When a build fails, inspect `TEST-RESULTS.md`, `BUILD-MANIFEST.json`, and the named stage log, correct the source or environment issue, and rerun into a new output directory. A run that skips required stages is never reported as release-ready.
+
 ## Architecture
 
 ```mermaid
@@ -344,6 +405,8 @@ docker stop 8mblocal && docker rm 8mblocal
 - For speed, try Low Latency tune with a faster preset (P1–P4).
 - MP4 + Opus is not supported; the worker auto-switches to AAC for MP4 containers.
 - MP4 outputs include `+faststart` for better web/streaming playback.
+- HEVC MP4 outputs use the Apple-compatible `hvc1` sample-entry tag so iPhone,
+  iPad, Safari, and other strict players can recognize the video stream.
 
 ## Configuration
 
@@ -383,6 +446,53 @@ consume the container's writable layer. Put the media directories on the disk
 with the most free space and back up `state/` if you want to preserve the UI
 configuration.
 
+### Temporary media storage
+
+Uploads use `MEDIA_STORAGE=auto` by default. The Docker Compose profiles set a
+10 GiB `/dev/shm` ceiling by default through `MEDIA_SHM_SIZE=10g`; this is a
+capacity limit, not a preallocation. Tmpfs consumes host memory only as files
+are written and releases it when they are deleted. On Linux/Docker, auto mode uses
+`/dev/shm/8mb.local/uploads` only when there is at least 512 MB free; use
+`MEDIA_STORAGE=memory` to require the memory-backed path, or `disk` to force
+normal disk-backed uploads. On native Windows, auto and memory modes keep a
+normal per-user filesystem pathname and apply `FILE_ATTRIBUTE_TEMPORARY`, a
+RAM-preferred Windows cache hint. Windows may still spill temporary data to
+disk under memory pressure, so this is not a guaranteed RAM disk. Explicit
+`memory` mode also applies a conservative per-upload admission budget based
+on `MEDIA_MEMORY_LIMIT_GB`, available memory, worker concurrency, FFmpeg
+working space, and OS headroom. Temporary API upload inputs are removed after
+the encode, retries, fallback, and final validation finish on every platform;
+failed partial uploads are removed immediately. Folder Watch source files remain
+owned by Folder Watch and follow its keep/delete/move policy. Settings,
+history, Redis data, and final outputs remain on their persistent disk
+locations.
+
+For Docker, increase or reduce the shared-memory ceiling in `.env` with
+`MEDIA_SHM_SIZE` before recreating the container. Check the active limit with
+`docker compose exec 8mblocal df -h /dev/shm`. `auto` can still fall back to
+the persistent uploads disk when the available shared memory or the configured
+`MEDIA_MEMORY_LIMIT_GB` budget is not sufficient. This keeps RAM use bounded
+instead of treating the entire host memory pool as a temporary filesystem.
+
+### Folder Watch
+
+The **Folder Watch (Advanced)** panel is at the bottom of `/settings`, is
+collapsed by default, and can poll an existing
+Windows, UNC, or Linux-mounted folder. It waits for a file's size and mtime to
+remain stable, then sends it through the same Celery compression queue used by
+uploads. It supports recursive scanning, new-only or existing-file processing,
+an explicit profile, same-folder or specific-folder output, and keep/delete/
+move-after-success behavior. **Stable seconds** is the safety delay before a
+file is considered finished: the watcher requires the file size and modified
+time to remain unchanged for that many seconds before starting compression.
+It is a quiet-period safety delay, not the video's duration and not the total
+processing time.
+The default is 5 seconds; use a longer value for slow network copies. The
+polling interval controls how often the folder is checked and is separate from
+the stable-file delay. Deletion or moving happens only after the output is
+non-empty and passes FFprobe validation. Folder Watch state is persisted in
+the application settings file and is not an arbitrary public-path API.
+
 ### Settings UI
 
 Manage settings at `/settings` with no container restart required:
@@ -394,6 +504,9 @@ Manage settings at `/settings` with no container restart required:
 - **Worker Concurrency** — adjust parallel job limit
 - **Size Buttons** — customize the target size quick-pick buttons
 - **GPU Support Reference** — hardware encoding compatibility at `/gpu-support`
+
+The Folder Watch panel is also available under Settings for optional
+cross-platform polling of stable files through the normal queue.
 
 ## Performance & Concurrency
 

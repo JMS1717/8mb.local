@@ -78,6 +78,26 @@ class TestCodecAvailability(unittest.TestCase):
             {"libx264", "libx265"},
         )
 
+    def test_saved_visibility_hides_a_working_codec(self):
+        with patch.object(
+            system,
+            "get_hw_info_cached_async",
+            new=AsyncMock(return_value={
+                "type": "cpu",
+                "available_encoders": {"h264": "libx264"},
+                "available_cpu_encoders": ["libx264", "libx265", "libsvtav1"],
+            }),
+        ), patch.object(
+            system.settings_manager,
+            "get_codec_visibility_settings",
+            return_value={"libx264": False, "libx265": True, "libsvtav1": True},
+        ):
+            response = asyncio.run(system.get_available_codecs())
+
+        self.assertNotIn("libx264", response.enabled_codecs)
+        self.assertIn("libx265", response.enabled_codecs)
+        self.assertIn("libsvtav1", response.enabled_codecs)
+
 
 if __name__ == "__main__":
     unittest.main()

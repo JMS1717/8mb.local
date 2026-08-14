@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import functools
 import math
 import os
 import queue
@@ -38,6 +39,41 @@ REDIS = None
 # Cache encoder test results to avoid slow init tests on every job
 ENCODER_TEST_CACHE: Dict[str, bool] = {}
 _LAST_PUBLISH_WARNING_TS = 0.0
+
+
+def effective_trim_duration(source_duration: float, start_time: str | None, end_time: str | None) -> float:
+    """Return the duration used for target-size bitrate math after trimming."""
+    source = float(source_duration or 0.0)
+    if source <= 0 and not (start_time or end_time):
+        return source
+    start = parse_time_string(start_time) if start_time else 0.0
+    end = parse_time_string(end_time) if end_time else source
+    if not math.isfinite(start) or start < 0:
+        raise ValueError('start time must be non-negative')
+    if not math.isfinite(end) or end <= 0:
+        raise ValueError('end time must be positive')
+    if source > 0 and start >= source:
+        raise ValueError('start time is beyond the input duration')
+    if end <= start:
+        raise ValueError('end time must be greater than start time')
+    actual_end = min(end, source) if source > 0 else end
+    return max(actual_end - start, 0.0)
+
+
+def mp4_video_tag_args(output_path: str, encoder: str) -> list[str]:
+    """Use Apple's compatible HEVC sample-entry tag for MP4 outputs.
+
+    ``hev1`` is a valid ISO-BMFF tag, but Apple/iOS playback commonly expects
+    ``hvc1`` for HEVC in MP4. This does not change the encoded bitstream; it
+    only makes the container metadata advertise the stream in the broadly
+    compatible form. Other codecs and non-MP4 containers keep FFmpeg's
+    default tag.
+    """
+    if str(output_path).lower().endswith('.mp4') and (
+        encoder == 'libx265' or 'hevc' in str(encoder).lower()
+    ):
+        return ['-tag:v', 'hvc1']
+    return []
 
 # libsvtav1: SVT-AV1's LevelOfParallelism (``lp``) is a library tuning level,
 # not a core count. Older releases forced ``lp=6`` for throughput, but that
@@ -195,6 +231,39 @@ def _force_stop_ffmpeg(proc: subprocess.Popen) -> None:
             pass
 
 
+def cleanup_transient_input(input_path: str | Path | None, transient_input: bool = False) -> None:
+    """Remove an API-staged upload after its complete task lifecycle.
+
+    Folder Watch and other path-based callers do not set ``transient_input``
+    and therefore retain ownership of their source files. API uploads are
+    temporary on every platform and are removed after success, retry/fallback,
+    cancellation, or failure; the retention scheduler remains a crash-recovery
+    backstop.
+    """
+    if not transient_input or input_path is None:
+        return
+    try:
+        Path(input_path).unlink(missing_ok=True)
+        logger.info("windows-temp: removed transient input %s", input_path)
+    except OSError as exc:
+        logger.warning("windows-temp: could not remove transient input %s: %s", input_path, exc)
+
+
+def _cleanup_transient_input_after_task(func):
+    """Guarantee source cleanup after success, retry exhaustion, or failure."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        input_path = kwargs.get("input_path")
+        if input_path is None and len(args) >= 3:
+            input_path = args[2]  # bound self, job_id, input_path
+        transient_input = bool(kwargs.get("transient_input", False))
+        try:
+            return func(*args, **kwargs)
+        finally:
+            cleanup_transient_input(input_path, transient_input)
+    return wrapper
+
+
 @celery_app.task(name="worker.worker.get_hardware_info")
 def get_hardware_info_task():
     """Return hardware acceleration info for the frontend."""
@@ -229,6 +298,7 @@ def run_hardware_tests_task() -> dict:
 
 
 @celery_app.task(name="worker.worker.compress_video", bind=True)
+@_cleanup_transient_input_after_task
 def compress_video(self, job_id: str, input_path: str, output_path: str, target_size_mb: float,
                    video_codec: str, audio_codec: str, audio_bitrate_kbps: int, preset: str, tune: str = "hq",
                    max_width: int = None, max_height: int = None, start_time: str = None, end_time: str = None,
@@ -236,7 +306,8 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                    auto_resolution: bool = False, min_auto_resolution: int = 240,
                    target_resolution: int | None = None, audio_only: bool = False,
                    target_video_bitrate_kbps: float | None = None,
-                   max_output_fps: float | None = None):
+                   max_output_fps: float | None = None,
+                   transient_input: bool = False):
     logger.info(
         "compress_video START task_id=%s job_id=%s codec=%s target_mb=%s preset=%s tune=%s "
         "audio=%s@%skbps container=%s audio_only=%s auto_res=%s max_wh=%s/%s "
@@ -270,6 +341,12 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     _publish(self.request.id, {"type": "log", "message": "Initializing: probing input file…"})
     info = ffprobe_info(input_path, allow_audio_only=bool(audio_only))
     duration = info.get("duration", 0.0)
+    if start_time or end_time:
+        try:
+            duration = effective_trim_duration(duration, start_time, end_time)
+        except Exception as exc:
+            raise RuntimeError(f"Invalid trim range: {exc}") from exc
+        _publish(self.request.id, {"type": "log", "message": f"Target-size bitrate duration: {duration:.2f}s after trim"})
     logger.debug(
         "compress_video ffprobe: duration=%.2fs %sx%s v_kbps=%s a_kbps=%s fps=%s rotation=%s",
         duration, info.get("width"), info.get("height"),
@@ -641,9 +718,11 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     input_opts = []
     duration_opts = []
     
+    trim_start_seconds = parse_time_string(start_time) if start_time else None
+    trim_end_seconds = parse_time_string(end_time) if end_time else None
     if start_time:
         try:
-            start_sec = parse_time_string(start_time)
+            start_sec = trim_start_seconds
             if not math.isfinite(start_sec) or start_sec < 0:
                 raise ValueError("start time must be non-negative")
         except Exception as e:
@@ -653,33 +732,20 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         _publish(self.request.id, {"type": "log", "message": f"Trimming: start at {start_time}"})
     
     if end_time:
-        # Convert end_time to duration if we have start_time
         if start_time:
-            # Calculate duration (end - start)
             try:
-                start_sec = parse_time_string(start_time)
-                end_sec = parse_time_string(end_time)
+                start_sec = trim_start_seconds
+                end_sec = trim_end_seconds
                 if not math.isfinite(start_sec) or not math.isfinite(end_sec) or start_sec < 0 or end_sec <= start_sec:
                     raise ValueError("end time must be greater than start time, and both must be non-negative")
                 duration_sec = end_sec - start_sec
                 duration_opts = ["-t", str(duration_sec)]
                 _publish(self.request.id, {"type": "log", "message": f"Trimming: duration {duration_sec:.2f}s (end at {end_time})"})
-                # Use trimmed duration for accurate progress scaling
-                duration = float(duration_sec)
             except Exception as e:
                 raise RuntimeError(f"Invalid trim range: {e}") from e
         else:
-            # No start time, use -to
             duration_opts = ["-to", str(end_time)]
             _publish(self.request.id, {"type": "log", "message": f"Trimming: end at {end_time}"})
-            # If only end_time provided, set duration to end timestamp if parsable
-            try:
-                end_sec = parse_time_string(end_time)
-                if not math.isfinite(end_sec) or end_sec <= 0:
-                    raise ValueError("end time must be positive")
-                duration = float(end_sec)
-            except Exception as e:
-                raise RuntimeError(f"Invalid end time: {e}") from e
 
     # Decide decoder strategy based on input codec and runtime capability
     in_codec = info.get("video_codec")
@@ -875,6 +941,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         cmd += ["-c:a", chosen_audio_codec, "-b:a", a_bitrate_str]
     
     cmd += [
+        *mp4_video_tag_args(output_path, actual_encoder),
         *mp4_flags,
         "-progress", "pipe:2",
         output_path,
@@ -1168,7 +1235,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             retry_cmd += ["-an"]
         else:
             retry_cmd += ["-c:a", chosen_audio_codec, "-b:a", a_bitrate_str]
-        retry_cmd += [*mp4_flags, "-progress", "pipe:2", output_path]
+        retry_cmd += [*mp4_video_tag_args(output_path, actual_encoder), *mp4_flags, "-progress", "pipe:2", output_path]
         _publish(self.request.id, {"type": "log", "message": f"FFmpeg retry: {' '.join(retry_cmd)}"})
         stderr_lines = []
         last_progress = 0.0
@@ -1239,7 +1306,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             cmd2 += ["-an"]
         else:
             cmd2 += ["-c:a", chosen_audio_codec, "-b:a", a_bitrate_str]
-        cmd2 += [*mp4_flags, "-progress", "pipe:2", output_path]
+        cmd2 += [*mp4_video_tag_args(output_path, fb_encoder), *mp4_flags, "-progress", "pipe:2", output_path]
 
         rc, was_cancelled = run_ffmpeg_and_stream(cmd2)
         if rc == 0 and not was_cancelled:

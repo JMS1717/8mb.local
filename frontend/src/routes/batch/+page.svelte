@@ -70,7 +70,7 @@
   let selectionNotice = '';
   let isDragActive = false;
 
-  let targetMB = 9.7;
+  let targetMB = 19.7;
   let targetMode: 'size' | 'bitrate' = 'size';
   let targetVideoKbps = 2500;
   let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p6';
@@ -100,7 +100,7 @@
   $: nvencTuneApplies = videoCodec.endsWith('_nvenc');
   let presetProfiles: PresetProfile[] = [];
   let selectedPreset: string | null = null;
-  let sizeButtons: number[] = [4, 5, 8, 9.7, 25, 50, 100];
+  let sizeButtons: number[] = [4, 5, 8, 9.7, 19.7, 25, 50, 100];
 
   let isUploading = false;
   let uploadProgress = 0;

@@ -10,6 +10,7 @@ import math
 import os
 import secrets
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +22,55 @@ logger = logging.getLogger(__name__)
 _APP_DATA_DIR = Path(settings.APP_DATA_DIR)
 ENV_FILE = Path(os.getenv("ENV_FILE", str(_APP_DATA_DIR / ".env")))
 SETTINGS_FILE = Path(os.getenv("SETTINGS_FILE", str(_APP_DATA_DIR / "settings.json")))
+
+_DEFAULT_SIZE_BUTTONS = [4, 5, 8, 9.7, 19.7, 50, 100]
+_LEGACY_STOCK_SIZE_BUTTONS = [4, 5, 8, 9.7, 20, 50, 100]
+
+_FOLDER_WATCH_DEFAULTS: dict[str, Any] = {
+    'enabled': False,
+    'input_folder': '',
+    'profile': None,
+    'output_mode': 'same_folder',
+    'output_folder': '',
+    'original_behavior': 'keep',
+    'existing_files': 'new_only',
+    'recursive': False,
+    'stable_seconds': 5,
+    'poll_interval_seconds': 5,
+    'baseline_ts': 0.0,
+}
+
+
+def _legacy_stock_profiles() -> list[dict[str, Any]]:
+    """Return the exact pre-v140 stock profile list used for safe migration."""
+    return [
+        {"name": "AV1 9.7MB (NVENC)", "target_mb": 9.7, "video_codec": "av1_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+        {"name": "HEVC 9.7MB (NVENC)", "target_mb": 9.7, "video_codec": "hevc_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+        {"name": "H264 8MB (NVENC)", "target_mb": 8, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+        {"name": "HEVC 50MB HQ (NVENC)", "target_mb": 50, "video_codec": "hevc_nvenc", "audio_codec": "aac", "preset": "p7", "audio_kbps": 192, "container": "mp4", "tune": "hq"},
+        {"name": "H264 25MB Fast (NVENC)", "target_mb": 25, "video_codec": "h264_nvenc", "audio_codec": "aac", "preset": "p3", "audio_kbps": 128, "container": "mp4", "tune": "ll"},
+        {"name": "AV1 9.7MB (SVT-AV1, CPU)", "target_mb": 9.7, "video_codec": "libsvtav1", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
+    ]
+
+
+def _default_preset_profiles() -> list[dict[str, Any]]:
+    """Return stock profiles for a new install, including Discord headroom."""
+    return [
+        {"name": "Discord 19.7 MB", "target_mb": 19.7, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+        *_legacy_stock_profiles(),
+    ]
+
+
+def _is_untouched_legacy_stock(data: Dict[str, Any]) -> bool:
+    """Only migrate settings that still exactly match the old stock set."""
+    if data.get('size_buttons') not in (_LEGACY_STOCK_SIZE_BUTTONS, _DEFAULT_SIZE_BUTTONS):
+        return False
+    if data.get('preset_profiles') != _legacy_stock_profiles():
+        return False
+    default_name = data.get('default_preset')
+    if default_name and default_name not in {p['name'] for p in _legacy_stock_profiles()}:
+        return False
+    return data.get('default_preset_managed', True) is not False
 
 
 def _read_settings() -> Dict[str, Any]:
@@ -66,51 +116,50 @@ def _ensure_defaults() -> Dict[str, Any]:
     """Ensure settings.json exists with sane defaults and return it."""
     data = _read_settings()
     changed = False
+    created_profiles = False
+    legacy_stock_candidate = (
+        data.get('preset_profiles') == _legacy_stock_profiles()
+        and data.get('size_buttons', _LEGACY_STOCK_SIZE_BUTTONS) == _LEGACY_STOCK_SIZE_BUTTONS
+        and data.get('default_preset_managed', True) is not False
+    )
     if 'size_buttons' not in data:
-        data['size_buttons'] = [4, 5, 8, 9.7, 20, 50, 100]
+        data['size_buttons'] = list(_DEFAULT_SIZE_BUTTONS)
         changed = True
     if 'preset_profiles' not in data:
-        data['preset_profiles'] = [
-            {"name": "AV1 9.7MB (NVENC)", "target_mb": 9.7, "video_codec": "av1_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
-            {"name": "HEVC 9.7MB (NVENC)", "target_mb": 9.7, "video_codec": "hevc_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
-            {"name": "H264 8MB (NVENC)", "target_mb": 8, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
-            {"name": "HEVC 50MB HQ (NVENC)", "target_mb": 50, "video_codec": "hevc_nvenc", "audio_codec": "aac", "preset": "p7", "audio_kbps": 192, "container": "mp4", "tune": "hq"},
-            {"name": "H264 25MB Fast (NVENC)", "target_mb": 25, "video_codec": "h264_nvenc", "audio_codec": "aac", "preset": "p3", "audio_kbps": 128, "container": "mp4", "tune": "ll"},
-            {"name": "AV1 9.7MB (SVT-AV1, CPU)", "target_mb": 9.7, "video_codec": "libsvtav1", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mkv", "tune": "hq"},
-        ]
+        data['preset_profiles'] = _default_preset_profiles()
+        created_profiles = True
         changed = True
-    try:
-        profiles = data.get('preset_profiles', [])
-        has_av1_nvenc = any(p.get('video_codec') == 'av1_nvenc' for p in profiles)
-        if not has_av1_nvenc:
-            profiles.insert(0, {
-                "name": "AV1 9.7MB (NVENC)",
-                "target_mb": 9.7,
-                "video_codec": "av1_nvenc",
-                "audio_codec": "libopus",
-                "preset": "p6",
-                "audio_kbps": 128,
-                "container": "mp4",
-                "tune": "hq",
-            })
-            data['preset_profiles'] = profiles
-            changed = True
-    except Exception:
-        pass
+    # An existing profile list is user-owned. Do not silently reinsert a stock
+    # NVENC profile after the user edits or deletes it. The complete stock list
+    # is created only when preset_profiles is absent on first initialization.
     if 'default_preset' not in data:
-        data['default_preset'] = _pick_initial_default(data.get('preset_profiles', []))
+        data['default_preset'] = (
+            'Discord 19.7 MB' if created_profiles
+            else _pick_initial_default(data.get('preset_profiles', []))
+        )
         changed = True
     if 'default_preset_managed' not in data:
         # A legacy settings file may contain an explicit user choice. Only
         # treat known stock defaults as application-managed; never replace a
         # custom preset during an upgrade merely because hardware appeared.
         stock_names = {
+            "Discord 19.7 MB",
             "AV1 9.7MB (NVENC)",
             "AV1 9.7MB (SVT-AV1, CPU)",
             "H.264 9.7MB (NVENC)",
             "H.264 9.7MB (CPU)",
         }
         data['default_preset_managed'] = data.get('default_preset') in stock_names
+        changed = True
+
+    if legacy_stock_candidate and _is_untouched_legacy_stock(data):
+        data['size_buttons'] = list(_DEFAULT_SIZE_BUTTONS)
+        data['preset_profiles'] = [
+            {"name": "Discord 19.7 MB", "target_mb": 19.7, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+            *data['preset_profiles'],
+        ]
+        data['default_preset'] = 'Discord 19.7 MB'
+        data['default_preset_managed'] = True
         changed = True
     if 'codec_visibility' not in data:
         data['codec_visibility'] = {
@@ -306,8 +355,8 @@ def initialize_env_if_missing():
 def _profile_to_dict(p: Dict[str, Any]) -> dict:
     """Extract the API-facing fields from a preset profile."""
     return {
-        'target_mb': float(p.get('target_mb', 9.7)),
-        'video_codec': p.get('video_codec', 'av1_nvenc'),
+        'target_mb': float(p.get('target_mb', 19.7)),
+        'video_codec': p.get('video_codec', 'h264_nvenc'),
         'audio_codec': p.get('audio_codec', 'libopus'),
         'preset': p.get('preset', 'p6'),
         'audio_kbps': int(p.get('audio_kbps', 128)),
@@ -343,8 +392,8 @@ def get_default_presets() -> dict:
 
     # 3) Absolute fallback
     return {
-        'target_mb': 9.7,
-        'video_codec': 'av1_nvenc',
+        'target_mb': 19.7,
+        'video_codec': 'h264_nvenc',
         'audio_codec': 'libopus',
         'preset': 'p6',
         'audio_kbps': 128,
@@ -365,6 +414,10 @@ def update_default_presets(
     """Update the current default preset profile's values in settings.json."""
     data = _ensure_defaults()
     default_name = data.get('default_preset', 'Custom Default')
+    existing_profile = next(
+        (p for p in data.get('preset_profiles', []) if p.get('name') == default_name),
+        None,
+    )
     new_values = {
         'name': default_name,
         'target_mb': float(target_mb),
@@ -375,6 +428,10 @@ def update_default_presets(
         'container': container,
         'tune': tune,
     }
+    # This form does not expose the profile frame-rate control. Preserve a cap
+    # previously saved through the profile editor instead of silently erasing it.
+    if existing_profile and 'max_output_fps' in existing_profile:
+        new_values['max_output_fps'] = existing_profile['max_output_fps']
     replaced = False
     for i, p in enumerate(data['preset_profiles']):
         if p.get('name') == default_name:
@@ -423,6 +480,12 @@ def update_codec_visibility_settings(settings: dict):
         'h264_amf', 'hevc_amf', 'av1_amf',
         'libx264', 'libx265', 'libsvtav1', 'libaom_av1',
     }
+    candidate = {
+        key: bool(settings[key]) if key in settings else bool(vis.get(key, True))
+        for key in valid_keys
+    }
+    if not any(candidate[key] for key in ('libx264', 'libx265', 'libsvtav1')):
+        raise ValueError('At least one CPU codec must remain enabled')
     for k in valid_keys:
         if k in settings:
             vis[k] = bool(settings[k])
@@ -468,6 +531,105 @@ def update_size_buttons(buttons: List[float]):
 def get_preset_profiles() -> Dict[str, Any]:
     data = _ensure_defaults()
     return { 'profiles': data.get('preset_profiles', []), 'default': data.get('default_preset') }
+
+
+def get_folder_watch_settings() -> dict[str, Any]:
+    """Return the persisted folder-watch configuration without runtime state."""
+    data = _ensure_defaults()
+    stored = data.get('folder_watch', {})
+    if not isinstance(stored, dict):
+        stored = {}
+    result = dict(_FOLDER_WATCH_DEFAULTS)
+    result.update({k: v for k, v in stored.items() if k in result})
+    return result
+
+
+def update_folder_watch_settings(values: dict[str, Any]) -> dict[str, Any]:
+    """Validate and persist folder-watch settings.
+
+    The watcher is intentionally configured, rather than given a public
+    arbitrary-path processing endpoint.  Paths are validated only when the
+    feature is enabled, so a disabled configuration can be prepared before a
+    mounted folder exists.
+    """
+    data = _ensure_defaults()
+    current = get_folder_watch_settings()
+    merged = dict(current)
+    merged.update({k: values[k] for k in _FOLDER_WATCH_DEFAULTS if k in values})
+
+    merged['enabled'] = bool(merged['enabled'])
+    merged['input_folder'] = str(merged.get('input_folder') or '').strip()
+    merged['output_folder'] = str(merged.get('output_folder') or '').strip()
+    merged['profile'] = str(merged['profile']).strip() if merged.get('profile') else None
+    merged['output_mode'] = str(merged.get('output_mode', 'same_folder'))
+    merged['original_behavior'] = str(merged.get('original_behavior', 'keep'))
+    merged['existing_files'] = str(merged.get('existing_files', 'new_only'))
+    merged['recursive'] = bool(merged.get('recursive', False))
+    try:
+        merged['stable_seconds'] = int(merged.get('stable_seconds', 5))
+        merged['poll_interval_seconds'] = int(merged.get('poll_interval_seconds', 5))
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Folder Watch timing values must be integers') from exc
+
+    if merged['output_mode'] not in {'same_folder', 'specific_folder'}:
+        raise ValueError('output_mode must be same_folder or specific_folder')
+    if merged['original_behavior'] not in {'keep', 'delete', 'move'}:
+        raise ValueError('original_behavior must be keep, delete, or move')
+    if merged['existing_files'] not in {'new_only', 'process_existing'}:
+        raise ValueError('existing_files must be new_only or process_existing')
+    if not 2 <= merged['stable_seconds'] <= 60:
+        raise ValueError('stable_seconds must be between 2 and 60')
+    if not 2 <= merged['poll_interval_seconds'] <= 300:
+        raise ValueError('poll_interval_seconds must be between 2 and 300')
+
+    profile_names = {p.get('name') for p in data.get('preset_profiles', [])}
+    if merged['profile'] is not None and merged['profile'] not in profile_names:
+        raise ValueError('Folder Watch profile was not found')
+
+    if merged['enabled']:
+        input_path = Path(merged['input_folder']).expanduser()
+        if not input_path.is_absolute() or not input_path.is_dir() or not os.access(input_path, os.R_OK):
+            raise ValueError('Folder Watch input_folder must be an existing readable absolute directory')
+        if merged['output_mode'] == 'specific_folder':
+            output_path = Path(merged['output_folder']).expanduser()
+            if not output_path.is_absolute() or not output_path.is_dir() or not os.access(output_path, os.W_OK):
+                raise ValueError('Folder Watch output_folder must be an existing writable absolute directory')
+
+    old_input = str(current.get('input_folder') or '')
+    old_enabled = bool(current.get('enabled'))
+    if merged['enabled'] and merged['existing_files'] == 'new_only' and (
+        not old_enabled or old_input != merged['input_folder']
+    ):
+        merged['baseline_ts'] = time.time()
+    elif not merged['enabled']:
+        merged['baseline_ts'] = float(current.get('baseline_ts') or 0.0)
+    else:
+        merged['baseline_ts'] = float(current.get('baseline_ts') or 0.0)
+
+    data['folder_watch'] = merged
+    _write_settings(data)
+    return dict(merged)
+
+
+def get_folder_watch_state() -> dict[str, dict[str, Any]]:
+    data = _ensure_defaults()
+    state = data.get('folder_watch_state', {})
+    return dict(state) if isinstance(state, dict) else {}
+
+
+def update_folder_watch_state(path: str, record: dict[str, Any]) -> None:
+    """Persist a bounded per-file state map used for exactly-once discovery."""
+    data = _ensure_defaults()
+    state = data.get('folder_watch_state', {})
+    if not isinstance(state, dict):
+        state = {}
+    state[str(path)] = {**record, 'updated_at': time.time()}
+    if len(state) > 1000:
+        oldest = sorted(state.items(), key=lambda item: float(item[1].get('updated_at', 0)))
+        for old_path, _ in oldest[:len(state) - 1000]:
+            state.pop(old_path, None)
+    data['folder_watch_state'] = state
+    _write_settings(data)
 
 
 def set_default_preset(name: str):

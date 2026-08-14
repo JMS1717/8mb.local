@@ -26,6 +26,7 @@ from .deps import (
     sync_codec_settings_from_tests,
 )
 from . import settings_manager
+from .folder_watch import folder_watch_service
 
 from .routers import upload, compress, stream, download
 from .routers import settings as settings_router
@@ -134,6 +135,7 @@ async def on_startup():
     # start_scheduler() is idempotent; called once here by design.
     start_scheduler()
     logger.debug("startup: cleanup scheduler started")
+    await folder_watch_service.start()
 
     try:
         boot_id = str(uuid.uuid4())
@@ -154,6 +156,7 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     logger.info("shutdown: FastAPI stopping")
+    await folder_watch_service.stop()
     # The Docker API has a normal Celery client and no local executor. The
     # desktop runtime exposes shutdown() so closing the native window also
     # cancels active FFmpeg work and joins its worker threads.

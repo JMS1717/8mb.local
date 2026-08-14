@@ -9,7 +9,7 @@ import os
 import tempfile
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -133,7 +133,7 @@ def add_history_entry(
 ) -> Dict[str, Any]:
     """Add a compression history entry"""
     entry = {
-        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'timestamp': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
         'filename': filename,
         'original_size_mb': round(original_size_mb, 2),
         'compressed_size_mb': round(compressed_size_mb, 2),
@@ -222,3 +222,54 @@ def delete_history_entry(task_id: str) -> bool:
                 return True
 
             return False
+
+
+def prune_history(retention_hours: int, output_dir: str | Path) -> int:
+    """Remove history entries that have expired or lost their output file.
+
+    History is metadata only, but a history row with no downloadable output is
+    misleading. The retention scheduler therefore removes rows when their
+    output is gone, or when the same retention window as media has elapsed.
+    Entries written by older versions without ``output_filename`` are mapped
+    using the historical output naming convention.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max(0, int(retention_hours)))
+    output_root = Path(output_dir)
+
+    def output_name(entry: Dict[str, Any]) -> str | None:
+        stored = entry.get("output_filename")
+        if stored:
+            return Path(str(stored)).name
+        filename = str(entry.get("filename") or "")
+        task_id = str(entry.get("task_id") or "")
+        if not filename or not task_id:
+            return None
+        stem = Path(filename).stem
+        if len(stem) > 37 and stem[36] == "_":
+            stem = stem[37:]
+        container = str(entry.get("container") or "mp4").lower()
+        extension = ".m4a" if container == "m4a" else (".mkv" if container == "mkv" else ".mp4")
+        return f"{stem}_8mblocal_{task_id[:8]}{extension}"
+
+    def entry_expired(entry: Dict[str, Any]) -> bool:
+        timestamp = entry.get("timestamp")
+        if timestamp:
+            try:
+                parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                if parsed < cutoff:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        name = output_name(entry)
+        return bool(name) and not (output_root / name).is_file()
+
+    with _HISTORY_LOCK:
+        with _history_file_lock():
+            history = _read_history_unlocked()
+            retained = [entry for entry in history if not entry_expired(entry)]
+            removed = len(history) - len(retained)
+            if removed:
+                _write_history_unlocked(retained)
+            return removed

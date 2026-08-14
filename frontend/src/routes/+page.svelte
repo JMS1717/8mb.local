@@ -7,15 +7,13 @@
   import { stagePendingBatchFiles } from '$lib/pendingBatch';
   import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
   import { availableCodecOptions, codecColor, codecIcon, encoderDisplayName, type CodecOption } from '$lib/codecs';
-
-  /** Header badge default; bump with each release. API `/api/version` overrides when available. */
-  const DEFAULT_APP_VERSION = '138';
+  import { APP_VERSION } from '$lib/generated-version';
 
   let file: File | null = null;
   let uploadInput: HTMLInputElement | null = null; // reference to clear file input
   let uploadedFileName: string | null = null; // Track what file was uploaded
   let isAnalyzing: boolean = false; // Track analysis state for UI feedback
-  let targetMB = 9.7;
+  let targetMB = 19.7;
   /** 'size' = target output file size (MB); 'bitrate' = fixed video bitrate (kbps). */
   let targetMode: 'size' | 'bitrate' = 'size';
   let targetVideoKbps = 2500;
@@ -209,7 +207,7 @@
   function closeSupport(){ showSupport = false; }
   const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeSupport(); };
   // App version (subtle badge); starts at release default, then replaced by API if different
-  let appVersion: string = DEFAULT_APP_VERSION;
+  let appVersion: string = APP_VERSION;
 
   // Available codecs from backend
   let availableCodecs: CodecOption[] = [];
@@ -232,7 +230,7 @@
   // Presets and size buttons
   let presetProfiles: Array<any> = [];
   let selectedPreset: string | null = null;
-  let sizeButtons: number[] = [4,5,8,9.7,50,100];
+  let sizeButtons: number[] = [4,5,8,9.7,19.7,50,100];
   // Recent history
   let history: any[] = [];
   let historyEnabled = false;
@@ -313,9 +311,9 @@
     // Fetch app version (e.g. Docker ENV APP_VERSION / settings.APP_VERSION)
     try {
       const v = await getVersion();
-      appVersion = (v?.version && String(v.version).trim()) || DEFAULT_APP_VERSION;
+      appVersion = (v?.version && String(v.version).trim()) || APP_VERSION;
     } catch {
-      appVersion = DEFAULT_APP_VERSION;
+      appVersion = APP_VERSION;
     }
 
     // Load preset profiles and size buttons
@@ -531,6 +529,34 @@
     return `${r}s`;
   }
 
+  /** Keep the pipeline badge accurate across normal and reconnecting streams. */
+  function updatePipelineFromLog(message: unknown): void {
+    if (typeof message !== 'string') return;
+    const msg = message.trim();
+
+    const decoder = msg.match(/^Decoder:\s*(?:using|forcing)\s+([\w-]+)(?:\s+\((h264|hevc|av1)\))?/i);
+    if (decoder) {
+      decodeMethod = decoder[2]
+        ? `${decoder[1]} (${decoder[2].toLowerCase()})`
+        : decoder[1];
+    } else {
+      const av1Software = msg.match(/^Decoder:\s*(libdav1d)\b.*\bAV1\b/i);
+      if (av1Software) {
+        decodeMethod = `${av1Software[1]} (av1)`;
+      } else {
+        const fallbackDecoder = msg.match(/^Decoder:\s*([\w-]+)/i);
+        if (fallbackDecoder) decodeMethod = fallbackDecoder[1];
+      }
+    }
+
+    const usingEncoder = msg.match(/Using\s+encoder:\s*([\w-]+)/i);
+    if (usingEncoder) encodeMethod = usingEncoder[1];
+
+    const encoder = msg.match(/Encoder:\s*CPU\s*\(([^)]+)\)/i)
+      || msg.match(/Encoder:\s*([\w-]+)/i);
+    if (encoder) encodeMethod = encoder[1];
+  }
+
   function setPresetMB(mb:number){ targetMB = mb; }
   // "10MB (Discord)" option: pick slightly under to ensure final stays below 10MB
   function setPresetMBSafe10(){ targetMB = 9.7; }
@@ -613,6 +639,9 @@
       etaSeconds = null;
       etaLabel = null;
       currentSpeedX = null;
+      // Do not carry the previous job's decoder/encoder into this job.
+      decodeMethod = null;
+      encodeMethod = null;
       logLines = ['Starting compression…', ...logLines].slice(0, 500);
       const estMb =
         targetMode === 'bitrate' && effectiveDuration > 0
@@ -725,38 +754,7 @@
               currentSpeedX = parseFloat(speedMatch[1]);
             }
             
-            // Detect hardware methods
-            // Decoder detection: handle variations like "Decoder: using cuda" or "Decoder: forcing av1_cuvid"
-            {
-              const msg = data.message as string;
-              const lower = msg.toLowerCase();
-              if (lower.startsWith('decoder:')) {
-                // Try to capture token after 'using' or 'forcing'
-                const m1 = msg.match(/Decoder:\s*(?:using|forcing)\s*([\w_]+)/i);
-                if (m1) {
-                  decodeMethod = m1[1];
-                } else {
-                  // Fallback: capture first word after 'Decoder:'
-                  const m2 = msg.match(/Decoder:\s*([\w_]+)/i);
-                  if (m2) decodeMethod = m2[1];
-                }
-              }
-            }
-            // Encoder detection: handle "Using encoder: h264_nvenc" and "Encoder: CPU (libx264)"
-            {
-              const msg = data.message as string;
-              const mUse = msg.match(/Using\s+encoder:\s*([\w_-]+)/i);
-              if (mUse) {
-                encodeMethod = mUse[1];
-              }
-              const mEnc = msg.match(/Encoder:\s*([\w_-]+)/i);
-              if (mEnc) {
-                // May be "CPU (libx264)"; extract inner encoder if present
-                const val = mEnc[1];
-                const inner = msg.match(/Encoder:\s*CPU\s*\(([^)]+)\)/i);
-                encodeMethod = inner ? inner[1] : val;
-              }
-            }
+            updatePipelineFromLog(data.message);
           }
           
           // Do not handle early 'ready' events; download is enabled only after 'done'
@@ -946,7 +944,10 @@
           displayedProgress = progress;
           isFinalizing = data.phase === 'finalizing';
         }
-        if (data.type === 'log' && data.message) { logLines = [data.message, ...logLines].slice(0, 500); }
+        if (data.type === 'log' && data.message) {
+          logLines = [data.message, ...logLines].slice(0, 500);
+          updatePipelineFromLog(data.message);
+        }
         if (data.type === 'done') {
           doneStats = data.stats;
           progress = 100;

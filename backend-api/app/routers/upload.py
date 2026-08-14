@@ -102,7 +102,7 @@ def _validate_batch_options(
 @router.post("/api/upload", response_model=UploadResponse, dependencies=[Depends(basic_auth)])
 async def upload(
     file: UploadFile = File(...),
-    target_size_mb: float = Form(9.7),
+    target_size_mb: float = Form(19.7),
     audio_bitrate_kbps: int = Form(128),
 ):
     if not math.isfinite(target_size_mb) or target_size_mb <= 0 or target_size_mb > 51200:
@@ -113,7 +113,7 @@ async def upload(
     job_id = str(uuid.uuid4())
     safe_name = safe_filename(file.filename)
     dest = UPLOADS_DIR / f"{job_id}_{safe_name}"
-    await save_upload_file(file, dest)
+    dest = await save_upload_file(file, dest, allow_dynamic_storage=True)
 
     try:
         saved_bytes = dest.stat().st_size
@@ -168,7 +168,7 @@ async def upload(
 @router.post("/api/batches/upload", response_model=BatchCreateResponse, dependencies=[Depends(basic_auth)])
 async def upload_batch(
     files: list[UploadFile] = File(...),
-    target_size_mb: float = Form(9.7),
+    target_size_mb: float = Form(19.7),
     video_codec: str = Form("av1_nvenc"),
     audio_codec: str = Form("libopus"),
     audio_bitrate_kbps: int = Form(128),
@@ -228,7 +228,7 @@ async def upload_batch(
 
             stored_filename = f"{job_id}_{safe_name}"
             input_path = UPLOADS_DIR / stored_filename
-            await save_upload_file(upload_file, input_path)
+            input_path = await save_upload_file(upload_file, input_path, allow_dynamic_storage=True)
             saved_files.append(input_path)
 
             try:
@@ -283,6 +283,7 @@ async def upload_batch(
                 audio_only=bool(audio_only),
                 target_video_bitrate_kbps=target_video_bitrate_kbps,
                 max_output_fps=max_output_fps,
+                transient_input=True,
             )
 
             signatures.append(
@@ -308,7 +309,7 @@ async def upload_batch(
             }
             batch_items.append(item)
 
-            await store_job_metadata(task_id, job_id, stored_filename, target_size_mb, video_codec)
+            await store_job_metadata(task_id, job_id, stored_filename, target_size_mb, video_codec, str(input_path), str(output_path))
 
             try:
                 await redis.publish(
@@ -398,7 +399,7 @@ async def upload_batch(
                 continue
             try:
                 await redis.set(f"cancel:{task_id}", "1", ex=3600)
-                celery_app.control.revoke(task_id, terminate=True)
+                celery_app.control.revoke(task_id, terminate=False)
             except Exception:
                 pass
             item["state"] = "failed"

@@ -69,6 +69,86 @@ class TestSettingsValidation(unittest.TestCase):
                 data = settings_manager._ensure_defaults()
             self.assertTrue(data["default_preset_managed"])
 
+    def test_codec_visibility_round_trips_without_being_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            with patch.object(settings_manager, "SETTINGS_FILE", path):
+                settings_manager.update_codec_visibility_settings({
+                    "h264_nvenc": False,
+                    "hevc_nvenc": True,
+                    "av1_nvenc": False,
+                    "libx264": False,
+                    "libx265": True,
+                    "libsvtav1": True,
+                })
+                saved = settings_manager.get_codec_visibility_settings()
+
+            self.assertFalse(saved["h264_nvenc"])
+            self.assertTrue(saved["hevc_nvenc"])
+            self.assertFalse(saved["av1_nvenc"])
+            self.assertFalse(saved["libx264"])
+            self.assertTrue(saved["libx265"])
+            self.assertTrue(saved["libsvtav1"])
+
+    def test_codec_visibility_requires_a_cpu_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            with patch.object(settings_manager, "SETTINGS_FILE", path):
+                with self.assertRaisesRegex(ValueError, "CPU codec"):
+                    settings_manager.update_codec_visibility_settings({
+                        "libx264": False,
+                        "libx265": False,
+                        "libsvtav1": False,
+                    })
+
+    def test_saving_defaults_preserves_profile_frame_rate_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            with patch.object(settings_manager, "SETTINGS_FILE", path):
+                data = settings_manager._ensure_defaults()
+                profile = dict(data["preset_profiles"][0])
+                profile["name"] = "Capped default"
+                profile["max_output_fps"] = 30.0
+                data["preset_profiles"] = [profile]
+                data["default_preset"] = profile["name"]
+                settings_manager._write_settings(data)
+
+                settings_manager.update_default_presets(
+                    target_mb=12,
+                    video_codec=profile["video_codec"],
+                    audio_codec=profile["audio_codec"],
+                    preset=profile["preset"],
+                    audio_kbps=profile["audio_kbps"],
+                    container=profile["container"],
+                    tune=profile["tune"],
+                )
+                saved = settings_manager._read_settings()
+
+            self.assertEqual(saved["preset_profiles"][0]["max_output_fps"], 30.0)
+
+    def test_deleting_profiles_keeps_default_selection_valid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            with patch.object(settings_manager, "SETTINGS_FILE", path):
+                data = settings_manager._ensure_defaults()
+                first, second = data["preset_profiles"][:2]
+                data["preset_profiles"] = [first, second]
+                data["default_preset"] = first["name"]
+                settings_manager._write_settings(data)
+
+                settings_manager.delete_preset_profile(second["name"])
+                self.assertEqual(settings_manager._read_settings()["default_preset"], first["name"])
+
+                settings_manager.add_preset_profile(second)
+                settings_manager.delete_preset_profile(first["name"])
+                self.assertEqual(settings_manager._read_settings()["default_preset"], second["name"])
+
+                settings_manager.delete_preset_profile(second["name"])
+                saved = settings_manager._read_settings()
+
+            self.assertEqual(saved["preset_profiles"], [])
+            self.assertIsNone(saved["default_preset"])
+
 
 if __name__ == "__main__":
     unittest.main()

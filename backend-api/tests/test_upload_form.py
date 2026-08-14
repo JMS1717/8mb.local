@@ -35,8 +35,9 @@ class TestUploadMultipartForm(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="8mb-upload-test-") as temp_dir:
             upload_dir = Path(temp_dir)
 
-            async def fake_save_upload(_file, destination):
+            async def fake_save_upload(_file, destination, **_kwargs):
                 destination.write_bytes(b"test video placeholder")
+                return destination
 
             probe_info = {
                 "duration": 10.0,

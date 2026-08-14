@@ -8,10 +8,13 @@ param(
     [string]$DataDir = '',
     [string]$ExePath = '',
     [string]$InstallerPath = '',
+    [string]$ExpectedVersion = '',
     [ValidateSet('all-users', 'current-user')]
     [string]$InstallMode = 'all-users',
     [switch]$UseDefaultInstallDir,
-    [switch]$TestNativeWindow
+    [switch]$TestNativeWindow,
+    [switch]$TestAuth,
+    [switch]$TestSettings
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,7 +24,16 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $DistDir = Join-Path $RepoRoot 'dist'
 $DefaultExe = Join-Path $DistDir '8mblocal.exe'
 $DefaultInstaller = Join-Path $DistDir '8mblocal-Setup.exe'
-
+$VersionFile = Join-Path $RepoRoot 'VERSION'
+if ([string]::IsNullOrWhiteSpace($ExpectedVersion)) {
+    if (-not (Test-Path -LiteralPath $VersionFile -PathType Leaf)) {
+        throw "VERSION file is missing: $VersionFile"
+    }
+    $ExpectedVersion = ([IO.File]::ReadAllText($VersionFile)).Trim()
+}
+if ($ExpectedVersion -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+    throw "ExpectedVersion must be a full four-part version: $ExpectedVersion"
+}
 if ($Build) {
     & (Join-Path $PSScriptRoot 'build.ps1')
     if ($LASTEXITCODE -ne 0) {
@@ -38,19 +50,41 @@ $MediaDir = Join-Path $RunRoot 'media'
 $LogOut = Join-Path $RunRoot 'app.stdout.log'
 $LogErr = Join-Path $RunRoot 'app.stderr.log'
 $null = New-Item -ItemType Directory -Force -Path $AppData, $MediaDir
+$ProgressLog = Join-Path $RunRoot 'smoke-progress.log'
+
+function Write-SmokeProgress {
+    param([string]$Message)
+    try {
+        [IO.File]::AppendAllText(
+            $ProgressLog,
+            ("{0:o} {1}`n" -f (Get-Date), $Message),
+            [Text.UTF8Encoding]::new($false)
+        )
+    } catch {}
+}
 
 $process = $null
 $client = $null
 $installDir = $null
 $uninstaller = $null
 $desktopShortcut = $null
+$authHeaders = @{}
+$authUser = $env:RELEASE_SMOKE_AUTH_USER
+$authPass = $env:RELEASE_SMOKE_AUTH_PASS
+if ($TestAuth) {
+    if ([string]::IsNullOrWhiteSpace($authUser)) {
+        throw 'TestAuth requires RELEASE_SMOKE_AUTH_USER in the process environment.'
+    }
+    $authMaterial = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${authUser}:$authPass"))
+    $authHeaders = @{ Authorization = "Basic $authMaterial" }
+}
 $dataSentinel = Join-Path $AppData 'preserve-on-uninstall.txt'
 [System.IO.File]::WriteAllText($dataSentinel, '8mb.local release-test user data')
 
 function Invoke-JsonGet {
     param([string]$Uri)
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -TimeoutSec 10
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -Headers $authHeaders -TimeoutSec 10
     } catch {
         throw "GET $Uri failed: $($_.Exception.Message)"
     }
@@ -80,6 +114,156 @@ function Invoke-JsonPost {
     return ($responseBody | ConvertFrom-Json)
 }
 
+function Invoke-JsonPut {
+    param([string]$Uri, [object]$Payload)
+    $body = $Payload | ConvertTo-Json -Depth 12 -Compress
+    $content = [System.Net.Http.StringContent]::new(
+        $body,
+        [System.Text.Encoding]::UTF8,
+        'application/json'
+    )
+    $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Put, $Uri)
+    $request.Content = $content
+    try {
+        $response = $client.SendAsync($request).GetAwaiter().GetResult()
+        $responseBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    } finally {
+        $request.Dispose()
+        $content.Dispose()
+    }
+    if (-not $response.IsSuccessStatusCode) {
+        throw "PUT $Uri returned HTTP $([int]$response.StatusCode): $responseBody"
+    }
+    if ([string]::IsNullOrWhiteSpace($responseBody)) { return $null }
+    return ($responseBody | ConvertFrom-Json)
+}
+
+function Invoke-JsonDelete {
+    param([string]$Uri)
+    $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Delete, $Uri)
+    try {
+        $response = $client.SendAsync($request).GetAwaiter().GetResult()
+        $responseBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    } finally {
+        $request.Dispose()
+    }
+    if (-not $response.IsSuccessStatusCode) {
+        throw "DELETE $Uri returned HTTP $([int]$response.StatusCode): $responseBody"
+    }
+    if ([string]::IsNullOrWhiteSpace($responseBody)) { return $null }
+    return ($responseBody | ConvertFrom-Json)
+}
+
+function Assert-SmokeCondition {
+    param([bool]$Condition, [string]$Message)
+    if (-not $Condition) { throw $Message }
+}
+
+function Test-SettingsPersistence {
+    if (-not $TestAuth) {
+        throw 'TestSettings requires TestAuth so protected settings routes can be exercised.'
+    }
+    if ($null -eq $client) {
+        $client = [System.Net.Http.HttpClient]::new()
+        $client.Timeout = [TimeSpan]::FromSeconds(60)
+    }
+    $client.DefaultRequestHeaders.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Basic', $authMaterial)
+    Write-SmokeProgress 'settings-start'
+
+    $codecInitial = Invoke-JsonGet "$baseUrl/api/settings/codecs"
+    $profilesInitial = Invoke-JsonGet "$baseUrl/api/settings/preset-profiles"
+    $historyInitial = Invoke-JsonGet "$baseUrl/api/settings/history"
+    $sizeInitial = Invoke-JsonGet "$baseUrl/api/settings/size-buttons"
+    $retentionInitial = Invoke-JsonGet "$baseUrl/api/settings/retention-hours"
+    $workerInitial = Invoke-JsonGet "$baseUrl/api/settings/worker-concurrency"
+    $profileName = 'CodexSmoke-' + [guid]::NewGuid().ToString('N')
+    $profileCreated = $false
+
+    try {
+        $cpuCandidates = @('libx264', 'libx265', 'libsvtav1', 'libaom_av1') |
+            Where-Object { $codecInitial.PSObject.Properties.Name -contains $_ -and [bool]$codecInitial.$_ }
+        Assert-SmokeCondition ($cpuCandidates.Count -gt 0) 'No visible CPU fallback codec was available for settings smoke.'
+        $codecToHide = [string]$cpuCandidates[0]
+        $codecUpdate = [ordered]@{}
+        foreach ($property in $codecInitial.PSObject.Properties) {
+            $codecUpdate[$property.Name] = [bool]$property.Value
+        }
+        $codecUpdate[$codecToHide] = $false
+        Invoke-JsonPut "$baseUrl/api/settings/codecs" $codecUpdate | Out-Null
+        $codecAfterHide = Invoke-JsonGet "$baseUrl/api/settings/codecs"
+        Assert-SmokeCondition (-not [bool]$codecAfterHide.$codecToHide) "Codec visibility did not persist for $codecToHide."
+        $availableAfterHide = Invoke-JsonGet "$baseUrl/api/codecs/available"
+        Assert-SmokeCondition (-not (@($availableAfterHide.enabled_codecs) -contains $codecToHide)) "Hidden codec $codecToHide remained in the available-codec selector."
+
+        $profiles = @($profilesInitial.profiles)
+        Assert-SmokeCondition ($profiles.Count -gt 0) 'No preset profile was available for profile persistence smoke.'
+        $template = $profiles[0]
+        $profilePayload = [ordered]@{
+            name = $profileName
+            target_mb = [double]$template.target_mb
+            video_codec = [string]$template.video_codec
+            audio_codec = [string]$template.audio_codec
+            preset = [string]$template.preset
+            audio_kbps = [int]$template.audio_kbps
+            container = [string]$template.container
+            tune = [string]$template.tune
+            max_output_fps = 17
+        }
+        Invoke-JsonPost "$baseUrl/api/settings/preset-profiles" $profilePayload | Out-Null
+        $profileCreated = $true
+        Invoke-JsonPut "$baseUrl/api/settings/preset-profiles/default" @{ name = $profileName } | Out-Null
+        $selected = Invoke-JsonGet "$baseUrl/api/settings/preset-profiles"
+        Assert-SmokeCondition ([string]$selected.default -eq $profileName) 'New preset profile was not selected as the default.'
+
+        $profilePayload.max_output_fps = 19
+        Invoke-JsonPut "$baseUrl/api/settings/preset-profiles/$profileName" $profilePayload | Out-Null
+        $presets = Invoke-JsonGet "$baseUrl/api/settings/presets"
+        Invoke-JsonPut "$baseUrl/api/settings/presets" $presets | Out-Null
+        $fpsCheck = Invoke-JsonGet "$baseUrl/api/settings/preset-profiles"
+        $fpsProfile = @($fpsCheck.profiles | Where-Object { $_.name -eq $profileName })[0]
+        Assert-SmokeCondition ($null -ne $fpsProfile -and [double]$fpsProfile.max_output_fps -eq 19) 'Editing default presets erased the saved profile FPS cap.'
+
+        $historyChanged = @{ enabled = -not [bool]$historyInitial.enabled }
+        Invoke-JsonPut "$baseUrl/api/settings/history" $historyChanged | Out-Null
+        Assert-SmokeCondition ([bool](Invoke-JsonGet "$baseUrl/api/settings/history").enabled -eq [bool]$historyChanged.enabled) 'History setting did not round-trip.'
+
+        $sizeChanged = [ordered]@{ buttons = @($sizeInitial.buttons) + @(0.37) }
+        Invoke-JsonPut "$baseUrl/api/settings/size-buttons" $sizeChanged | Out-Null
+        Assert-SmokeCondition (@((Invoke-JsonGet "$baseUrl/api/settings/size-buttons").buttons) -contains 0.37) 'Size-button setting did not round-trip.'
+
+        $retentionChanged = [int]$retentionInitial.hours + 1
+        Invoke-JsonPut "$baseUrl/api/settings/retention-hours" @{ hours = $retentionChanged } | Out-Null
+        Assert-SmokeCondition ([int](Invoke-JsonGet "$baseUrl/api/settings/retention-hours").hours -eq $retentionChanged) 'Retention setting did not round-trip.'
+
+        $workerChanged = if ([int]$workerInitial.concurrency -ge 20) { 1 } else { [int]$workerInitial.concurrency + 1 }
+        Invoke-JsonPut "$baseUrl/api/settings/worker-concurrency" @{ concurrency = $workerChanged } | Out-Null
+        Assert-SmokeCondition ([int](Invoke-JsonGet "$baseUrl/api/settings/worker-concurrency").concurrency -eq $workerChanged) 'Worker-concurrency setting did not round-trip.'
+
+        Invoke-JsonDelete "$baseUrl/api/settings/preset-profiles/$profileName" | Out-Null
+        $profileCreated = $false
+        $afterDelete = Invoke-JsonGet "$baseUrl/api/settings/preset-profiles"
+        Assert-SmokeCondition (@($afterDelete.profiles | Where-Object { $_.name -eq $profileName }).Count -eq 0) 'Deleted preset profile remained in the profile list.'
+        Assert-SmokeCondition ([string]$afterDelete.default -ne $profileName -and -not [string]::IsNullOrWhiteSpace([string]$afterDelete.default)) 'Deleting the selected default profile did not select a valid replacement.'
+        Write-Host 'PASS settings/codecs/profiles/persistence (visibility, selection, FPS cap, controls, deletion)'
+        Write-SmokeProgress 'settings-complete'
+    } finally {
+        if ($profileCreated) {
+            try { Invoke-JsonDelete "$baseUrl/api/settings/preset-profiles/$profileName" | Out-Null } catch {}
+        }
+        try {
+            $currentProfiles = Invoke-JsonGet "$baseUrl/api/settings/preset-profiles"
+            if (-not [string]::IsNullOrWhiteSpace([string]$profilesInitial.default) -and @($currentProfiles.profiles | Where-Object { $_.name -eq $profilesInitial.default }).Count -gt 0) {
+                Invoke-JsonPut "$baseUrl/api/settings/preset-profiles/default" @{ name = [string]$profilesInitial.default } | Out-Null
+            }
+        } catch {}
+        try { Invoke-JsonPut "$baseUrl/api/settings/codecs" $codecInitial | Out-Null } catch {}
+        try { Invoke-JsonPut "$baseUrl/api/settings/history" @{ enabled = [bool]$historyInitial.enabled } | Out-Null } catch {}
+        try { Invoke-JsonPut "$baseUrl/api/settings/size-buttons" $sizeInitial | Out-Null } catch {}
+        try { Invoke-JsonPut "$baseUrl/api/settings/retention-hours" @{ hours = [int]$retentionInitial.hours } | Out-Null } catch {}
+        try { Invoke-JsonPut "$baseUrl/api/settings/worker-concurrency" @{ concurrency = [int]$workerInitial.concurrency } | Out-Null } catch {}
+    }
+}
+
 function Invoke-MultipartUpload {
     param([string]$Uri, [string]$InputPath)
     $multipart = [System.Net.Http.MultipartFormDataContent]::new()
@@ -103,7 +287,72 @@ function Invoke-MultipartUpload {
     return ($responseBody | ConvertFrom-Json)
 }
 
+function Read-ProcessLogTail {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    try {
+        $text = [IO.File]::ReadAllText($Path)
+        if ($text.Length -gt 4000) { return $text.Substring($text.Length - 4000) }
+        return $text
+    } catch {
+        return "Unable to read process log ${Path}: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-BoundedProcess {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments = @(),
+        [string]$StdoutPath,
+        [string]$StderrPath,
+        [int]$TimeoutSeconds = 120
+    )
+    # Windows PowerShell 5.1 does not expose ProcessStartInfo.ArgumentList.
+    # Quote each argument explicitly so test paths containing spaces remain
+    # valid when Start-Process builds the native command line.
+    $argumentString = ($Arguments | ForEach-Object {
+        '"' + ([string]$_).Replace('"', '\"') + '"'
+    }) -join ' '
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = $argumentString
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $child = [Diagnostics.Process]::new()
+    $child.StartInfo = $startInfo
+    if (-not $child.Start()) { throw "Unable to start process: $FilePath" }
+    $stdoutTask = $child.StandardOutput.ReadToEndAsync()
+    $stderrTask = $child.StandardError.ReadToEndAsync()
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while (-not $child.HasExited) {
+        if ((Get-Date) -ge $deadline) {
+            & taskkill.exe /PID $child.Id /T /F *> $null
+            $child.WaitForExit()
+            $stdout = $stdoutTask.GetAwaiter().GetResult()
+            $stderr = $stderrTask.GetAwaiter().GetResult()
+            [IO.File]::WriteAllText($StdoutPath, $stdout)
+            [IO.File]::WriteAllText($StderrPath, $stderr)
+            throw "Process timed out after ${TimeoutSeconds}s: $FilePath`nstdout:`n$(Read-ProcessLogTail $StdoutPath)`nstderr:`n$(Read-ProcessLogTail $StderrPath)"
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    $child.WaitForExit()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+    [IO.File]::WriteAllText($StdoutPath, $stdout)
+    [IO.File]::WriteAllText($StderrPath, $stderr)
+    $exitCode = $child.ExitCode
+    $child.Dispose()
+    if ($exitCode -ne 0) {
+        throw "Process exited with code ${exitCode}: $FilePath`nstdout:`n$(Read-ProcessLogTail $StdoutPath)`nstderr:`n$(Read-ProcessLogTail $StderrPath)"
+    }
+    return $exitCode
+}
+
 try {
+    Write-SmokeProgress 'test-start'
     if ($Install) {
         if ([string]::IsNullOrWhiteSpace($InstallerPath)) { $InstallerPath = $DefaultInstaller }
         if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
@@ -163,6 +412,7 @@ try {
             throw "${InstallMode} Desktop shortcut targets '$shortcutTarget' instead of '$Executable'"
         }
         Write-Host "PASS $InstallMode installer/Desktop shortcut (target=$shortcutTarget)"
+        Write-SmokeProgress 'installer-complete'
     } else {
         if ([string]::IsNullOrWhiteSpace($ExePath)) { $ExePath = $DefaultExe }
         $Executable = $ExePath
@@ -185,6 +435,7 @@ try {
         -RedirectStandardError $LogErr `
         -WindowStyle Hidden `
         -PassThru
+    Write-SmokeProgress 'process-started'
 
     $baseUrl = "http://127.0.0.1:$Port"
     $healthy = $false
@@ -209,17 +460,67 @@ try {
         throw "Timed out waiting for packaged executable healthz: $lastHealthError"
     }
 
-    $spa = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/" -TimeoutSec 10
+    $spa = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/" -Headers $authHeaders -TimeoutSec 10
     if ($spa.StatusCode -ne 200 -or $spa.Content.Length -lt 100) {
         throw 'Packaged executable did not serve the frontend shell'
     }
     $version = Invoke-JsonGet "$baseUrl/api/version"
-    if ([string]::IsNullOrWhiteSpace([string]$version.version)) {
-        throw 'Packaged executable returned an empty API version'
+    if ([string]$version.version -ne $ExpectedVersion) {
+        throw "Packaged executable API version '$($version.version)' does not match expected '$ExpectedVersion'"
     }
     Write-Host "PASS health/frontend/version (version=$($version.version))"
+    Write-SmokeProgress 'health-version-complete'
+
+    if ($TestAuth) {
+        if ($null -eq $client) {
+            $client = [System.Net.Http.HttpClient]::new()
+            $client.Timeout = [TimeSpan]::FromSeconds(60)
+        }
+        $client.DefaultRequestHeaders.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Basic', $authMaterial)
+        $unauthenticatedStatus = 0
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/api/codecs/available" -TimeoutSec 10 | Out-Null
+        } catch {
+            if ($null -ne $_.Exception.Response) {
+                $unauthenticatedStatus = [int]$_.Exception.Response.StatusCode
+            }
+        }
+        if ($unauthenticatedStatus -ne 401) {
+            throw "Protected endpoint accepted an unauthenticated request (status=$unauthenticatedStatus)"
+        }
+        # The current stream route authenticates with Basic auth directly;
+        # there is no separate SSE-token endpoint in the active API.
+        $authTaskId = [guid]::NewGuid().ToString()
+        $sseRequest = [System.Net.Http.HttpRequestMessage]::new(
+            [System.Net.Http.HttpMethod]::Get,
+            "$baseUrl/api/stream/$authTaskId"
+        )
+        $sseResponse = $null
+        $sseTimeout = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(5))
+        try {
+            $sseResponse = $client.SendAsync(
+                $sseRequest,
+                [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead,
+                $sseTimeout.Token
+            ).GetAwaiter().GetResult()
+            if (-not $sseResponse.IsSuccessStatusCode) {
+                throw "Authenticated SSE request returned HTTP $([int]$sseResponse.StatusCode)"
+            }
+        } finally {
+            if ($null -ne $sseResponse) { $sseResponse.Dispose() }
+            $sseRequest.Dispose()
+            $sseTimeout.Dispose()
+        }
+        Write-Host 'PASS authentication/Basic auth/SSE stream authorization'
+        Write-SmokeProgress 'auth-complete'
+    }
+
+    if ($TestSettings) {
+        Test-SettingsPersistence
+    }
 
     if (-not $SkipTranscode) {
+        Write-SmokeProgress 'ffmpeg-start'
         $InputFile = Join-Path $MediaDir 'release-smoke-input.mp4'
         $ffmpegArgs = @(
             '-hide_banner', '-loglevel', 'error', '-y',
@@ -229,14 +530,24 @@ try {
             '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
             '-c:a', 'aac', '-b:a', '64k', '-movflags', '+faststart', $InputFile
         )
-        & $Ffmpeg @ffmpegArgs
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $InputFile -PathType Leaf)) {
-            throw "Failed to generate Windows smoke-test media (ffmpeg exit $LASTEXITCODE)"
+        $ffmpegStdout = Join-Path $MediaDir 'ffmpeg-smoke.stdout.log'
+        $ffmpegStderr = Join-Path $MediaDir 'ffmpeg-smoke.stderr.log'
+        Invoke-BoundedProcess -FilePath $Ffmpeg -Arguments $ffmpegArgs `
+            -StdoutPath $ffmpegStdout -StderrPath $ffmpegStderr -TimeoutSeconds 120 | Out-Null
+        if (-not (Test-Path -LiteralPath $InputFile -PathType Leaf)) {
+            throw "FFmpeg completed without creating Windows smoke-test media. stderr:`n$(Read-ProcessLogTail $ffmpegStderr)"
         }
+        Write-SmokeProgress 'ffmpeg-complete'
 
-        $client = [System.Net.Http.HttpClient]::new()
-        $client.Timeout = [TimeSpan]::FromSeconds(60)
+        if ($null -eq $client) {
+            $client = [System.Net.Http.HttpClient]::new()
+            $client.Timeout = [TimeSpan]::FromSeconds(60)
+        }
+        if ($TestAuth) {
+            $client.DefaultRequestHeaders.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Basic', $authMaterial)
+        }
         $upload = Invoke-MultipartUpload "$baseUrl/api/upload" $InputFile
+        Write-SmokeProgress 'upload-complete'
         $compress = Invoke-JsonPost "$baseUrl/api/compress" @{
             job_id = [string]$upload.job_id
             filename = [string]$upload.filename
@@ -250,6 +561,7 @@ try {
             tune = 'hq'
             fast_mp4_finalize = $true
         }
+        Write-SmokeProgress 'compress-request-complete'
         $taskId = [string]$compress.task_id
         $jobDone = $false
         $lastStatus = $null
@@ -273,7 +585,7 @@ try {
         $downloaded = $false
         for ($attempt = 0; $attempt -lt 12; $attempt++) {
             try {
-                Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/api/jobs/$taskId/download?wait=2" -OutFile $OutputFile -TimeoutSec 15
+                Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/api/jobs/$taskId/download?wait=2" -Headers $authHeaders -OutFile $OutputFile -TimeoutSec 15
                 $downloaded = $true
                 break
             } catch {
@@ -297,6 +609,7 @@ try {
             throw "Downloaded output has invalid FFprobe metadata: $probeText"
         }
         Write-Host "PASS upload/transcode/status/download/ffprobe (bytes=$((Get-Item $OutputFile).Length))"
+        Write-SmokeProgress 'transcode-complete'
     }
 
     if ($TestNativeWindow) {

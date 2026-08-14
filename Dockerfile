@@ -112,11 +112,18 @@ RUN npm run build && \
 # Use CUDA 12.2 runtime: minimum driver 535; supports RTX 50-series and older (535+) systems
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
-# Build-time version (can be overridden)
-ARG BUILD_VERSION=138
+# Build metadata. scripts/set-version.ps1 keeps the default synchronized with
+# the root VERSION file; release builders override these values explicitly.
+ARG BUILD_VERSION=140.0.0.0
 ENV APP_VERSION=${BUILD_VERSION}
 ARG BUILD_COMMIT=unknown
 ENV BUILD_COMMIT=${BUILD_COMMIT}
+ARG BUILD_TIMESTAMP=unknown
+ARG BUILD_REPOSITORY=https://github.com/JMS1717/8mb.local
+LABEL org.opencontainers.image.version=${BUILD_VERSION} \
+      org.opencontainers.image.revision=${BUILD_COMMIT} \
+      org.opencontainers.image.created=${BUILD_TIMESTAMP} \
+      org.opencontainers.image.source=${BUILD_REPOSITORY}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1

@@ -1,7 +1,7 @@
 VSVersionInfo(
     ffi=FixedFileInfo(
-        filevers=(138, 0, 0, 0),
-        prodvers=(138, 0, 0, 0),
+        filevers=(140, 0, 0, 0),
+        prodvers=(140, 0, 0, 0),
         mask=0x3F,
         flags=0x0,
         OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
                     [
                         StringStruct("CompanyName", "JMS1717"),
                         StringStruct("FileDescription", "8mb.local media compressor"),
-                        StringStruct("FileVersion", "138.0.0.0"),
+                        StringStruct("FileVersion", "140.0.0.0"),
                         StringStruct("InternalName", "8mblocal"),
                         StringStruct("LegalCopyright", "Copyright (c) JMS1717"),
                         StringStruct("OriginalFilename", "8mblocal.exe"),
                         StringStruct("ProductName", "8mb.local"),
-                        StringStruct("ProductVersion", "138"),
+                        StringStruct("ProductVersion", "140.0.0"),
                     ],
                 )
             ]

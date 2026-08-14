@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-push:
+  build-and-verify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -16,17 +16,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Compute tags
         id: vars
         run: |
-          # Stable application version baked into image; also keep sha tag for traceability
-          APP_VERSION=138
+          # VERSION is the single source of truth for active application versions.
+          APP_VERSION=$(tr -d '\r\n ' < VERSION)
+          if ! [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must contain a full four-part version; got '$APP_VERSION'" >&2
+            exit 1
+          fi
+          BUILD_TIMESTAMP=$(date -u +%FT%TZ)
+          echo "build_timestamp=${BUILD_TIMESTAMP}" >> $GITHUB_OUTPUT
           echo "app_version=${APP_VERSION}" >> $GITHUB_OUTPUT
           SHA_TAG=sha-${GITHUB_SHA::7}
           echo "sha_tag=${SHA_TAG}" >> $GITHUB_OUTPUT
@@ -38,6 +38,10 @@ jobs:
             TAG_NAME=${GITHUB_REF#refs/tags/}
             echo "ref_tag=${TAG_NAME}" >> $GITHUB_OUTPUT
           fi
+
+      - name: Verify version synchronization
+        shell: pwsh
+        run: ./scripts/check-version.ps1 -RepositoryRoot $PWD
 
       - name: Prepare tag list
         id: taglist
@@ -53,14 +57,18 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build and push unified container
+      # This is deliberately a non-publishing compatibility gate. Publishing
+      # must be performed by a future release workflow only after required
+      # Windows artifacts and Store-package validation have passed.
+      - name: Build unified container (no push)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          push: true
+          push: false
           platforms: linux/amd64
           tags: ${{ steps.taglist.outputs.tags }}
           build-args: |
             BUILD_VERSION=${{ steps.vars.outputs.app_version }}
             BUILD_COMMIT=${{ github.sha }}
+            BUILD_TIMESTAMP=${{ steps.vars.outputs.build_timestamp }}

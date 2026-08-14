@@ -3,9 +3,8 @@
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
-  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap10 desktop6 rescap">
+  IgnorableNamespaces="uap uap10 rescap">
 
   <Identity
     Name="__IDENTITY_NAME__"
@@ -18,8 +17,7 @@
     <PublisherDisplayName>__PUBLISHER_DISPLAY_NAME__</PublisherDisplayName>
     <Description>Compress videos to a target size using CPU or hardware encoders.</Description>
     <Logo>Assets\StoreLogo.png</Logo>
-    <!-- Keep the same user data across Store, portable, and Inno installs. -->
-    <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
+    <!-- The desktop launcher stores user data in %LOCALAPPDATA%\8mb.local. -->
   </Properties>
 
   <Resources>
@@ -53,6 +51,5 @@
 
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
-    <rescap:Capability Name="unvirtualizedResources" />
   </Capabilities>
 </Package>

@@ -91,6 +91,36 @@ class TestHardwareDefaultPreset(unittest.TestCase):
         self.assertEqual(settings.writes, 0)
         self.assertEqual(settings.data["default_preset"], "AV1 9.7MB (SVT-AV1, CPU)")
 
+    def test_discord_default_keeps_19_7_target_when_encoder_adapts(self):
+        settings = _SettingsStub({
+            "default_preset": "Discord 19.7 MB",
+            "default_preset_managed": True,
+            "preset_profiles": [{
+                "name": "Discord 19.7 MB",
+                "target_mb": 19.7,
+                "video_codec": "h264_nvenc",
+                "audio_codec": "libopus",
+                "preset": "p6",
+                "audio_kbps": 128,
+                "container": "mp4",
+                "tune": "hq",
+            }, {
+                "name": "AV1 9.7MB (SVT-AV1, CPU)",
+                "target_mb": 9.7,
+                "video_codec": "libsvtav1",
+                "audio_codec": "libopus",
+                "preset": "p6",
+                "audio_kbps": 128,
+                "container": "mkv",
+                "tune": "hq",
+            }],
+        })
+        _ensure_default_preset_matches_hardware(settings, {"libsvtav1": True})
+        selected = settings.data["preset_profiles"][0]
+        self.assertEqual(settings.data["default_preset"], "Discord 19.7 MB")
+        self.assertEqual(selected["video_codec"], "libsvtav1")
+        self.assertEqual(selected["target_mb"], 19.7)
+
 
 if __name__ == "__main__":
     unittest.main()

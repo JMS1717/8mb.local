@@ -4,18 +4,20 @@
 # BEFORE FIRST RUN: make sure `.env` is a FILE on the host, not a directory:
 #   cp .env.example .env     # or: touch .env
 # See the comment in docker-compose.yml for the `.env`-as-directory footgun.
-# `./uploads` is also the backing volume for multipart/FFmpeg temporary files;
-# keep it on a disk with enough free space for the largest input.
+# `./uploads` remains the disk fallback and TMPDIR backing volume; keep it on
+# a disk with enough free space for the largest input.
 services:
   8mblocal:
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "138"
+        BUILD_VERSION: "${APP_VERSION:-140.0.0.0}"
     image: jms1717/8mblocal:latest
     ports:
       - "8001:8001"
+    # Keep the CPU profile's auto/memory upload behavior RAM-preferred too.
+    shm_size: "${MEDIA_SHM_SIZE:-10g}"
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
@@ -30,6 +32,8 @@ services:
       - REDIS_URL=redis://127.0.0.1:6379/0
       - ENV_FILE=/app/.env
       - SETTINGS_FILE=/app/state/settings.json
+      - MEDIA_STORAGE=${MEDIA_STORAGE:-auto}
+      - MEDIA_MEMORY_LIMIT_GB=${MEDIA_MEMORY_LIMIT_GB:-10}
       - HISTORY_FILE=/app/state/history.json
       - TMPDIR=/app/uploads/.tmp
       - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-4}

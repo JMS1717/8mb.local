@@ -12,10 +12,9 @@ from ..auth import basic_auth
 from ..celery_app import celery_app
 from ..deps import (
     OUTPUTS_DIR,
-    UPLOADS_DIR,
+    resolve_uploaded_path,
     build_output_name,
     redis,
-    safe_filename,
     store_job_metadata,
 )
 from ..models import CompressRequest, JobMetadata, QueueStatusResponse
@@ -34,7 +33,7 @@ async def compress(req: CompressRequest):
         req.audio_codec, req.audio_bitrate_kbps, req.container,
         bool(req.audio_only), req.max_width, req.max_height, req.max_output_fps,
     )
-    input_path = UPLOADS_DIR / safe_filename(req.filename)
+    input_path = resolve_uploaded_path(req.filename)
     if not input_path.exists():
         logger.warning("compress: input missing: %s", input_path)
         raise HTTPException(status_code=404, detail="Input not found")
@@ -73,6 +72,7 @@ async def compress(req: CompressRequest):
             target_resolution=req.target_resolution,
             audio_only=bool(req.audio_only or False),
             max_output_fps=req.max_output_fps,
+            transient_input=True,
         ),
     )
     try:
@@ -80,7 +80,7 @@ async def compress(req: CompressRequest):
     except Exception:
         pass
     
-    await store_job_metadata(task.id, req.job_id, req.filename, req.target_size_mb, req.video_codec)
+    await store_job_metadata(task.id, req.job_id, req.filename, req.target_size_mb, req.video_codec, str(input_path), str(output_path))
     
     return {"task_id": task.id}
 
@@ -93,7 +93,10 @@ async def cancel_job(task_id: str):
         await redis.set(f"cancel:{task_id}", "1", ex=3600)
         await redis.publish(f"progress:{task_id}", orjson.dumps({"type":"log","message":"Cancellation requested"}).decode())
         try:
-            celery_app.control.revoke(task_id, terminate=True)
+            # The worker polls cancel:<task_id> and owns FFmpeg shutdown and
+            # partial-output cleanup. Hard-killing the Celery child can bypass
+            # that cleanup, so revoke queued delivery without termination.
+            celery_app.control.revoke(task_id, terminate=False)
             logger.debug("cancel_job: celery revoke sent for %s", task_id)
         except Exception as e:
             logger.warning("cancel_job: celery revoke failed for %s: %s", task_id, e)
@@ -125,7 +128,7 @@ async def clear_queue():
                             orjson.dumps({"type": "log", "message": "Queue cleared - job cancelled"}).decode()
                         )
                         try:
-                            celery_app.control.revoke(task_id, terminate=True)
+                            celery_app.control.revoke(task_id, terminate=False)
                         except Exception:
                             pass
                         cancelled_count += 1

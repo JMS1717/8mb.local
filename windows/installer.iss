@@ -1,5 +1,5 @@
 #define MyAppName "8mb.local"
-#define MyAppVersion "138"
+#define MyAppVersion "140.0.0.0"
 #define MyAppPublisher "JMS1717"
 #define MyAppExeName "8mblocal.exe"
 
@@ -7,6 +7,8 @@
 AppId={{A11C4A7E-AC58-4A8A-9C45-8B10CA1A0001}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+VersionInfoVersion={#MyAppVersion}
+VersionInfoProductVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\8mb.local
 DefaultGroupName={#MyAppName}

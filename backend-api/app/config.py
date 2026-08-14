@@ -16,6 +16,8 @@ import os
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
+from .version import APP_VERSION as GENERATED_APP_VERSION
+
 
 class Settings(BaseSettings):
     # --- Core ---
@@ -37,6 +39,12 @@ class Settings(BaseSettings):
     FRONTEND_BUILD_DIR: str = Field(default="/app/frontend-build")
     FILE_RETENTION_HOURS: int = Field(default=1)
     MAX_UPLOAD_SIZE_MB: int = Field(default=51200)
+    # Temporary upload media uses the platform's safest RAM-preferred option
+    # in auto mode. Linux/Docker may use /dev/shm; native Windows keeps a
+    # normal pathname and applies FILE_ATTRIBUTE_TEMPORARY so Windows can
+    # keep the data cached while still spilling safely under memory pressure.
+    MEDIA_STORAGE: str = Field(default="auto")
+    MEDIA_MEMORY_LIMIT_GB: float = Field(default=10.0, gt=0, le=1024)
     MAX_BATCH_FILES: int = Field(default=200)
     BATCH_METADATA_TTL_HOURS: int = Field(default=24)
 
@@ -47,7 +55,7 @@ class Settings(BaseSettings):
     HISTORY_ENABLED: bool = Field(default=True)
 
     # --- Version (baked at build time) ---
-    APP_VERSION: str = Field(default="138")
+    APP_VERSION: str = Field(default=GENERATED_APP_VERSION)
 
     # --- Logging ---
     LOG_LEVEL: str = Field(default="INFO")

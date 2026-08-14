@@ -2,16 +2,23 @@
 param(
     [string]$ExePath,
     [string]$OutputPath,
+    [string]$OutputDir,
     [string]$PackageIdentityName = 'JMS1717.8mblocal.Dev',
     [string]$Publisher = 'CN=JMS1717 Development',
     [string]$PublisherDisplayName = 'JMS1717',
-    [string]$Version = '138.0.0.0',
+    [string]$Version,
     [string]$MakeAppxPath,
     [switch]$StoreSubmission
 )
 
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+$versionFile = Join-Path $RepoRoot 'VERSION'
+if (-not $PSBoundParameters.ContainsKey('Version')) {
+    if (-not (Test-Path -LiteralPath $versionFile)) { throw "VERSION file is missing: $versionFile" }
+    $Version = ([IO.File]::ReadAllText($versionFile)).Trim()
+}
+if ($OutputDir -and -not $OutputPath) { $OutputPath = Join-Path $OutputDir "8mblocal_$($Version)_x64.msix" }
 . (Join-Path $PSScriptRoot 'brand-assets.ps1')
 
 if (-not $ExePath) {
@@ -20,7 +27,6 @@ if (-not $ExePath) {
 if (-not $OutputPath) {
     $OutputPath = Join-Path $RepoRoot "dist\8mblocal_$($Version)_x64.msix"
 }
-
 $ExePath = [IO.Path]::GetFullPath($ExePath)
 $OutputPath = [IO.Path]::GetFullPath($OutputPath)
 if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
@@ -30,7 +36,11 @@ if ($PackageIdentityName -notmatch '^[A-Za-z0-9.-]{3,50}$') {
     throw 'PackageIdentityName must be 3-50 characters using letters, numbers, periods, or hyphens.'
 }
 if ($Version -notmatch '^\d{1,5}\.\d{1,5}\.\d{1,5}\.\d{1,5}$') {
-    throw 'Version must contain four numeric components, for example 138.0.0.0.'
+    throw 'Version must contain four numeric components, for example 140.0.0.0.'
+}
+$versionParts = $Version.Split('.') | ForEach-Object { [int]$_ }
+if ($versionParts | Where-Object { $_ -lt 0 -or $_ -gt 65535 }) {
+    throw 'Version components must be within the Windows/MSIX range 0..65535.'
 }
 if ($StoreSubmission -and (
     $PackageIdentityName -eq 'JMS1717.8mblocal.Dev' -or
@@ -68,6 +78,9 @@ function Resolve-MakeAppx {
     }
 
     New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
+    # Expand-Archive in Windows PowerShell 5.1 validates the filename
+    # extension, although the NuGet package itself is named .nupkg. Keep a
+    # temporary .zip suffix so the documented fallback works on clean hosts.
     $archive = Join-Path $env:TEMP "microsoft.windows.sdk.buildtools.$sdkVersion.zip"
     try {
         Write-Host "Downloading Microsoft.Windows.SDK.BuildTools $sdkVersion from NuGet..."
@@ -107,6 +120,9 @@ try {
     $manifest = $manifest.Replace('__PUBLISHER__', [Security.SecurityElement]::Escape($Publisher))
     $manifest = $manifest.Replace('__PUBLISHER_DISPLAY_NAME__', [Security.SecurityElement]::Escape($PublisherDisplayName))
     $manifest = $manifest.Replace('__VERSION__', [Security.SecurityElement]::Escape($Version))
+    if ($StoreSubmission -and $manifest -match '(?i)unvirtualizedResources|FileSystemWriteVirtualization|desktop6:') {
+        throw 'StoreSubmission manifest must not request unvirtualizedResources or disable file-system virtualization.'
+    }
     [IO.File]::WriteAllText((Join-Path $stageFull 'AppxManifest.xml'), $manifest, (New-Object Text.UTF8Encoding($false)))
 
     Write-8mbLocalBrandPng (Join-Path $assets 'StoreLogo.png') 50 50

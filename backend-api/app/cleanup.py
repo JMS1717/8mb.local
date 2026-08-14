@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .config import settings
+from . import history_manager
 from . import settings_manager
 
 logger = logging.getLogger(__name__)
@@ -16,6 +18,7 @@ logger = logging.getLogger(__name__)
 _APP_DATA_DIR = Path(settings.APP_DATA_DIR)
 UPLOADS_DIR = Path(settings.UPLOADS_DIR) if settings.UPLOADS_DIR else _APP_DATA_DIR / "uploads"
 OUTPUTS_DIR = Path(settings.OUTPUTS_DIR) if settings.OUTPUTS_DIR else _APP_DATA_DIR / "outputs"
+MEMORY_UPLOADS_DIR = Path("/dev/shm/8mb.local/uploads")
 
 # Module-level handle so the scheduler object is not garbage collected after
 # start_scheduler() returns (APScheduler keeps internal refs via the event
@@ -23,7 +26,7 @@ OUTPUTS_DIR = Path(settings.OUTPUTS_DIR) if settings.OUTPUTS_DIR else _APP_DATA_
 _scheduler: AsyncIOScheduler | None = None
 
 
-def _cleanup_files_sync() -> None:
+def _cleanup_files_sync(protected_paths: set[str] | None = None) -> None:
     """Blocking worker: delete files older than the configured retention window.
 
     Kept sync deliberately — all operations are blocking filesystem syscalls
@@ -36,12 +39,21 @@ def _cleanup_files_sync() -> None:
         logger.debug("cleanup: get_retention_hours failed (%s); using default", e)
         retention = settings.FILE_RETENTION_HOURS
 
-    cutoff_ts = (datetime.utcnow() - timedelta(hours=retention)).timestamp()
+    cutoff_ts = (datetime.now(timezone.utc) - timedelta(hours=retention)).timestamp()
     scanned = 0
     removed = 0
     total_bytes = 0
 
-    for base in (UPLOADS_DIR, OUTPUTS_DIR):
+    protected = {
+        os.path.normcase(os.path.abspath(path))
+        for path in (protected_paths or set())
+        if path
+    }
+
+    bases = [UPLOADS_DIR, OUTPUTS_DIR]
+    if MEMORY_UPLOADS_DIR not in bases:
+        bases.append(MEMORY_UPLOADS_DIR)
+    for base in bases:
         if not os.path.isdir(base):
             logger.debug("cleanup: skipping missing dir %s", base)
             continue
@@ -53,6 +65,13 @@ def _cleanup_files_sync() -> None:
         for name in entries:
             scanned += 1
             path = os.path.join(base, name)
+            normalized = os.path.normcase(os.path.abspath(path))
+            if normalized in protected or any(
+                normalized.startswith(prefix + os.sep) or normalized.startswith(prefix + '.')
+                for prefix in protected
+            ):
+                logger.debug("cleanup: protecting active job path %s", path)
+                continue
             try:
                 st = os.stat(path)
             except OSError:
@@ -80,10 +99,39 @@ def _cleanup_files_sync() -> None:
             scanned, retention,
         )
 
+    try:
+        history_removed = history_manager.prune_history(retention, OUTPUTS_DIR)
+        if history_removed:
+            logger.info("cleanup: removed %d expired/orphaned history entr%s",
+                        history_removed, "y" if history_removed == 1 else "ies")
+    except Exception as exc:
+        # Media cleanup must remain reliable even if a legacy/corrupt history
+        # file cannot be read or rewritten.
+        logger.warning("cleanup: history pruning failed: %s", exc)
+
 
 async def cleanup_files() -> None:
     """Async entrypoint used by APScheduler; offloads blocking IO to a thread."""
-    await asyncio.to_thread(_cleanup_files_sync)
+    protected: set[str] = set()
+    try:
+        # Keep active upload/output files safe even when their mtime exceeds
+        # retention while a worker is still processing them.
+        from .deps import redis
+
+        for task_id in await redis.zrange('jobs:active', 0, -1):
+            raw = await redis.get(f'job:{task_id}')
+            if not raw:
+                continue
+            try:
+                metadata = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            for field in ('input_path', 'output_path'):
+                if metadata.get(field):
+                    protected.add(str(metadata[field]))
+    except Exception as exc:
+        logger.debug('cleanup: could not read active job paths: %s', exc)
+    await asyncio.to_thread(_cleanup_files_sync, protected)
 
 
 def start_scheduler() -> None:

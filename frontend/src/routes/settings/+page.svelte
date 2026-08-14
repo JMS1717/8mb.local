@@ -31,6 +31,18 @@
 	libsvtav1: boolean;
 	libaom_av1: boolean;
   };
+  type FolderWatchSettings = {
+	enabled: boolean;
+	input_folder: string;
+	profile: string | null;
+	output_mode: 'same_folder' | 'specific_folder';
+	output_folder: string;
+	original_behavior: 'keep' | 'delete' | 'move';
+	existing_files: 'new_only' | 'process_existing';
+	recursive: boolean;
+	stable_seconds: number;
+	poll_interval_seconds: number;
+  };
 
   let saving = false;
   let message = '';
@@ -47,7 +59,7 @@
   let confirmPassword = '';
 
   // Presets
-  let targetMB = 9.7;
+  let targetMB = 19.7;
   let videoCodec = 'av1_nvenc';
   let audioCodec = 'libopus';
   let preset = 'p6';
@@ -84,7 +96,12 @@
 	let defaultPresetName: string | null = null;
 	let newPresetName: string = '';
 	let retentionHours: number = 1;
-	let workerConcurrency: number = 4;
+	  let workerConcurrency: number = 4;
+	  let folderWatch: FolderWatchSettings = {
+		enabled: false, input_folder: '', profile: null, output_mode: 'same_folder',
+		output_folder: '', original_behavior: 'keep', existing_files: 'new_only',
+		recursive: false, stable_seconds: 5, poll_interval_seconds: 5,
+	  };
 	  // Hardware tests state
 	  let hwTests: Array<any> = [];
 	  let hwTestsLoading: boolean = false;
@@ -154,6 +171,10 @@
 	  try {
 		const wc = await fetch('/api/settings/worker-concurrency');
 		if (wc.ok) { const js = await wc.json(); workerConcurrency = js.concurrency ?? 4; }
+	  } catch {}
+	  try {
+		const fw = await fetch('/api/settings/folder-watch');
+		if (fw.ok) { const js = await fw.json(); folderWatch = { ...folderWatch, ...js }; }
 	  } catch {}
 
 			// Load initial hardware test results (best-effort)
@@ -364,7 +385,11 @@
 	async function deletePreset(name:string){
 		saving=true; error=''; message='';
 		try { const res = await fetch(`/api/settings/preset-profiles/${encodeURIComponent(name)}`, { method:'DELETE' });
-			if (res.ok){ message='Deleted preset'; presetProfiles = presetProfiles.filter(p=>p.name!==name); if (defaultPresetName===name) defaultPresetName=null; }
+			if (res.ok){
+				message='Deleted preset';
+				presetProfiles = presetProfiles.filter(p=>p.name!==name);
+				if (defaultPresetName===name) defaultPresetName = presetProfiles[0]?.name ?? null;
+			}
 			else { const d = await res.json(); error = d.detail || 'Failed to delete preset'; }
 		} catch { error='Failed to delete preset'; } finally { saving=false; }
 	}
@@ -397,11 +422,23 @@
 			} else { const d = await res.json(); error = d.detail || 'Failed to save concurrency'; }
 		} catch { error='Failed to save concurrency'; } finally { saving=false; }
 	}
+
+	async function saveFolderWatch(){
+		saving = true; error = ''; message = '';
+		try {
+			const res = await fetch('/api/settings/folder-watch', {
+				method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(folderWatch)
+			});
+			if (res.ok) { const js = await res.json(); folderWatch = { ...folderWatch, ...js }; message = folderWatch.enabled ? 'Folder Watch enabled' : 'Folder Watch settings saved'; }
+			else { const js = await res.json(); error = js.detail || 'Failed to save Folder Watch settings'; }
+		} catch { error = 'Failed to save Folder Watch settings'; }
+		finally { saving = false; }
+	}
 </script>
 
 <style>
   /* Keep the page dead-simple and avoid any overlays that might block <select> popovers */
-  .container { max-width: 760px; margin: 0 auto; padding: 24px; }
+  .container { max-width: 760px; margin: 0 auto; padding: 24px; display: flex; flex-direction: column; }
   .card { background: #111827; border: 1px solid #374151; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .label { display: block; color: #d1d5db; margin-bottom: 6px; font-size: 14px; }
@@ -416,6 +453,17 @@
   .msg.err { background: rgba(239,68,68,.15); border: 1px solid #ef4444; color: #fecaca; }
   .switch { display:flex; align-items:center; gap:8px; }
   .switch input { transform: scale(1.2); }
+	.folder-watch-summary { display:flex; align-items:center; justify-content:space-between; gap:16px; cursor:pointer; list-style:none; }
+	.folder-watch-summary::-webkit-details-marker { display:none; }
+	.folder-watch-title { color:white; font-size:20px; font-weight:600; }
+	.folder-watch-badge { display:inline-block; margin-left:8px; padding:3px 8px; border-radius:999px; background:#374151; color:#bfdbfe; font-size:11px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; }
+	.folder-watch-status { display:inline-block; margin-left:6px; padding:3px 8px; border-radius:999px; background:#374151; color:#d1d5db; font-size:11px; font-weight:600; }
+	.folder-watch-status.enabled { background:rgba(16,185,129,.18); color:#a7f3d0; }
+	.folder-watch-summary-text { display:block; margin-top:6px; color:#9ca3af; font-size:13px; line-height:1.45; }
+	.folder-watch-chevron { color:#93c5fd; font-size:22px; transition: transform .15s ease; }
+	.folder-watch-card details[open] .folder-watch-chevron { transform: rotate(180deg); }
+	.folder-watch-content { margin-top:16px; padding-top:16px; border-top:1px solid #374151; }
+	.folder-watch-help { margin:0 0 14px; padding:10px 12px; border-left:3px solid #3b82f6; border-radius:6px; background:rgba(59,130,246,.1); color:#cbd5e1; font-size:13px; line-height:1.5; }
 	.banner { display:flex; justify-content:space-between; align-items:center; gap:12px; background: rgba(59,130,246,.12); border:1px solid #3b82f6; color:#bfdbfe; padding:10px 12px; border-radius:8px; margin-bottom:12px; }
 	.banner button { background: transparent; border: none; color:#93c5fd; cursor:pointer; font-size:14px; }
 </style>
@@ -426,9 +474,26 @@
 	<a href="/" class="btn" style="text-decoration:none; background:#374151">← Back</a>
   </div>
 
+	<!-- Support is intentionally first and expanded by default. -->
+	<div class="card" style="padding:8px">
+		<details open>
+			<summary style="cursor:pointer; list-style:none; display:flex; align-items:center; gap:8px">
+				<span class="title" style="margin:0; font-size:18px">Support the Project</span>
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+			</summary>
+			<div style="margin-top:12px">
+				<p class="label" style="color:#cbd5e1">If 8mb.local helps you, a small gesture goes a long way. Thank you for supporting continued development!</p>
+				<div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:10px">
+					<a class="btn" style="text-decoration:none" href="https://www.paypal.com/paypalme/jasonselsley" target="_blank" rel="noopener noreferrer">Support via PayPal</a>
+					<a class="btn" style="text-decoration:none; background:#374151" href="https://github.com/JMS1717/8mb.local" target="_blank" rel="noopener noreferrer">Star on GitHub</a>
+				</div>
+			</div>
+		</details>
+	</div>
+
 	{#if showCodecSyncBanner}
 		<div class="banner">
-			<div>Codec visibility synced from hardware tests</div>
+			<div>Hardware availability checked; your saved codec choices were preserved</div>
 			<button on:click={() => { try { const siPromise = fetch('/api/startup/info').then(r=>r.ok?r.json():null); siPromise.then(js => { const bootId = js?.boot_id; if (bootId) { window.localStorage.setItem('8mblocal:lastSeenBootId', bootId); } }); } catch {} showCodecSyncBanner = false; }}>Dismiss</button>
 		</div>
 	{/if}
@@ -850,19 +915,74 @@
 	</div>
   </div>
 
-	<!-- Support (collapsed by default) -->
-	<div class="card" style="padding:8px">
+	<!-- Folder Watch is intentionally last and collapsed by default. -->
+	<div class="card folder-watch-card">
 		<details>
-			<summary style="cursor:pointer; list-style:none; display:flex; align-items:center; gap:8px">
-				<span class="title" style="margin:0; font-size:18px">Support the Project</span>
-				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+			<summary class="folder-watch-summary">
+				<span>
+					<span class="folder-watch-title">Folder Watch</span><span class="folder-watch-badge">Advanced</span><span class="folder-watch-status" class:enabled={folderWatch.enabled}>{folderWatch.enabled ? 'Enabled' : 'Disabled'}</span>
+					<span class="folder-watch-summary-text">Automatically send finished videos from a local, UNC, or mounted Linux folder through the normal compression queue.</span>
+				</span>
+				<span class="folder-watch-chevron" aria-hidden="true">⌄</span>
 			</summary>
-			<div style="margin-top:12px">
-				<p class="label" style="color:#cbd5e1">If 8mb.local helps you, a small gesture goes a long way. Thank you for supporting continued development!</p>
-				<div style="display:flex; flex-wrap:wrap; gap:10px; margin-top:10px">
-					  <a class="btn" style="text-decoration:none" href="https://www.paypal.com/paypalme/jasonselsley" target="_blank" rel="noopener noreferrer">Support via PayPal</a>
-					<a class="btn" style="text-decoration:none; background:#374151" href="https://github.com/JMS1717/8mb.local" target="_blank" rel="noopener noreferrer">Star on GitHub</a>
+			<div class="folder-watch-content">
+				<p class="folder-watch-help"><strong>How it works:</strong> the watcher checks the folder on the polling interval and waits until a file's size and modified time stop changing for the stable-seconds value. This prevents processing a video while it is still being copied. Five seconds is a good default; use a longer value for slow network copies.</p>
+				<div class="switch" style="margin-bottom:12px">
+					<input id="folder-watch-enabled" type="checkbox" bind:checked={folderWatch.enabled} />
+					<label class="label" for="folder-watch-enabled" style="margin:0">Enable Folder Watch</label>
 				</div>
+				<div class="row">
+					<div>
+						<label class="label" for="folder-watch-input">Input folder</label>
+						<input id="folder-watch-input" class="input" type="text" bind:value={folderWatch.input_folder} placeholder="C:\\Videos or /media/videos" />
+					</div>
+					<div>
+						<label class="label" for="folder-watch-profile">Compression profile</label>
+						<select id="folder-watch-profile" class="select" bind:value={folderWatch.profile}>
+							<option value={null}>Current default profile</option>
+							{#each presetProfiles as p}<option value={p.name}>{p.name}</option>{/each}
+						</select>
+					</div>
+				</div>
+				<div class="row" style="margin-top:12px">
+					<div>
+						<label class="label" for="folder-watch-output-mode">Output location</label>
+						<select id="folder-watch-output-mode" class="select" bind:value={folderWatch.output_mode}>
+							<option value="same_folder">Same folder as input</option>
+							<option value="specific_folder">Specific folder</option>
+						</select>
+					</div>
+					<div>
+						<label class="label" for="folder-watch-output">Output folder (when selected)</label>
+						<input id="folder-watch-output" class="input" type="text" bind:value={folderWatch.output_folder} disabled={folderWatch.output_mode !== 'specific_folder'} />
+					</div>
+				</div>
+				<div class="row" style="margin-top:12px">
+					<div>
+						<label class="label" for="folder-watch-original">After successful validated output</label>
+						<select id="folder-watch-original" class="select" bind:value={folderWatch.original_behavior}>
+							<option value="keep">Keep original</option><option value="delete">Delete original</option><option value="move">Move original to processed</option>
+						</select>
+					</div>
+					<div>
+						<label class="label" for="folder-watch-existing">Existing files</label>
+						<select id="folder-watch-existing" class="select" bind:value={folderWatch.existing_files}>
+							<option value="new_only">New files only</option><option value="process_existing">Process existing files</option>
+						</select>
+					</div>
+				</div>
+				<div class="row" style="margin-top:12px">
+					<div class="switch"><input id="folder-watch-recursive" type="checkbox" bind:checked={folderWatch.recursive} /><label class="label" for="folder-watch-recursive" style="margin:0">Include subfolders</label></div>
+					<div>
+						<label class="label" for="folder-watch-stable">Wait until file stops changing (seconds)</label>
+						<input id="folder-watch-stable" class="input" type="number" min="2" max="60" bind:value={folderWatch.stable_seconds} aria-describedby="folder-watch-stable-help" />
+						<p id="folder-watch-stable-help" class="label" style="margin-top:6px; color:#9ca3af; font-size:12px">The file must keep the same size and modified time for this long before processing starts. It is a quiet period, not the video duration.</p>
+					</div>
+				</div>
+				<div class="row" style="margin-top:12px">
+					<div><label class="label" for="folder-watch-poll">Polling interval (seconds)</label><input id="folder-watch-poll" class="input" type="number" min="2" max="300" bind:value={folderWatch.poll_interval_seconds} /><p class="label" style="margin-top:6px; color:#9ca3af; font-size:12px">How often the watcher scans the folder; this is separate from the stable-file delay.</p></div>
+				</div>
+				<div style="margin-top:12px"><button type="button" class="btn alt" on:click={saveFolderWatch} disabled={saving}>{saving ? 'Saving…' : 'Save Folder Watch'}</button></div>
 			</div>
 		</details>
 	</div>

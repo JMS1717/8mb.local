@@ -17,10 +17,10 @@ class UploadResponse(BaseModel):
 class CompressRequest(BaseModel):
     job_id: str
     filename: str
-    target_size_mb: float = Field(gt=0, le=51200)
+    target_size_mb: float = Field(default=19.7, gt=0, le=51200)
     # When set (>0), worker uses this video bitrate (kbps) instead of deriving from target_size_mb.
     target_video_bitrate_kbps: Optional[float] = Field(default=None, ge=0, le=2_000_000)
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','libx264','libx265','libsvtav1','libaom-av1'] = 'h264_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
     audio_bitrate_kbps: int = Field(default=128, ge=0, le=2000)
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
@@ -70,8 +70,8 @@ class PasswordChange(BaseModel):
     new_password: str
 
 class DefaultPresets(BaseModel):
-    target_mb: float = Field(default=9.7, gt=0, le=51200)
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','libx264','libx265','libsvtav1','libaom-av1'] = 'av1_nvenc'
+    target_mb: float = Field(default=19.7, gt=0, le=51200)
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','libx264','libx265','libsvtav1','libaom-av1'] = 'h264_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
     audio_kbps: Literal[64,96,128,160,192,256] = 128
@@ -139,6 +139,19 @@ class RetentionHours(BaseModel):
     hours: int
 
 
+class FolderWatchSettings(BaseModel):
+    enabled: bool = False
+    input_folder: str = ''
+    profile: Optional[str] = None
+    output_mode: Literal['same_folder', 'specific_folder'] = 'same_folder'
+    output_folder: str = ''
+    original_behavior: Literal['keep', 'delete', 'move'] = 'keep'
+    existing_files: Literal['new_only', 'process_existing'] = 'new_only'
+    recursive: bool = False
+    stable_seconds: int = Field(default=5, ge=2, le=60)
+    poll_interval_seconds: int = Field(default=5, ge=2, le=300)
+
+
 # Queue system models
 class JobMetadata(BaseModel):
     """Metadata for a single compression job in the queue."""
@@ -155,6 +168,7 @@ class JobMetadata(BaseModel):
     completed_at: Optional[float] = None
     error: Optional[str] = None
     output_path: Optional[str] = None
+    input_path: Optional[str] = None
     final_size_mb: Optional[float] = None
     # Time estimation fields
     last_progress_update: Optional[float] = None  # Timestamp of last progress update

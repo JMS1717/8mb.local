@@ -13,6 +13,7 @@ from ..models import (
     AuthSettingsUpdate,
     CodecVisibilitySettings,
     DefaultPresets,
+    FolderWatchSettings,
     PasswordChange,
     PresetProfile,
     PresetProfilesResponse,
@@ -164,6 +165,8 @@ async def update_codec_visibility_settings(
     try:
         settings_manager.update_codec_visibility_settings(codec_settings.dict())
         return {"status": "success", "message": "Codec visibility settings updated successfully"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -231,6 +234,32 @@ async def update_size_buttons(size_buttons: SizeButtons, _auth=Depends(basic_aut
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get('/api/settings/folder-watch')
+async def get_folder_watch_settings():
+    data = settings_manager.get_folder_watch_settings()
+    try:
+        from ..folder_watch import folder_watch_service
+        data['status'] = folder_watch_service.status()
+    except Exception:
+        data['status'] = {'running': False}
+    return data
+
+
+@router.put('/api/settings/folder-watch')
+async def update_folder_watch_settings(payload: FolderWatchSettings, _auth=Depends(basic_auth)):
+    try:
+        saved = settings_manager.update_folder_watch_settings(payload.dict())
+        from ..folder_watch import folder_watch_service
+        await folder_watch_service.reload()
+        saved['status'] = folder_watch_service.status()
+        return saved
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception('folder-watch settings update failed')
+        raise HTTPException(status_code=500, detail='Folder Watch could not be updated') from exc
 
 
 @router.get("/api/settings/retention-hours")
