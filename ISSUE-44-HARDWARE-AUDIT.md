@@ -219,6 +219,43 @@ under the unique XPS test directory for evidence.
 
 ## Remaining work
 
+### Follow-up: transient input recovery after terminal jobs
+
+OneCreek found a separate frontend lifecycle issue after canceling a job:
+the worker correctly deleted the transient staged input, but the page kept the
+old analysis and tried to submit it again. The API correctly returned
+`Input not found`.
+
+The fix keeps the browser's selected `File` and analysis metadata, but tracks
+the server-side staged input explicitly with the upload identity and a valid
+flag. Terminal success, failure, and cancellation invalidate that staged state
+without weakening cleanup. The next Compress action re-uploads and analyzes
+the retained browser file automatically. A stale `Input not found` response
+has one bounded recovery attempt; upload or retry failures stop with a clear
+error and cannot loop indefinitely. Reset and selecting a new file also clear
+the staged state.
+
+Files changed for this follow-up:
+
+- `frontend/src/routes/+page.svelte`: explicit staged-input lifecycle,
+  automatic re-stage before retrying compression, one-shot stale-input
+  recovery, and terminal-state invalidation.
+- `tests/test_frontend_input_lifecycle.py`: regression checks for the staged
+  input contract, terminal invalidation, bounded recovery, and reset behavior.
+
+Validation for this follow-up:
+
+- `frontend`: `npm run check` — PASS, 0 errors and 0 warnings.
+- `frontend`: `npm run build` — PASS.
+- Static frontend lifecycle and encoder badge tests — PASS, 7 tests.
+- Full Python suite inside the project container — PASS, 158 passed, 2
+  skipped.
+- Docker quick E2E with the rebuilt local image — PASS, including health,
+  upload, compression, FFprobe-valid output, history/download, and restart
+  recovery.
+
+The Intel/QSV/VAAPI media stack was not changed for this follow-up.
+
 1. OneCreek or another newer Intel system must run the exact HEVC QSV and
    HEVC VAAPI application test with `--require-exact-codecs`. The expected
    terminal metadata must show `actual_encoder=hevc_qsv` and
@@ -231,5 +268,5 @@ under the unique XPS test directory for evidence.
 3. Windows EXE/installer/MSIX are outside this issue audit and were not rebuilt
    here.
 
-No commit, push, merge, release, Docker publish, Partner Center change, or
-production deployment was performed.
+At the time of the original hardware audit, no commit, push, merge, release,
+Docker publish, Partner Center change, or production deployment was performed.

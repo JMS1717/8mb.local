@@ -11,7 +11,6 @@
 
   let file: File | null = null;
   let uploadInput: HTMLInputElement | null = null; // reference to clear file input
-  let uploadedFileName: string | null = null; // Track what file was uploaded
   let isAnalyzing: boolean = false; // Track analysis state for UI feedback
   let targetMB = 19.7;
   /** 'size' = target output file size (MB); 'bitrate' = fixed video bitrate (kbps). */
@@ -172,6 +171,12 @@
   // Changing target size or audio bitrate only updates client-side estimates.
 
   let jobInfo: any = null;
+  // A successful upload creates a temporary server-side input. Keep its
+  // validity explicit because the worker removes transient inputs after every
+  // terminal job state. The browser File remains reusable for a later upload.
+  let stagedFile: File | null = null;
+  let stagedInputToken: string | null = null;
+  let stagedInputValid = false;
   let taskId: string | null = null;
   let progress = 0;
   let displayedProgress = 0;
@@ -583,6 +588,26 @@
   // "10MB (Discord)" option: pick slightly under to ensure final stays below 10MB
   function setPresetMBSafe10(){ targetMB = 9.7; }
 
+  function invalidateStagedInput(): void {
+    stagedInputValid = false;
+    stagedInputToken = null;
+  }
+
+  function selectFile(next: File | null): void {
+    file = next;
+    fileSizeLabel = next ? formatSize(next.size) : null;
+    stagedFile = null;
+    invalidateStagedInput();
+    jobInfo = null;
+    errorText = null;
+    if (!next) warnText = null;
+  }
+
+  function isMissingStagedInputError(error: unknown): boolean {
+    const message = String((error as any)?.message ?? error ?? '');
+    return /input\s+not\s+found/i.test(message);
+  }
+
   async function onDrop(e: DragEvent){
     e.preventDefault();
     if (!e.dataTransfer) return;
@@ -594,8 +619,7 @@
     }
     const f = droppedFiles[0];
     if (f) {
-      file = f;
-      fileSizeLabel = formatSize(f.size);
+      selectFile(f);
       // Auto-analyze on drop
       setTimeout(() => doUpload(), 100);
     }
@@ -611,37 +635,53 @@
       return;
     }
     const picked = pickedFiles[0] || null;
-    file = picked;
-    fileSizeLabel = picked ? formatSize(picked.size) : null;
+    selectFile(picked);
     if (picked) setTimeout(() => doUpload(), 100);
   }
 
-  async function doUpload(){
-    if (!file) return;
-    if (isUploading || isAnalyzing) return;
-    // Skip re-upload when same file is already uploaded; recompute client-side estimates only
-    if (uploadedFileName === file.name && jobInfo?.filename) {
+  async function doUpload(force = false): Promise<boolean> {
+    const selectedFile = file;
+    if (!selectedFile) return false;
+    if (isUploading || isAnalyzing) return false;
+    // Reuse a staged input only when it is explicitly known to be valid and
+    // belongs to the exact browser File object currently selected. A filename
+    // alone is not proof that the server-side temporary input still exists.
+    if (!force && stagedInputValid && stagedFile === selectedFile && stagedInputToken && jobInfo?.job_id && jobInfo?.filename) {
       warnText = (estimated && estimated.video_kbps < 100) ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
-      return;
+      return true;
+    }
+    if (force && jobInfo) {
+      logLines = ['Re-uploading the selected file for a new compression…', ...logLines].slice(0, 500);
     }
     isAnalyzing = true;
     isUploading = true;
     uploadProgress = 0;
     errorText = null;
     try {
-      jobInfo = await uploadWithProgress(file, targetMB, audioKbps, {
+      const uploaded = await uploadWithProgress(selectedFile, targetMB, audioKbps, {
         onProgress: (p:number)=>{ uploadProgress = p; },
         onUploadComplete: () => {
           uploadProgress = 100;
           logLines = ['Upload complete; analyzing on the server…', ...logLines].slice(0, 500);
         },
       });
-      uploadedFileName = file.name; // Mark this file as uploaded
+      // Do not let a late response from an old selection replace the current
+      // file's analysis or staged-input token.
+      if (file !== selectedFile) return false;
+      jobInfo = uploaded;
+      stagedFile = selectedFile;
+      stagedInputToken = uploaded?.job_id && uploaded?.filename
+        ? `${uploaded.job_id}:${uploaded.filename}`
+        : null;
+      stagedInputValid = Boolean(stagedInputToken);
       // Set warn based on current client-side estimate
       warnText = (estimated && estimated.video_kbps < 100) ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
+      return stagedInputValid;
     } catch (err: any) {
       console.error('Analysis failed:', err);
       errorText = `Analysis failed: ${err.message || err}`;
+      invalidateStagedInput();
+      return false;
     } finally {
       isUploading = false;
       isAnalyzing = false;
@@ -649,13 +689,21 @@
   }
 
   async function doCompress(){
-    // Ensure we have analysis; if not, perform upload/analyze once
-    if (!jobInfo) {
-      if (!file) { errorText = 'Please select a file and analyze first.'; return; }
-      await doUpload();
-      if (!jobInfo) return; // if upload failed
-    }
     if (isCompressing) return; // prevent double submission
+    if (!file) { errorText = 'Please select a file first.'; return; }
+
+    // The worker deletes transient inputs after success, failure, and
+    // cancellation. Re-stage the retained browser File on demand instead of
+    // asking the user to click Re-analyze manually.
+    const hasValidStagedInput = stagedInputValid
+      && stagedFile === file
+      && Boolean(stagedInputToken)
+      && Boolean(jobInfo?.job_id && jobInfo?.filename);
+    if (!hasValidStagedInput) {
+      const uploaded = await doUpload(true);
+      if (!uploaded || !jobInfo || !stagedInputValid) return;
+    }
+
     errorText = null;
     try {
       isCompressing = true;
@@ -699,7 +747,28 @@
         start_time: startTime.trim() || undefined,
         end_time: endTime.trim() || undefined,
       };
-      const { task_id } = await startCompress(payload);
+      let startResponse: any;
+      let recoveryUsed = false;
+      try {
+        startResponse = await startCompress(payload);
+      } catch (startError: any) {
+        if (recoveryUsed || !file || !isMissingStagedInputError(startError)) throw startError;
+        recoveryUsed = true;
+        invalidateStagedInput();
+        logLines = ['Staged source expired; re-uploading and analyzing once…', ...logLines].slice(0, 500);
+        const recovered = await doUpload(true);
+        if (!recovered || !jobInfo || !stagedInputValid) {
+          throw new Error('Automatic re-upload failed; the selected file could not be analyzed.');
+        }
+        payload.job_id = jobInfo.job_id;
+        payload.filename = jobInfo.filename;
+        try {
+          startResponse = await startCompress(payload);
+        } catch (retryError: any) {
+          throw new Error(`Compression start failed after automatic re-upload: ${retryError?.message || retryError}`);
+        }
+      }
+      const { task_id } = startResponse;
       taskId = task_id;
       setActiveJobId(task_id);
       
@@ -791,6 +860,7 @@
           if (data.type === 'done') {
             doneStats = data.stats;
             encoderTelemetry = data.stats || null;
+            invalidateStagedInput();
             if (data.stats?.actual_encoder) encodeMethod = String(data.stats.actual_encoder);
             progress = 100;
             displayedProgress = 100;
@@ -828,6 +898,7 @@
           if (data.type === 'error') {
             logLines = [`❌ Error: ${data.message}`, ...logLines];
             errorText = data.message;
+            invalidateStagedInput();
             isCompressing = false;
             isFinalizing = false;
             isCancelling = false;
@@ -875,6 +946,7 @@
           // Handle cancellation
           if (data.type === 'canceled') {
             logLines = ['🚫 Job canceled', ...logLines];
+            invalidateStagedInput();
             isCompressing = false;
             isFinalizing = false;
             isCancelling = false;
@@ -979,6 +1051,7 @@
         if (data.type === 'done') {
           doneStats = data.stats;
           encoderTelemetry = data.stats || null;
+          invalidateStagedInput();
           if (data.stats?.actual_encoder) encodeMethod = String(data.stats.actual_encoder);
           progress = 100;
           displayedProgress = 100;
@@ -994,6 +1067,7 @@
         if (data.type === 'error') {
           errorText = String(data.message || 'Compression failed');
           logLines = [`Error: ${errorText}`, ...logLines];
+          invalidateStagedInput();
           isCompressing = false;
           isFinalizing = false;
           isCancelling = false;
@@ -1002,6 +1076,7 @@
         }
         if (data.type === 'canceled') {
           logLines = ['Job canceled', ...logLines];
+          invalidateStagedInput();
           isCompressing = false;
           isFinalizing = false;
           isCancelling = false;
@@ -1019,7 +1094,8 @@
   
   function reset(){
     // Clear all job-related state but keep the selected file loaded so it can be reused
-    uploadedFileName = null;
+    stagedFile = null;
+    invalidateStagedInput();
     jobInfo = null;
     taskId = null;
     progress = 0;
@@ -1047,7 +1123,8 @@
     // Clear the chosen file and related analysis state
     file = null;
     fileSizeLabel = null;
-    uploadedFileName = null;
+    stagedFile = null;
+    invalidateStagedInput();
     jobInfo = null;
     warnText = null;
     errorText = null;
@@ -1614,15 +1691,19 @@
     </div>
   {/if}
 
+  {#if file && jobInfo && !stagedInputValid && !isUploading && !isAnalyzing}
+    <p class="text-xs text-gray-400">The previous server copy was released. Compress will re-upload this selected file automatically.</p>
+  {/if}
+
   <div class="flex gap-2">
-    <button class="btn" on:click={doUpload} disabled={!file || isUploading || isAnalyzing}>
+    <button class="btn" on:click={() => doUpload()} disabled={!file || isUploading || isAnalyzing}>
       {#if jobInfo}
         Re-analyze
       {:else}
         Analyze
       {/if}
     </button>
-  <button class="btn" on:click={doCompress} disabled={!jobInfo || isCompressing}>
+  <button class="btn" on:click={doCompress} disabled={!file || isCompressing || isUploading || isAnalyzing}>
       {#if isCompressing}
         {#if hasProgress}
           Compressing… {progress}%{#if etaLabel} — ~{etaLabel} left{/if}
