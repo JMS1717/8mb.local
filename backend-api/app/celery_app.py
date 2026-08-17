@@ -16,6 +16,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from .config import settings
+from shared.concurrency import resolve_worker_concurrency
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,9 @@ if _local_enabled():
         """Run the existing worker task entry points in bounded local threads."""
 
         def __init__(self) -> None:
-            workers = max(1, int(os.getenv("WORKER_CONCURRENCY", str(settings.WORKER_CONCURRENCY))))
+            workers = resolve_worker_concurrency(
+                os.getenv("WORKER_CONCURRENCY", settings.WORKER_CONCURRENCY)
+            )
             self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="8mblocal")
             self._futures: dict[str, Future[Any]] = {}
             self._lock = threading.RLock()

@@ -14,7 +14,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "${APP_VERSION:-140.0.0.0}"
+        BUILD_VERSION: "${APP_VERSION:-141.0.0.0}"
     image: jms1717/8mblocal:vaapi
     container_name: 8mblocal
     ports:
@@ -45,5 +45,5 @@ services:
       - HISTORY_FILE=/app/state/history.json
       - TMPDIR=/app/uploads/.tmp
       - VAAPI_DEVICE=${VAAPI_DEVICE:-}
-      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-4}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-auto}
     restart: unless-stopped

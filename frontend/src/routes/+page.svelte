@@ -3,7 +3,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { uploadWithProgress, startCompress, openProgressStream, downloadUrl, getJobStatus, getAvailableCodecs, getSystemCapabilities, getPresetProfiles, getSizeButtons, cancelJob, getEncoderTestResults, getVersion, getBatchStatus, batchZipDownloadUrl } from '$lib/api';
-  import { autoDownloadOnce, clearActiveJobId, getActiveJobId, setActiveJobId, triggerBrowserDownload } from '$lib/activeJob';
+  import { autoDownloadOnce, clearActiveJobId, downloadFile, getActiveJobId, setActiveJobId } from '$lib/activeJob';
   import { stagePendingBatchFiles } from '$lib/pendingBatch';
   import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
   import { availableCodecOptions, codecColor, codecIcon, encoderDisplayName, type CodecOption } from '$lib/codecs';
@@ -789,7 +789,7 @@
             // Auto-download if enabled
             if (autoDownload && taskId) {
               setTimeout(() => {
-                autoDownloadOnce(task_id, downloadUrl(task_id));
+                void autoDownloadOnce(task_id, downloadUrl(task_id));
               }, 500);
             }
           }
@@ -859,14 +859,13 @@
       
       es.onerror = (err) => {
         console.error('SSE error:', err);
-        
-        // Don't immediately fail - the job might still be running
-        // Only show warning, don't stop isCompressing
+
+        // Keep the EventSource open. Native EventSource reconnects
+        // automatically after transient network/backend failures; closing it
+        // here made a completed job appear stuck until the user opened Queue.
+        // Do not clear isCompressing because the server job may still be live.
         logLines = ['⚠️ Progress stream connection issue. Checking queue for updates...', ...logLines].slice(0, 500);
-        
-        // Close this connection attempt
-        try { esRef?.close(); esRef = null; } catch {}
-        
+
         // Suggest checking queue page
         if (!doneStats && taskId) {
           logLines = [
@@ -889,13 +888,12 @@
     if (!taskId) return;
     tryDownloading = true;
     const url = downloadUrl(taskId);
-    // Just open the URL with ?wait=2 to give the backend time to finalize
-    // If it's not ready, the backend will return a 404 with detail JSON, but at least
-    // the finalization watchdog will keep polling and eventually succeed
     try {
-      triggerBrowserDownload(`${url}?wait=2`);
+      await downloadFile(`${url}?wait=2`);
+      errorText = '';
+    } catch (err: any) {
+      errorText = err?.message || 'Download failed. Try again when the job is ready.';
     } finally {
-      // Reset state after a moment (the page may navigate away if download succeeds)
       setTimeout(() => { tryDownloading = false; }, 1000);
     }
   }
@@ -959,7 +957,7 @@
           clearActiveJobId(reconnectTaskId);
           try { esRef?.close(); } catch {}
           setTimeout(() => refreshRecentHistory(), 100);
-          if (autoDownload) setTimeout(() => autoDownloadOnce(reconnectTaskId, downloadUrl(reconnectTaskId)), 500);
+          if (autoDownload) setTimeout(() => { void autoDownloadOnce(reconnectTaskId, downloadUrl(reconnectTaskId)); }, 500);
         }
         if (data.type === 'error') {
           errorText = String(data.message || 'Compression failed');
@@ -1079,7 +1077,7 @@
         <div class="flex gap-2">
           <a href="/batch" class="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded text-sm">Open</a>
           {#if activeBatchStatus?.completed_count > 0}
-            <a href={batchZipDownloadUrl(activeBatchId)} class="px-3 py-1.5 bg-blue-700 hover:bg-blue-600 text-white rounded text-sm">ZIP</a>
+            <button on:click={async () => { try { await downloadFile(batchZipDownloadUrl(activeBatchId), `8mblocal_batch_${activeBatchId.slice(0, 8)}.zip`); } catch (err: any) { errorText = err?.message || 'Batch ZIP download failed. Try again.'; } }} class="px-3 py-1.5 bg-blue-700 hover:bg-blue-600 text-white rounded text-sm">ZIP</button>
           {/if}
           <button class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm" on:click={() => refreshActiveBatchStatus(false)}>Refresh</button>
           <button class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded text-sm" on:click={clearActiveBatchTracker}>Clear</button>
@@ -1620,13 +1618,12 @@
             <p class="text-sm text-gray-300">Your file is ready to download</p>
           {/if}
         </div>
-        <a 
+          <button
           class="btn bg-green-600 hover:bg-green-700 text-white font-bold px-8 py-3 text-lg shadow-lg"
-          href={downloadUrl(taskId)} 
-          target="_blank"
+          on:click={async () => { try { await downloadFile(downloadUrl(taskId)); errorText = ''; } catch (err: any) { errorText = err?.message || 'Download failed. Try again.'; } }}
         >
           ⬇️ Download
-        </a>
+        </button>
       </div>
     </div>
   {/if}
@@ -1718,7 +1715,7 @@
             <span class="truncate">{item.filename}</span>
             <div class="flex items-center gap-3">
               <span class="opacity-70">{item.compressed_size_mb.toFixed(2)} MB</span>
-              <a class="text-blue-400 underline" href={`/api/jobs/${encodeURIComponent(item.task_id)}/download`} title="Download">⬇️</a>
+              <button class="text-blue-400 underline" on:click={async () => { try { await downloadFile(`/api/jobs/${encodeURIComponent(item.task_id)}/download`); } catch (err: any) { errorText = err?.message || 'Download failed. Try again.'; } }} title="Download">⬇️</button>
             </div>
           </li>
         {/each}

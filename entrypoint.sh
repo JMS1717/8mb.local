@@ -25,6 +25,19 @@ export TMPDIR="${TMPDIR:-/app/uploads/.tmp}"
 mkdir -p "$TMPDIR" /app/uploads /app/outputs /app/state /var/lib/redis 2>/dev/null || true
 log "TMPDIR=$TMPDIR"
 
+# Resolve the initial worker-pool ceiling before supervisord expands the
+# worker command. Keep WORKER_CONCURRENCY=auto intact so the worker's adaptive
+# gate can continue to react to live VRAM/RAM after startup.
+if [ "${WORKER_CONCURRENCY:-auto}" = "auto" ]; then
+  AUTO_WORKERS="$(PYTHONPATH=/app python3 -c 'from shared.concurrency import resolve_worker_concurrency; print(resolve_worker_concurrency("auto"))' 2>/dev/null || true)"
+  case "$AUTO_WORKERS" in
+    ''|*[!0-9]*) log "Automatic worker selection unavailable; using one worker pool slot"; export WORKER_POOL_CONCURRENCY=1 ;;
+    *) export WORKER_POOL_CONCURRENCY="$AUTO_WORKERS"; log "Automatic worker pool ceiling=$WORKER_POOL_CONCURRENCY; live gate remains adaptive" ;;
+  esac
+else
+  export WORKER_POOL_CONCURRENCY="${WORKER_CONCURRENCY}"
+fi
+
 # ----------------------------------------------------------------------------
 # .env sanity check
 # ----------------------------------------------------------------------------

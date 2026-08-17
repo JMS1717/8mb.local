@@ -1,6 +1,7 @@
 <script lang="ts">
   import '../../app.css';
   import { onMount, onDestroy } from 'svelte';
+  import { downloadFile } from '$lib/activeJob';
   
   interface Job {
     task_id: string;
@@ -102,8 +103,15 @@
       };
 
       es.onerror = () => {
-        es.close();
-        sseConnections.delete(taskId);
+        // EventSource reconnects automatically. Closing it here made a
+        // transient network/backend interruption permanently stop live queue
+        // updates until the page was refreshed.
+        const logs = jobLogs.get(taskId) || [];
+        if (!logs.some((line) => line === 'Progress stream reconnecting...')) {
+          logs.push('Progress stream reconnecting...');
+          jobLogs.set(taskId, logs.slice(-100));
+          jobLogs = jobLogs;
+        }
       };
     } catch (e) {
       console.error('Failed to connect SSE:', e);
@@ -399,13 +407,12 @@
             <!-- Actions -->
             <div class="flex flex-col gap-2">
               {#if job.state === 'completed' && job.progress >= 100 && job.output_path}
-                <a 
+                <button
                   class="btn bg-green-600 hover:bg-green-700 text-white text-sm px-4 py-2"
-                  href={`/api/jobs/${job.task_id}/download`}
-                  target="_blank"
+                  on:click={async () => { try { await downloadFile(`/api/jobs/${job.task_id}/download`, job.filename); } catch (err: any) { error = err?.message || 'Download failed. Try again.'; } }}
                 >
                   ⬇️ Download
-                </a>
+                </button>
               {/if}
             </div>
           </div>

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import settings
+from shared.concurrency import worker_concurrency_details
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,29 @@ _FOLDER_WATCH_DEFAULTS: dict[str, Any] = {
     'poll_interval_seconds': 5,
     'baseline_ts': 0.0,
 }
+
+
+def _default_codec_visibility() -> dict[str, bool]:
+    """Return a fresh visibility map for new or damaged settings files."""
+    return {
+        'h264_nvenc': True,
+        'hevc_nvenc': True,
+        'av1_nvenc': True,
+        'h264_qsv': True,
+        'hevc_qsv': True,
+        'av1_qsv': True,
+        'h264_vaapi': True,
+        'hevc_vaapi': True,
+        'av1_vaapi': True,
+        'h264_amf': True,
+        'hevc_amf': True,
+        'av1_amf': True,
+        'libx264': True,
+        'libx265': True,
+        'libsvtav1': True,
+        # libaom-av1 is opt-in (slow); SVT-AV1 is the default CPU AV1 path.
+        'libaom_av1': False,
+    }
 
 
 def _legacy_stock_profiles() -> list[dict[str, Any]]:
@@ -161,43 +185,17 @@ def _ensure_defaults() -> Dict[str, Any]:
         data['default_preset'] = 'Discord 19.7 MB'
         data['default_preset_managed'] = True
         changed = True
-    if 'codec_visibility' not in data:
-        data['codec_visibility'] = {
-            'h264_nvenc': True,
-            'hevc_nvenc': True,
-            'av1_nvenc': True,
-            'h264_qsv': True,
-            'hevc_qsv': True,
-            'av1_qsv': True,
-            'h264_vaapi': True,
-            'hevc_vaapi': True,
-            'av1_vaapi': True,
-            'h264_amf': True,
-            'hevc_amf': True,
-            'av1_amf': True,
-            'libx264': True,
-            'libx265': True,
-            'libsvtav1': True,
-            # libaom-av1 is opt-in (slow); SVT-AV1 is the default CPU AV1 path.
-            'libaom_av1': False,
-        }
+    visibility = data.get('codec_visibility')
+    if not isinstance(visibility, dict):
+        # A hand-edited or truncated settings file must not prevent startup.
+        # Replace only the damaged section; keep profiles and other settings.
+        data['codec_visibility'] = _default_codec_visibility()
         changed = True
     else:
-        # Backfill libsvtav1 visibility for configs that pre-date SVT-AV1 support.
-        if 'libsvtav1' not in data['codec_visibility']:
-            data['codec_visibility']['libsvtav1'] = True
-            changed = True
-        # libaom was historically default-on; new default is off — only backfill when absent.
-        if 'libaom_av1' not in data['codec_visibility']:
-            data['codec_visibility']['libaom_av1'] = False
-            changed = True
-        for key in (
-            'h264_qsv', 'hevc_qsv', 'av1_qsv',
-            'h264_vaapi', 'hevc_vaapi', 'av1_vaapi',
-            'h264_amf', 'hevc_amf', 'av1_amf',
-        ):
-            if key not in data['codec_visibility']:
-                data['codec_visibility'][key] = True
+        # Backfill visibility keys for configs that pre-date newer codecs.
+        for key, default in _default_codec_visibility().items():
+            if key not in visibility:
+                visibility[key] = default
                 changed = True
     if 'retention_hours' not in data:
         env_vars = read_env_file()
@@ -449,24 +447,29 @@ def get_codec_visibility_settings() -> dict:
     """Get codec visibility from settings.json (persists reliably)."""
     data = _ensure_defaults()
     vis = data.get('codec_visibility', {})
-    return {
-        'h264_nvenc': vis.get('h264_nvenc', True),
-        'hevc_nvenc': vis.get('hevc_nvenc', True),
-        'av1_nvenc': vis.get('av1_nvenc', True),
-        'h264_qsv': vis.get('h264_qsv', True),
-        'hevc_qsv': vis.get('hevc_qsv', True),
-        'av1_qsv': vis.get('av1_qsv', True),
-        'h264_vaapi': vis.get('h264_vaapi', True),
-        'hevc_vaapi': vis.get('hevc_vaapi', True),
-        'av1_vaapi': vis.get('av1_vaapi', True),
-        'h264_amf': vis.get('h264_amf', True),
-        'hevc_amf': vis.get('hevc_amf', True),
-        'av1_amf': vis.get('av1_amf', True),
-        'libx264': vis.get('libx264', True),
-        'libx265': vis.get('libx265', True),
-        'libsvtav1': vis.get('libsvtav1', True),
-        'libaom_av1': vis.get('libaom_av1', False),
+    if not isinstance(vis, dict):
+        vis = _default_codec_visibility()
+
+    def as_bool(value: Any, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+        return default
+
+    defaults = _default_codec_visibility()
+    result = {
+        key: as_bool(vis.get(key), default)
+        for key, default in defaults.items()
     }
+    # Recover safely from a manually corrupted file that disabled every CPU
+    # encoder. The write-path already rejects this; the read-path must also
+    # keep the UI and backend usable.
+    if not any(result[key] for key in ('libx264', 'libx265', 'libsvtav1')):
+        result['libx264'] = True
+    return result
 
 
 def update_codec_visibility_settings(settings: dict):
@@ -694,21 +697,34 @@ def update_retention_hours(hours: int):
 
 def get_worker_concurrency() -> int:
     """Get worker concurrency setting"""
+    return int(get_worker_concurrency_details()["concurrency"])
+
+
+def get_worker_concurrency_details() -> dict[str, Any]:
     env_vars = read_env_file()
-    try:
-        return int(os.getenv('WORKER_CONCURRENCY', env_vars.get('WORKER_CONCURRENCY', '4')))
-    except Exception:
-        return 4
+    configured = os.getenv('WORKER_CONCURRENCY', env_vars.get('WORKER_CONCURRENCY', 'auto'))
+    return worker_concurrency_details(configured)
 
 
-def update_worker_concurrency(concurrency: int):
-    """Update worker concurrency setting in .env file"""
-    if concurrency < 1:
-        raise ValueError("concurrency must be >= 1")
-    if concurrency > 20:
-        raise ValueError("concurrency should not exceed 20 for stability")
+def update_worker_concurrency(concurrency: int | str, mode: str | None = None):
+    """Update automatic or explicit worker concurrency in .env."""
+    selected = str(concurrency).strip().lower()
+    if mode and mode.strip().lower() == 'auto':
+        selected = 'auto'
+    if selected in {'automatic', 'system', ''}:
+        selected = 'auto'
+    elif selected != 'auto':
+        try:
+            value = int(selected)
+        except ValueError as exc:
+            raise ValueError("concurrency must be 'auto' or an integer from 1 to 20") from exc
+        if value < 1:
+            raise ValueError("concurrency must be >= 1")
+        if value > 20:
+            raise ValueError("concurrency should not exceed 20 for stability")
+        selected = str(value)
     
     env_vars = read_env_file()
-    env_vars['WORKER_CONCURRENCY'] = str(concurrency)
+    env_vars['WORKER_CONCURRENCY'] = selected
     write_env_file(env_vars)
-    os.environ['WORKER_CONCURRENCY'] = str(concurrency)
+    os.environ['WORKER_CONCURRENCY'] = selected

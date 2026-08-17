@@ -43,6 +43,28 @@ class E2EError(RuntimeError):
     """A failure that should be reported as a failed scenario."""
 
 
+def _cleanup_temporary_context(context: tempfile.TemporaryDirectory) -> None:
+    """Retry Windows file cleanup after taskkill/FFmpeg shutdown.
+
+    The packaged app writes a diagnostic log from a child process. Windows can
+    release that handle a moment after the process tree exits; treating the
+    brief release delay as an application failure makes an otherwise complete
+    E2E run misleading.
+    """
+    last_error: PermissionError | None = None
+    for _ in range(20):
+        try:
+            context.cleanup()
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if os.name != "nt":
+                raise
+            time.sleep(0.25)
+    if last_error is not None:
+        raise last_error
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
@@ -1043,7 +1065,7 @@ def main() -> int:
         summary["runtime_log_tail"] = runtime.logs()
         runtime.stop()
         if temp_context is not None:
-            temp_context.cleanup()
+            _cleanup_temporary_context(temp_context)
 
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     if summary["failures"]:

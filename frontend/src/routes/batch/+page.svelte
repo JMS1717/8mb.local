@@ -11,6 +11,7 @@
     getPresetProfiles,
     openProgressStream,
   } from '$lib/api';
+  import { downloadFile } from '$lib/activeJob';
   import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
   import { availableCodecOptions, codecIcon, type CodecOption } from '$lib/codecs';
   import { takePendingBatchFiles } from '$lib/pendingBatch';
@@ -550,9 +551,14 @@
     }
   }
 
-  function downloadBatchZip() {
+  async function downloadBatchZip() {
     if (!batchId) return;
-    window.location.href = batchZipDownloadUrl(batchId);
+    try {
+      await downloadFile(batchZipDownloadUrl(batchId), `8mblocal_batch_${batchId.slice(0, 8)}.zip`);
+      errorText = '';
+    } catch (err: any) {
+      errorText = err?.message || 'Batch ZIP download failed. Try again.';
+    }
   }
 
   onMount(async () => {
@@ -655,7 +661,7 @@
   <div class="flex items-center justify-between">
     <div>
       <h1 class="text-2xl font-bold">Batch Upload</h1>
-      <p class="text-sm text-gray-400">Select multiple videos, choose a preset, and process everything in sequence.</p>
+      <p class="text-sm text-gray-400">Select multiple videos, choose a preset, and process them in parallel when capacity allows.</p>
     </div>
     <div class="flex gap-2">
       <a href="/" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors text-sm">← Home</a>
@@ -1087,7 +1093,7 @@
                 </td>
                 <td class="p-2">
                   {#if item.state === 'completed'}
-                    <a class="text-blue-400 underline" href={downloadUrl(item.task_id)}>Download</a>
+                    <button class="text-blue-400 underline" on:click={async () => { try { await downloadFile(downloadUrl(item.task_id), item.output_filename); } catch (err: any) { errorText = err?.message || 'Download failed. Try again.'; } }}>Download</button>
                   {:else}
                     <span class="text-gray-500">Pending</span>
                   {/if}

@@ -97,6 +97,7 @@
 	let newPresetName: string = '';
 	let retentionHours: number = 1;
 	  let workerConcurrency: number = 4;
+	  let workerConcurrencyMode: 'auto' | 'manual' = 'auto';
 	  let folderWatch: FolderWatchSettings = {
 		enabled: false, input_folder: '', profile: null, output_mode: 'same_folder',
 		output_folder: '', original_behavior: 'keep', existing_files: 'new_only',
@@ -170,7 +171,7 @@
 	  } catch {}
 	  try {
 		const wc = await fetch('/api/settings/worker-concurrency');
-		if (wc.ok) { const js = await wc.json(); workerConcurrency = js.concurrency ?? 4; }
+		if (wc.ok) { const js = await wc.json(); workerConcurrency = js.concurrency ?? 12; workerConcurrencyMode = js.mode === 'manual' ? 'manual' : 'auto'; }
 	  } catch {}
 	  try {
 		const fw = await fetch('/api/settings/folder-watch');
@@ -413,9 +414,9 @@
 	// Worker concurrency
 	async function saveConcurrency(){
 		saving=true; error=''; message='';
-		if (workerConcurrency < 1) { error='Concurrency must be at least 1'; saving=false; return; }
-		if (workerConcurrency > 20) { error='Concurrency should not exceed 20'; saving=false; return; }
-		try { const res = await fetch('/api/settings/worker-concurrency', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ concurrency: workerConcurrency }) });
+		if (workerConcurrencyMode === 'manual' && workerConcurrency < 1) { error='Concurrency must be at least 1'; saving=false; return; }
+		if (workerConcurrencyMode === 'manual' && workerConcurrency > 20) { error='Concurrency should not exceed 20'; saving=false; return; }
+		try { const res = await fetch('/api/settings/worker-concurrency', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mode: workerConcurrencyMode, concurrency: workerConcurrency }) });
 			if (res.ok){ 
 				const d = await res.json();
 				message = d.message || 'Saved worker concurrency. Restart container to apply.'; 
@@ -766,14 +767,26 @@
 	<div class="card">
 		<div class="title">🚀 Worker Concurrency</div>
 		<p class="label" style="color:#9ca3af; margin-bottom: 12px;">
-			Maximum number of jobs that can compress simultaneously. Higher values allow more parallel jobs but require more GPU/CPU resources.
+			Choose a safe starting limit for simultaneous jobs. Automatic mode uses available CPU, RAM, and detected GPU memory; it does not reserve that memory.
 		</p>
 		
 		<div class="row">
 			<div>
-				<label class="label" for="worker-concurrency">Max concurrent jobs</label>
-				<input id="worker-concurrency" class="input" type="number" min="1" max="20" bind:value={workerConcurrency} />
+				<label class="label" for="worker-concurrency-mode">Concurrency mode</label>
+				<select id="worker-concurrency-mode" class="select" bind:value={workerConcurrencyMode}>
+					<option value="auto">Automatic (recommended)</option>
+					<option value="manual">Manual limit</option>
+				</select>
+				{#if workerConcurrencyMode === 'auto'}
+					<div style="font-size:12px; color:#9ca3af; margin-top:6px">Current live estimate: {workerConcurrency} job(s). Automatic mode rechecks free VRAM/RAM as jobs start.</div>
+				{/if}
 			</div>
+			{#if workerConcurrencyMode === 'manual'}
+				<div>
+					<label class="label" for="worker-concurrency">Manual max concurrent jobs</label>
+					<input id="worker-concurrency" class="input" type="number" min="1" max="20" bind:value={workerConcurrency} />
+				</div>
+			{/if}
 			<div style="display:flex; align-items:flex-end">
 				<button class="btn" on:click={saveConcurrency} disabled={saving}>{saving ? 'Saving…' : 'Save concurrency'}</button>
 			</div>
@@ -784,30 +797,30 @@
 			<div style="margin-top: 8px; font-size: 14px; color: #d1d5db; line-height: 1.6;">
 				<p style="margin-bottom: 8px;"><strong>Hardware-based recommendations:</strong></p>
 				<ul style="margin-left: 20px; margin-bottom: 12px;">
-					<li><strong>Quadro RTX 4000 / RTX 3060+:</strong> 6-10 concurrent jobs (excellent NVENC throughput)</li>
-					<li><strong>GTX 1660 / RTX 2060:</strong> 3-5 concurrent jobs (good NVENC performance)</li>
-					<li><strong>GTX 1050 Ti / Entry-level:</strong> 2-3 concurrent jobs (basic NVENC)</li>
+					<li><strong>Large modern NVIDIA GPU:</strong> automatic mode can reach the tested ceiling when free VRAM and RAM allow it</li>
+					<li><strong>Mid-range NVIDIA GPU:</strong> automatic mode starts lower from total VRAM and scales down if free VRAM is limited</li>
+					<li><strong>Entry-level or CPU-only:</strong> automatic mode stays conservative to protect the system</li>
 					<li><strong>CPU-only encoding:</strong> 1-2 jobs per 4 CPU cores (very slow, high CPU usage)</li>
 				</ul>
 				
 				<p style="margin-bottom: 8px;"><strong>Performance considerations:</strong></p>
 				<ul style="margin-left: 20px; margin-bottom: 12px;">
-					<li><strong>NVENC hardware limit:</strong> Most NVIDIA GPUs support 2-3 NVENC sessions natively, but driver unlocks allow unlimited sessions</li>
-					<li><strong>Memory usage:</strong> Each job uses ~200-500MB RAM. Monitor system memory with high concurrency</li>
-					<li><strong>GPU memory:</strong> Each NVENC encode uses ~100-200MB VRAM. Check available VRAM</li>
+					<li><strong>Admission:</strong> automatic mode uses a VRAM headroom reserve and a per-job estimate; it does not reserve the whole GPU</li>
+					<li><strong>Memory usage:</strong> each job varies by input, codec, and FFmpeg filters, so the live gate is intentionally conservative</li>
+					<li><strong>GPU memory:</strong> external GPU workloads reduce the active automatic limit until free VRAM returns</li>
 					<li><strong>Disk I/O:</strong> Higher concurrency increases disk read/write. Use SSD for best performance</li>
 				</ul>
 
 				<p style="margin-bottom: 8px;"><strong>Testing recommendations:</strong></p>
 				<ul style="margin-left: 20px;">
-					<li>Start with 4 concurrent jobs and gradually increase while monitoring GPU utilization</li>
-					<li>Watch for thermal throttling on high concurrency (GPU temps >80°C)</li>
-					<li>Monitor job completion times - if they increase significantly, reduce concurrency</li>
-					<li>Check queue page during high load to see which jobs are running simultaneously</li>
+					<li>Use automatic mode first; it raises or lowers admission as resources change</li>
+					<li>Watch completion time and GPU temperature for unusually large or CPU-heavy inputs</li>
+					<li>Use a manual limit only after measuring the target workload</li>
+					<li>Check the queue page during high load to see which jobs are running simultaneously</li>
 				</ul>
 
 				<p style="margin-top: 12px; padding: 8px; background: #fef3c7; color: #92400e; border-radius: 4px;">
-					⚠️ <strong>Note:</strong> Container restart required for changes to take effect. Current running jobs will complete before new setting applies.
+					⚠️ <strong>Note:</strong> Automatic resource changes apply to new encode starts. A configured manual limit still requires a restart; current jobs finish normally.
 				</p>
 			</div>
 		</details>

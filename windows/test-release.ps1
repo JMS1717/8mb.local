@@ -71,12 +71,20 @@ $desktopShortcut = $null
 $authHeaders = @{}
 $authUser = $env:RELEASE_SMOKE_AUTH_USER
 $authPass = $env:RELEASE_SMOKE_AUTH_PASS
+$previousAuthEnabled = $env:AUTH_ENABLED
+$previousAuthUser = $env:AUTH_USER
+$previousAuthPass = $env:AUTH_PASS
 if ($TestAuth) {
     if ([string]::IsNullOrWhiteSpace($authUser)) {
         throw 'TestAuth requires RELEASE_SMOKE_AUTH_USER in the process environment.'
     }
     $authMaterial = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${authUser}:$authPass"))
     $authHeaders = @{ Authorization = "Basic $authMaterial" }
+    # The packaged desktop process inherits these isolated smoke-test values.
+    # Do not write them to disk or include them in logs.
+    $env:AUTH_ENABLED = 'true'
+    $env:AUTH_USER = $authUser
+    $env:AUTH_PASS = $authPass
 }
 $dataSentinel = Join-Path $AppData 'preserve-on-uninstall.txt'
 [System.IO.File]::WriteAllText($dataSentinel, '8mb.local release-test user data')
@@ -479,7 +487,8 @@ try {
         $client.DefaultRequestHeaders.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Basic', $authMaterial)
         $unauthenticatedStatus = 0
         try {
-            Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/api/codecs/available" -TimeoutSec 10 | Out-Null
+            $unauthenticatedResponse = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/api/codecs/available" -TimeoutSec 10
+            $unauthenticatedStatus = [int]$unauthenticatedResponse.StatusCode
         } catch {
             if ($null -ne $_.Exception.Response) {
                 $unauthenticatedStatus = [int]$_.Exception.Response.StatusCode
@@ -698,6 +707,11 @@ public static class NativeWindowClose {
     exit 1
 } finally {
     if ($null -ne $client) { $client.Dispose() }
+    if ($TestAuth) {
+        $env:AUTH_ENABLED = $previousAuthEnabled
+        $env:AUTH_USER = $previousAuthUser
+        $env:AUTH_PASS = $previousAuthPass
+    }
     if ($null -ne $process) {
         # A windowless PyInstaller process may detach from the PowerShell
         # process object before the request finishes.  Verify both PID and

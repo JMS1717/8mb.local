@@ -53,6 +53,33 @@ def _safe_output_path(value: object) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def _write_batch_zip(files_to_zip: list[Path], temporary_zip_path: Path, zip_path: Path) -> None:
+    """Build and atomically publish a batch archive outside the event loop."""
+    seen_names: set[str] = set()
+    try:
+        with zipfile.ZipFile(temporary_zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for src in files_to_zip:
+                arcname = src.name
+                if arcname in seen_names:
+                    stem = src.stem
+                    suffix = src.suffix
+                    n = 2
+                    while f"{stem}_{n}{suffix}" in seen_names:
+                        n += 1
+                    arcname = f"{stem}_{n}{suffix}"
+                seen_names.add(arcname)
+                archive.write(src, arcname=arcname)
+        # Publish a complete archive atomically so concurrent downloads never
+        # receive a partially-written ZIP.
+        os.replace(temporary_zip_path, zip_path)
+    except Exception:
+        try:
+            temporary_zip_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 @router.get("/api/jobs/{task_id}/status", response_model=StatusResponse, dependencies=[Depends(basic_auth)])
 async def job_status(task_id: str):
     res = celery_app.AsyncResult(task_id)
@@ -190,19 +217,8 @@ async def download_batch_zip(batch_id: str):
         raise HTTPException(status_code=404, detail="No completed files available for zip download")
 
     zip_path = OUTPUTS_DIR / f"batch_{batch_id}.zip"
-    seen_names: set[str] = set()
-    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for src in files_to_zip:
-            arcname = src.name
-            if arcname in seen_names:
-                stem = src.stem
-                suffix = src.suffix
-                n = 2
-                while f"{stem}_{n}{suffix}" in seen_names:
-                    n += 1
-                arcname = f"{stem}_{n}{suffix}"
-            seen_names.add(arcname)
-            archive.write(src, arcname=arcname)
+    temporary_zip_path = OUTPUTS_DIR / f".batch_{batch_id}.{uuid.uuid4().hex}.tmp"
+    await asyncio.to_thread(_write_batch_zip, files_to_zip, temporary_zip_path, zip_path)
 
     filename = f"8mblocal_batch_{batch_id[:8]}.zip"
     return FileResponse(str(zip_path), filename=filename, media_type="application/zip")

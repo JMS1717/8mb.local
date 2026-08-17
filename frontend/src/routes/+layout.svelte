@@ -28,7 +28,7 @@
 			try {
 				const data = JSON.parse(event.data);
 				if (data.type === 'done') {
-					autoDownloadOnce(taskId, downloadUrl(taskId));
+				void autoDownloadOnce(taskId, downloadUrl(taskId));
 					clearActiveJobId(taskId);
 					stopMonitoring();
 				} else if (data.type === 'error' || data.type === 'canceled') {

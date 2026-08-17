@@ -101,6 +101,34 @@ class TestSettingsValidation(unittest.TestCase):
                         "libsvtav1": False,
                     })
 
+    def test_corrupt_codec_visibility_recovers_without_crashing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps({"codec_visibility": ["not", "a", "mapping"]}), encoding="utf-8")
+            with patch.object(settings_manager, "SETTINGS_FILE", path):
+                visible = settings_manager.get_codec_visibility_settings()
+
+        self.assertTrue(visible["libx264"])
+        self.assertTrue(visible["libx265"])
+        self.assertTrue(visible["libsvtav1"])
+
+    def test_corrupt_codec_values_are_coerced_and_cpu_fallback_is_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps({"codec_visibility": {
+                "libx264": "false",
+                "libx265": "0",
+                "libsvtav1": False,
+                "h264_nvenc": "true",
+            }}), encoding="utf-8")
+            with patch.object(settings_manager, "SETTINGS_FILE", path):
+                visible = settings_manager.get_codec_visibility_settings()
+
+        self.assertTrue(visible["libx264"])
+        self.assertFalse(visible["libx265"])
+        self.assertFalse(visible["libsvtav1"])
+        self.assertTrue(visible["h264_nvenc"])
+
     def test_saving_defaults_preserves_profile_frame_rate_cap(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"

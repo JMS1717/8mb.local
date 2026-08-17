@@ -15,7 +15,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "${APP_VERSION:-140.0.0.0}"
+        BUILD_VERSION: "${APP_VERSION:-141.0.0.0}"
     image: jms1717/8mblocal:latest
     ports:
       - "8001:8001"
@@ -45,5 +45,5 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
       # Parallel encode jobs (each runs FFmpeg). Raise to use more CPU/RAM; watch GPU VRAM if using NVENC.
-      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-4}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-auto}
     restart: unless-stopped

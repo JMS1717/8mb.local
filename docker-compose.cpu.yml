@@ -12,7 +12,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "${APP_VERSION:-140.0.0.0}"
+        BUILD_VERSION: "${APP_VERSION:-141.0.0.0}"
     image: jms1717/8mblocal:latest
     ports:
       - "8001:8001"
@@ -36,5 +36,5 @@ services:
       - MEDIA_MEMORY_LIMIT_GB=${MEDIA_MEMORY_LIMIT_GB:-10}
       - HISTORY_FILE=/app/state/history.json
       - TMPDIR=/app/uploads/.tmp
-      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-4}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-auto}
     restart: unless-stopped

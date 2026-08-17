@@ -419,6 +419,15 @@ function Run-Tests {
     $package = Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json
     $npm = Get-CommandPath 'npm'
     Invoke-Stage -Name 'frontend-npm-ci' -Executable $npm -Arguments @('ci', '--loglevel=error', '--no-audit', '--no-fund') -WorkingDirectory (Join-Path $Root 'frontend') | Out-Null
+    Invoke-Stage -Name 'frontend-npm-audit' -Executable $npm -Arguments @('audit', '--omit=dev', '--audit-level=low') -WorkingDirectory (Join-Path $Root 'frontend') | Out-Null
+    $frontendDependencyCheck = Join-Path $Root 'scripts\check-frontend-dependencies.ps1'
+    if (-not (Test-Path -LiteralPath $frontendDependencyCheck -PathType Leaf)) {
+        throw "Frontend dependency security check is missing: $frontendDependencyCheck"
+    }
+    Invoke-Stage -Name 'frontend-dependency-security' -Executable 'powershell.exe' -Arguments @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $frontendDependencyCheck,
+        '-RepositoryRoot', $Root
+    ) | Out-Null
     $npx = Get-CommandPath 'npx'
     if ($null -eq $npx) {
         throw 'The npx command is required to run the frontend Svelte check.'

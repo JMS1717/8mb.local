@@ -67,7 +67,7 @@ $pageText = Require-Text (Join-RepoPath @('frontend', 'src', 'routes', '+page.sv
 
 $dockerfilePath = Join-RepoPath @('Dockerfile')
 $dockerText = Require-Text $dockerfilePath 'ARG\s+BUILD_VERSION' 'Docker build version argument'
-if ($dockerText -and $dockerText -notmatch ('(?m)^\s*ARG\s+BUILD_VERSION\s*=\s*' + [regex]::Escape($FullVersion) + '\s*$')) {
+if ($dockerText -and $dockerText -notmatch ('(?m)^\s*ARG\s+BUILD_VERSION\s*=\s*' + [regex]::Escape($FullVersion) + '\s*\r?$')) {
     Fail 'Dockerfile BUILD_VERSION default is not synchronized with VERSION.'
 }
 foreach ($composeName in @('docker-compose.yml', 'docker-compose.cpu.yml', 'docker-compose.vaapi.yml')) {

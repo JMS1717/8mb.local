@@ -15,6 +15,9 @@ from app import deps
 
 
 class WindowsTemporaryStorageTests(unittest.TestCase):
+    def tearDown(self):
+        deps._WINDOWS_MEMORY_RESERVED_BYTES = 0
+
     def test_disk_mode_does_not_apply_temporary_hint(self):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "input.mp4"
@@ -30,9 +33,9 @@ class WindowsTemporaryStorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "input.mp4"
             upload = UploadFile(file=io.BytesIO(b"media"), filename="input.mp4")
-            with patch.object(deps.settings, "MEDIA_STORAGE", "auto"), patch.object(
-                deps, "mark_file_temporary", return_value=True
-            ) as mark:
+            with patch.object(deps.os, "name", "nt"), patch.object(
+                deps.settings, "MEDIA_STORAGE", "auto"
+            ), patch.object(deps, "mark_file_temporary", return_value=True) as mark:
                 asyncio.run(deps.save_upload_file(upload, destination))
             mark.assert_called_once_with(destination)
             self.assertEqual(destination.read_bytes(), b"media")
@@ -41,11 +44,35 @@ class WindowsTemporaryStorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "input.mp4"
             upload = UploadFile(file=io.BytesIO(b"media"), filename="input.mp4")
-            with patch.object(deps.settings, "MEDIA_STORAGE", "memory"), patch.object(
-                deps, "mark_file_temporary", return_value=False
-            ):
+            with patch.object(deps.os, "name", "nt"), patch.object(
+                deps.settings, "MEDIA_STORAGE", "memory"
+            ), patch.object(deps, "mark_file_temporary", return_value=False):
                 with self.assertRaisesRegex(HTTPException, "RAM-preferred"):
                     asyncio.run(deps.save_upload_file(upload, destination))
+            self.assertFalse(destination.exists())
+
+    def test_windows_auto_falls_back_without_cache_hint_when_budget_is_full(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "input.mp4"
+            upload = UploadFile(file=io.BytesIO(b"media"), filename="input.mp4")
+            with patch.object(deps.os, "name", "nt"), patch.object(
+                deps.settings, "MEDIA_STORAGE", "auto"
+            ), patch.object(deps, "_windows_memory_upload_limit_bytes", return_value=1), patch.object(
+                deps, "mark_file_temporary"
+            ) as mark:
+                asyncio.run(deps.save_upload_file(upload, destination, allow_dynamic_storage=True))
+            mark.assert_not_called()
+            self.assertEqual(destination.read_bytes(), b"media")
+
+    def test_windows_memory_mode_rejects_before_writing_when_budget_is_full(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "input.mp4"
+            upload = UploadFile(file=io.BytesIO(b"media"), filename="input.mp4")
+            with patch.object(deps.os, "name", "nt"), patch.object(
+                deps.settings, "MEDIA_STORAGE", "memory"
+            ), patch.object(deps, "_windows_memory_upload_limit_bytes", return_value=1):
+                with self.assertRaisesRegex(HTTPException, "Insufficient available Windows RAM budget"):
+                    asyncio.run(deps.save_upload_file(upload, destination, allow_dynamic_storage=True))
             self.assertFalse(destination.exists())
 
     @unittest.skipUnless(os.name == "nt", "Windows file attributes are Windows-only")

@@ -1,5 +1,5 @@
 #define MyAppName "8mb.local"
-#define MyAppVersion "140.0.0.0"
+#define MyAppVersion "141.0.0.0"
 #define MyAppPublisher "JMS1717"
 #define MyAppExeName "8mblocal.exe"
 

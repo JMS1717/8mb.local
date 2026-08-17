@@ -43,44 +43,80 @@ async def compress(req: CompressRequest):
     output_name = build_output_name(input_path, task_id, req.container, bool(req.audio_only or False))
     output_path = OUTPUTS_DIR / output_name
 
+    # Persist the queue record before dispatching. A worker can start and even
+    # finish very quickly; dispatch-first made a Redis/settings failure leave a
+    # successful output with no queue metadata and no usable response.
+    try:
+        await store_job_metadata(
+            task_id, req.job_id, req.filename, req.target_size_mb,
+            req.video_codec, str(input_path), str(output_path),
+        )
+    except Exception as exc:
+        # ``store_job_metadata`` writes the job key and active-job index as
+        # separate operations. If its second operation fails, remove any
+        # partial record so a failed request cannot leave an invisible queue
+        # entry behind.
+        try:
+            await redis.delete(f"job:{task_id}")
+            await redis.zrem("jobs:active", task_id)
+        except Exception:
+            pass
+        try:
+            input_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("compress: could not remove unqueued input %s", input_path)
+        logger.exception("compress: failed to persist queue metadata for %s", task_id)
+        raise HTTPException(status_code=500, detail="Failed to record compression job") from exc
+
     logger.info(
         "compress: dispatching task_id=%s codec=%s target=%sMB in=%s out=%s",
         task_id, req.video_codec, req.target_size_mb, input_path.name, output_path.name,
     )
-    task = celery_app.send_task(
-        "worker.worker.compress_video",
-        task_id=task_id,
-        kwargs=dict(
-            job_id=req.job_id,
-            input_path=str(input_path),
-            output_path=str(output_path),
-            target_size_mb=req.target_size_mb,
-            target_video_bitrate_kbps=req.target_video_bitrate_kbps,
-            video_codec=req.video_codec,
-            audio_codec=req.audio_codec,
-            audio_bitrate_kbps=req.audio_bitrate_kbps,
-            preset=req.preset,
-            tune=req.tune,
-            max_width=req.max_width,
-            max_height=req.max_height,
-            start_time=req.start_time,
-            end_time=req.end_time,
-            force_hw_decode=bool(req.force_hw_decode or False),
-            fast_mp4_finalize=bool(req.fast_mp4_finalize or False),
-            auto_resolution=bool(req.auto_resolution or False),
-            min_auto_resolution=req.min_auto_resolution,
-            target_resolution=req.target_resolution,
-            audio_only=bool(req.audio_only or False),
-            max_output_fps=req.max_output_fps,
-            transient_input=True,
-        ),
-    )
+    try:
+        task = celery_app.send_task(
+            "worker.worker.compress_video",
+            task_id=task_id,
+            kwargs=dict(
+                job_id=req.job_id,
+                input_path=str(input_path),
+                output_path=str(output_path),
+                target_size_mb=req.target_size_mb,
+                target_video_bitrate_kbps=req.target_video_bitrate_kbps,
+                video_codec=req.video_codec,
+                audio_codec=req.audio_codec,
+                audio_bitrate_kbps=req.audio_bitrate_kbps,
+                preset=req.preset,
+                tune=req.tune,
+                max_width=req.max_width,
+                max_height=req.max_height,
+                start_time=req.start_time,
+                end_time=req.end_time,
+                force_hw_decode=bool(req.force_hw_decode or False),
+                fast_mp4_finalize=bool(req.fast_mp4_finalize or False),
+                auto_resolution=bool(req.auto_resolution or False),
+                min_auto_resolution=req.min_auto_resolution,
+                target_resolution=req.target_resolution,
+                audio_only=bool(req.audio_only or False),
+                max_output_fps=req.max_output_fps,
+                transient_input=True,
+            ),
+        )
+    except Exception as exc:
+        # A broker can acknowledge a task just before raising locally. Request
+        # cooperative cancellation and keep the metadata/input long enough for
+        # the worker or retention cleanup to finish safely; do not race FFmpeg
+        # by unlinking a possibly active source here.
+        try:
+            await redis.set(f"cancel:{task_id}", "1", ex=3600)
+            celery_app.control.revoke(task_id, terminate=False)
+        except Exception:
+            pass
+        logger.exception("compress: failed to enqueue task %s", task_id)
+        raise HTTPException(status_code=503, detail="Failed to enqueue compression job") from exc
     try:
         await redis.publish(f"progress:{task.id}", orjson.dumps({"type":"log","message":"Job queued – waiting for worker…"}).decode())
     except Exception:
         pass
-    
-    await store_job_metadata(task.id, req.job_id, req.filename, req.target_size_mb, req.video_codec, str(input_path), str(output_path))
     
     return {"task_id": task.id}
 

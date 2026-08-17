@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { downloadFile } from '$lib/activeJob';
 
 	interface HistoryEntry {
 		timestamp: string;
@@ -211,7 +212,7 @@
 					</div>
 
 					<div class="entry-actions">
-						<a class="btn-secondary" href={downloadUrl(entry.task_id)} target="_blank" rel="noopener">⬇️ Download</a>
+						<button class="btn-secondary" on:click={async () => { try { await downloadFile(downloadUrl(entry.task_id), entry.filename); } catch (err: any) { error = err?.message || 'Download failed. Try again.'; } }}>⬇️ Download</button>
 						<button class="btn-delete" on:click={() => deleteEntry(entry.task_id)}>
 							🗑️ Delete
 						</button>

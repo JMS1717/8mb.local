@@ -70,9 +70,9 @@ async def change_password(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/api/settings/presets")
+@router.get("/api/settings/presets", dependencies=[Depends(basic_auth)])
 async def get_default_presets():
-    """Get default preset values (no auth required for loading defaults)"""
+    """Get persisted preset values."""
     try:
         presets = settings_manager.get_default_presets()
         return presets
@@ -101,7 +101,7 @@ async def update_default_presets(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/api/settings/preset-profiles")
+@router.get("/api/settings/preset-profiles", dependencies=[Depends(basic_auth)])
 async def get_preset_profiles() -> PresetProfilesResponse:
     try:
         data = settings_manager.get_preset_profiles()
@@ -146,9 +146,9 @@ async def delete_preset_profile(name: str, _auth=Depends(basic_auth)):
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.get("/api/settings/codecs")
+@router.get("/api/settings/codecs", dependencies=[Depends(basic_auth)])
 async def get_codec_visibility_settings() -> CodecVisibilitySettings:
-    """Get codec visibility settings (no auth required)"""
+    """Get persisted codec visibility settings."""
     try:
         settings_data = settings_manager.get_codec_visibility_settings()
         return CodecVisibilitySettings(**settings_data)
@@ -171,9 +171,9 @@ async def update_codec_visibility_settings(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/api/settings/history")
+@router.get("/api/settings/history", dependencies=[Depends(basic_auth)])
 async def get_history_settings():
-    """Get history enabled setting (no auth required)"""
+    """Get the persisted history setting."""
     return {"enabled": settings_manager.get_history_enabled()}
 
 
@@ -218,7 +218,7 @@ async def delete_history_entry(task_id: str, _auth=Depends(basic_auth)):
         raise HTTPException(status_code=404, detail="History entry not found")
 
 
-@router.get("/api/settings/size-buttons")
+@router.get("/api/settings/size-buttons", dependencies=[Depends(basic_auth)])
 async def get_size_buttons() -> SizeButtons:
     try:
         buttons = settings_manager.get_size_buttons()
@@ -236,7 +236,7 @@ async def update_size_buttons(size_buttons: SizeButtons, _auth=Depends(basic_aut
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get('/api/settings/folder-watch')
+@router.get('/api/settings/folder-watch', dependencies=[Depends(basic_auth)])
 async def get_folder_watch_settings():
     data = settings_manager.get_folder_watch_settings()
     try:
@@ -262,7 +262,7 @@ async def update_folder_watch_settings(payload: FolderWatchSettings, _auth=Depen
         raise HTTPException(status_code=500, detail='Folder Watch could not be updated') from exc
 
 
-@router.get("/api/settings/retention-hours")
+@router.get("/api/settings/retention-hours", dependencies=[Depends(basic_auth)])
 async def get_retention_hours() -> RetentionHours:
     try:
         return RetentionHours(hours=settings_manager.get_retention_hours())
@@ -279,22 +279,24 @@ async def update_retention_hours(req: RetentionHours, _auth=Depends(basic_auth))
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/api/settings/worker-concurrency")
+@router.get("/api/settings/worker-concurrency", dependencies=[Depends(basic_auth)])
 async def get_worker_concurrency(_auth=Depends(basic_auth)):
-    """Get worker concurrency setting"""
-    return {"concurrency": settings_manager.get_worker_concurrency()}
+    """Get configured mode and effective worker concurrency."""
+    return settings_manager.get_worker_concurrency_details()
 
 
 @router.put("/api/settings/worker-concurrency")
 async def update_worker_concurrency_endpoint(req: dict, _auth=Depends(basic_auth)):
-    """Update worker concurrency (requires container restart to take effect)"""
+    """Update worker concurrency (requires container restart to take effect)."""
     try:
-        concurrency = int(req.get("concurrency", 4))
-        settings_manager.update_worker_concurrency(concurrency)
+        mode = str(req.get("mode", "")).strip().lower() or None
+        requested = req.get("concurrency", "auto" if mode == "auto" else 4)
+        settings_manager.update_worker_concurrency(requested, mode=mode)
+        details = settings_manager.get_worker_concurrency_details()
         return {
             "status": "success",
             "message": "Concurrency updated. Restart container for changes to take effect.",
-            "concurrency": concurrency,
+            **details,
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -37,6 +37,12 @@ Thumbs.db
 # App data
 uploads/
 outputs/
+dist/
+build/
+frontend/build/
+frontend/.svelte-kit/
+state/
+redis-data/
 *.log
 settings.json
 history.json

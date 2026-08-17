@@ -1,5 +1,77 @@
 # Changelog
 
+## [v141] - 2026-08-17
+
+This section describes the v141 release. The Microsoft Store submission was
+approved. The GitHub commit and release publication are being prepared.
+
+### Security and release workflow
+
+- Fixed the transitive `cookie` advisory by enforcing patched `cookie 0.7.2`
+  in the frontend lockfile and npm override.
+- Added a required frontend `npm audit` stage to `release-local.ps1`.
+- Added a dependency regression check that verifies the npm override, lockfile,
+  and installed package all resolve to the patched cookie version.
+- Extended the existing root `VERSION`-driven local release workflow with
+  stronger synchronization checks and clearer incomplete-build reporting.
+- Reduced Docker build context size by excluding local release outputs, build
+  caches, frontend caches, and local state from `.dockerignore`.
+
+### Codec and playback reliability
+
+- Hardened saved codec visibility recovery so malformed or incomplete settings
+  cannot hide every CPU fallback or crash startup.
+- Preserved user-selected codec visibility and selections through hardware
+  detection and application restart, with clear fallback when a selected
+  hardware encoder is unavailable.
+
+### Batch, queue, and cleanup reliability
+
+- Added adaptive batch concurrency based on available system/GPU resources.
+- Kept live progress streams reconnectable after transient network or backend
+  interruptions so completed jobs do not appear stuck on the main or Queue
+  pages.
+- Moved batch archive creation off the API event loop and publish ZIPs
+  atomically so downloads cannot observe partial files.
+- Added collision-safe batch archive entries and improved batch download flow.
+- Added Redis adaptive-concurrency lease renewal for long-running jobs.
+- Improved dispatch ordering, temporary-file cleanup, history retention, and
+  restart recovery for direct and Folder Watch jobs.
+
+### Windows and storage
+
+- Improved native Windows restart handling for saved media-storage,
+  memory-budget, retention, history, concurrency, and logging settings.
+- Expanded Windows download, settings, profile, and packaging smoke coverage.
+
+### API and hardening
+
+- Addressed GitHub issue #23 by documenting direct API use for single-file and
+  batch workflows, including upload, compression, status, cancellation, and
+  downloads. FastAPI's `/docs` and `/openapi.json` are also available.
+- Addressed GitHub issue #37 by routing multipart and FFmpeg temporary files to
+  the mounted uploads volume (`/app/uploads/.tmp`) instead of Docker's
+  writable container layer. Automatic storage can use shared memory when safe
+  and falls back to the mounted path. Targeted tests cover this behavior; a
+  literal 20 GB endurance upload was not run.
+- Tightened download/path containment checks.
+- Protected settings reads consistently with the existing authentication mode.
+- Hardened SPA fallback routing against traversal and API-path masking.
+- Preserved the existing Folder Watch settings flow while adding safer pending
+  job recovery after an API restart.
+
+### Follow-up reliability fixes
+
+- Recovered safely from malformed codec-visibility settings while preserving a
+  usable CPU fallback.
+- Restored persisted Folder Watch jobs after an API restart.
+- Recorded direct and Folder Watch queue metadata before dispatch and cleaned
+  partial direct-job metadata when persistence fails.
+- Reloaded persisted native Windows media, memory-budget, retention, history,
+  concurrency, and logging settings on application restart.
+
+---
+
 ## [v138] - 2026-08-09
 
 ### Production hardening

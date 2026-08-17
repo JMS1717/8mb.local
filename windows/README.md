@@ -51,7 +51,7 @@ The active version comes from the root `VERSION` file. For the complete local
 release workflow, use the versioned command from the repository root:
 
 ```powershell
-.\release-local.ps1 -Version 140.0.0.0
+.\release-local.ps1 -Version 141.0.0.0
 ```
 
 For only the native Windows build, use Windows PowerShell with Node.js,

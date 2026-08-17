@@ -99,10 +99,10 @@ Public instances run by people who offer their **8mb.local** install for anyone 
 
 This repository is one shared source codebase for the frontend, backend, worker, Windows packages, and Docker image. The root `VERSION` file is the single active application-version source. Generated UI/backend version modules and packaging metadata are synchronized by `scripts\set-version.ps1` and verified by `scripts\check-version.ps1`.
 
-One command runs the automated checks and builds the portable EXE, installer EXE, Store-submission MSIX, and local Docker image:
+One command runs the automated checks and builds the portable EXE, installer EXE, Store MSIX, and local Docker image:
 
 ```powershell
-.\release-local.ps1 -Version 140.0.0.0
+.\release-local.ps1 -Version 141.0.0.0
 ```
 
 GitHub is not required to generate these files. GitHub Actions may still provide an independent compatibility check later. The local workflow never pushes its Docker image, publishes a release, deploys the application, or submits the MSIX; Microsoft Partner Center remains a separate manual submission step.
@@ -130,19 +130,19 @@ Useful commands:
 
 ```powershell
 # Validate tools and show the plan without changing versions or building
-.\release-local.ps1 -Version 140.0.0.0 -DryRun
+.\release-local.ps1 -Version 141.0.0.0 -DryRun
 
 # Full local release
-.\release-local.ps1 -Version 140.0.0.0
+.\release-local.ps1 -Version 141.0.0.0
 
 # Windows artifacts only
-.\release-local.ps1 -Version 140.0.0.0 -SkipDocker
+.\release-local.ps1 -Version 141.0.0.0 -SkipDocker
 
 # Docker artifact only
-.\release-local.ps1 -Version 140.0.0.0 -SkipWindows
+.\release-local.ps1 -Version 141.0.0.0 -SkipWindows
 
 # Windows EXE and installer without MSIX
-.\release-local.ps1 -Version 140.0.0.0 -SkipMsix
+.\release-local.ps1 -Version 141.0.0.0 -SkipMsix
 ```
 
 `-SkipTests` is troubleshooting-only and marks the result incomplete. `-OutputDir` selects another output folder, `-KeepTemp` preserves temporary files, and `-Overwrite` may reuse only a release directory previously created and marked by this script. Arbitrary existing directories, source directories, and ancestor paths are protected from overwrite.
@@ -150,8 +150,8 @@ Useful commands:
 Verify generated checksums from the release directory:
 
 ```powershell
-Get-Content .\dist\release\140.0.0.0\SHA256SUMS.txt
-Get-FileHash .\dist\release\140.0.0.0\8mblocal.exe -Algorithm SHA256
+Get-Content .\dist\release\141.0.0.0\SHA256SUMS.txt
+Get-FileHash .\dist\release\141.0.0.0\8mblocal.exe -Algorithm SHA256
 ```
 
 When a build fails, inspect `TEST-RESULTS.md`, `BUILD-MANIFEST.json`, and the named stage log, correct the source or environment issue, and rerun into a new output directory. A run that skips required stages is never reported as release-ready.
@@ -463,8 +463,9 @@ AUTH_PASS=changeme
 # File retention
 FILE_RETENTION_HOURS=1
 
-# Worker concurrency (max parallel jobs)
-WORKER_CONCURRENCY=4
+# Worker concurrency: automatic is the recommended default. It uses live
+# CPU/RAM/GPU capacity and does not reserve memory. Set 1..20 for a manual cap.
+WORKER_CONCURRENCY=auto
 
 # SVT-AV1 thread-level parallelism. "auto" is safest across mixed hardware;
 # optionally set 0..6 after benchmarking a stable host.
@@ -545,30 +546,36 @@ Manage settings at `/settings` with no container restart required:
 - **Size Buttons** — customize the target size quick-pick buttons
 - **GPU Support Reference** — hardware encoding compatibility at `/gpu-support`
 
+The direct API is documented in [`docs/API.md`](docs/API.md). The same routes
+are available from Docker and the native Windows app, including single-file
+and batch upload, status polling, cancellation, and downloads.
+
 The Folder Watch panel is also available under Settings for optional
 cross-platform polling of stable files through the normal queue.
 
 ## Performance & Concurrency
 
-8mb.local supports multiple parallel compression jobs. Configure via Settings UI or `WORKER_CONCURRENCY` env var.
+8mb.local supports multiple parallel compression jobs. The default
+`WORKER_CONCURRENCY=auto` selects a bounded starting ceiling from live
+available system RAM, physical CPU cores, and detected NVIDIA VRAM. For
+NVIDIA, the worker also checks free VRAM before each encode. If another
+application consumes GPU memory, new encodes wait; when memory becomes
+available again, queued work can start. This is resource-aware admission, not
+a guarantee of maximum NVENC sessions. A 16 GB card such as an RTX 4070 Ti
+SUPER therefore starts higher than a 3–6 GB GTX 1060, while numeric values
+remain available as manual overrides. The selector never reserves the
+reported memory; `MEDIA_MEMORY_LIMIT_GB` remains the separate media admission
+budget.
 
-| GPU | Recommended Concurrency | Notes |
-|-----|------------------------|-------|
-| RTX 5090 / 5080 / 5070 Ti | 8–12 jobs | 9th gen NVENC (x2), top tier |
-| RTX 4090 / 4080 / 4070 Ti | 8–12 jobs | 8th gen NVENC, excellent throughput |
-| RTX 3090 / 3080 / 3070 | 6–10 jobs | 7th gen NVENC (no AV1) |
-| RTX 2080 Ti / 2070 / 2060 | 3–5 jobs | 6th gen NVENC |
-| GTX 1660 / 1650 | 2–4 jobs | Entry-level NVENC |
-| CPU only | 1–2 per 4 cores | High CPU usage, much slower |
+Use the Settings page to switch between **Automatic (recommended)** and a
+manual limit. Automatic mode can scale active encode admission down and up
+without restarting when live GPU memory changes. Changing the configured
+manual limit still requires a container or desktop-app restart because it
+changes the worker pool ceiling.
 
-**Considerations**
-- Most consumer NVIDIA GPUs support 2–3 native NVENC sessions; driver patches or Pro GPUs allow more.
-- Each job uses ~200–500 MB RAM and ~100–200 MB VRAM.
-- SSD recommended for 6+ concurrent jobs (disk I/O becomes a bottleneck).
-- Monitor GPU temps — sustained load above 80 °C may cause throttling.
-- Start with 4 concurrent jobs and increase while monitoring utilization.
-
-> **Container restart required** after changing worker concurrency.
+> **Manual setting change:** restart the container or desktop app after
+> changing the configured worker limit. Automatic VRAM/RAM admission keeps
+> adapting while it runs.
 
 ## Reverse Proxy Configuration
 

@@ -18,6 +18,7 @@ from typing import Dict, Optional
 from redis import Redis
 
 from shared.subprocess_utils import hidden_process_kwargs
+from shared.concurrency import AdaptiveConcurrencyGate, configured_worker_concurrency
 
 from .celery_app import celery_app
 from .constants import (
@@ -39,6 +40,26 @@ REDIS = None
 # Cache encoder test results to avoid slow init tests on every job
 ENCODER_TEST_CACHE: Dict[str, bool] = {}
 _LAST_PUBLISH_WARNING_TS = 0.0
+_ENCODE_GATE: AdaptiveConcurrencyGate | None = None
+
+
+def _encode_gate() -> AdaptiveConcurrencyGate:
+    """Return the process/runtime-wide adaptive encode gate."""
+    global _ENCODE_GATE
+    if _ENCODE_GATE is not None:
+        return _ENCODE_GATE
+    configured = configured_worker_concurrency()
+    local_runtime = os.getenv("LOCAL_RUNTIME", "").strip().lower() in {"1", "true", "yes", "on"}
+    redis_client = None
+    if not local_runtime:
+        try:
+            redis_client = _redis()
+            redis_client.ping()
+        except Exception as exc:
+            logger.warning("adaptive concurrency: Redis gate unavailable; using process-local gate: %s", exc)
+            redis_client = None
+    _ENCODE_GATE = AdaptiveConcurrencyGate(configured, redis_client=redis_client)
+    return _ENCODE_GATE
 
 
 def effective_trim_duration(source_duration: float, start_time: str | None, end_time: str | None) -> float:
@@ -257,9 +278,17 @@ def _cleanup_transient_input_after_task(func):
         if input_path is None and len(args) >= 3:
             input_path = args[2]  # bound self, job_id, input_path
         transient_input = bool(kwargs.get("transient_input", False))
+        gate = _encode_gate()
+        lease = gate.acquire()
+        logger.info(
+            "adaptive concurrency: acquired encode slot task_id=%s limit=%s",
+            getattr(getattr(args[0], "request", None), "id", "?"),
+            gate.current_limit(),
+        )
         try:
             return func(*args, **kwargs)
         finally:
+            gate.release(lease)
             cleanup_transient_input(input_path, transient_input)
     return wrapper
 

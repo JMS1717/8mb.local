@@ -114,7 +114,7 @@ FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
 # Build metadata. scripts/set-version.ps1 keeps the default synchronized with
 # the root VERSION file; release builders override these values explicitly.
-ARG BUILD_VERSION=140.0.0.0
+ARG BUILD_VERSION=141.0.0.0
 ENV APP_VERSION=${BUILD_VERSION}
 ARG BUILD_COMMIT=unknown
 ENV BUILD_COMMIT=${BUILD_COMMIT}

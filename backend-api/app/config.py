@@ -51,7 +51,9 @@ class Settings(BaseSettings):
     BATCH_METADATA_TTL_HOURS: int = Field(default=24)
 
     # --- Worker ---
-    WORKER_CONCURRENCY: int = Field(default=4)
+    # ``auto`` selects a conservative count from live CPU/RAM/GPU capacity;
+    # a numeric value remains available as an explicit operator override.
+    WORKER_CONCURRENCY: str = Field(default="auto")
 
     # --- History ---
     HISTORY_ENABLED: bool = Field(default=True)

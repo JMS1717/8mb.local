@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 os.environ["AUTH_ENABLED"] = "false"
 
-from app.routers.download import _media_type_for_path, _safe_output_path, job_status
+from app.routers.download import _media_type_for_path, _safe_output_path, _write_batch_zip, job_status
 
 
 class _CompletedResult:
@@ -44,6 +44,44 @@ class TestDownloadPaths(unittest.TestCase):
                     self.assertIsNone(_safe_output_path(root / "missing.mp4"))
             finally:
                 outside.unlink(missing_ok=True)
+
+    def test_frontend_fallback_rejects_paths_outside_build_root(self):
+        from app import main
+
+        with tempfile.TemporaryDirectory(prefix="8mb-frontend-test-") as temp_dir:
+            root = Path(temp_dir) / "frontend"
+            root.mkdir()
+            (root / "index.html").write_text("ok", encoding="utf-8")
+            outside = root.parent / "secret.txt"
+            outside.write_text("secret", encoding="utf-8")
+            try:
+                with patch.object(main, "frontend_build", root):
+                    self.assertIsNone(main._safe_frontend_path("../secret.txt"))
+                    self.assertEqual(main._safe_frontend_path("index.html"), (root / "index.html").resolve())
+            finally:
+                outside.unlink(missing_ok=True)
+
+    def test_batch_zip_is_published_complete_and_handles_duplicate_names(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory(prefix="8mb-batch-zip-test-") as temp_dir:
+            root = Path(temp_dir)
+            first = root / "one" / "same.mp4"
+            second = root / "two" / "same.mp4"
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+            temporary = root / ".batch.tmp"
+            final = root / "batch.zip"
+
+            _write_batch_zip([first, second], temporary, final)
+
+            self.assertFalse(temporary.exists())
+            with zipfile.ZipFile(final) as archive:
+                self.assertEqual(set(archive.namelist()), {"same.mp4", "same_2.mp4"})
+                self.assertEqual(archive.read("same.mp4"), b"one")
+                self.assertEqual(archive.read("same_2.mp4"), b"two")
 
 
 if __name__ == "__main__":

@@ -442,3 +442,384 @@ container had `1.0G` shared memory describes the pre-deployment snapshot only;
 the final deployed container has the verified 10 GiB setting above. The older
 pre-follow-up image name in the preceding memory section is likewise retained
 as historical evidence; the final release image and tag are recorded here.
+
+## Final local hardening pass — 2026-08-16
+
+This additional pass used the current dirty checkout at commit
+`f853c14e313c0940e12e879e281adf808cfb3208` and did not contact or modify any
+remote system. It addressed four reliability/security issues found during the
+review:
+
+- Windows upload admission now runs off the FastAPI event loop, reserves a
+  bounded RAM-preferred budget, and releases it on success or failure.
+- Batch ZIP creation now runs off the event loop and is published atomically,
+  so downloads cannot observe a partially-written archive.
+- Redis-backed adaptive concurrency leases renew during long encodes and stop
+  cleanly on release.
+- The SPA catch-all now rejects paths that resolve outside the frontend build
+  root; settings GET endpoints require the same Basic Auth protection as the
+  corresponding state-changing endpoints.
+
+Fresh validation after rebuilding the current source:
+
+- Backend/worker/shared tests: `124 passed, 1 skipped, 5 warnings`.
+- Frontend `svelte-check`: `0 errors and 0 warnings`.
+- Python compile checks: passed.
+- All three Docker Compose config checks: passed.
+- Version check: `140.0.0.0` / display `140.0.0`.
+- Windows release smoke with authentication, settings/profile persistence,
+  upload, transcode, download, and FFprobe: passed.
+- Full portable-EXE E2E: `18 codec/edge job(s)` plus batch ZIP, duplicate-name
+  ZIP, invalid upload cleanup, SSE reconnect, cancellation, restart recovery,
+  and FFprobe validation: passed.
+
+Current rebuilt Windows artifacts:
+
+- `dist/8mblocal.exe` — 196,471,357 bytes — SHA-256
+  `3A0336AE46688824459F66E2C8BC4246691EA538CD573B53967F68F6355C29A1`.
+- `dist/8mblocal-Setup.exe` — 196,979,901 bytes — SHA-256
+  `E70D637F90907FC9375F8A19ECB80CAFD466EA8DB5B8A41EDC8AFF5AAE3D809E`.
+- `dist/8mblocal_140.0.0.0_x64.msix` — 195,147,676 bytes — SHA-256
+  `A77ABF25517B21B5B0D5943697558DD53C935E551996C97029A9E0567A3DABB5`.
+
+The EXE and installer report version `140.0.0.0`; the MSIX identity is
+`jms1717.8mb.local`, publisher
+`CN=AAE66F20-996E-4A3C-B08E-182952BAD9F7`, architecture `x64`, and version
+`140.0.0.0`. The package contains `runFullTrust` and neither
+`unvirtualizedResources` nor `FileSystemWriteVirtualization`. The MSIX is
+unsigned and was not submitted to Partner Center.
+
+The local Docker daemon was unavailable during this final pass, so no new
+Docker image or archive is claimed for this exact final source. The earlier
+Powerhouse deployment and Docker evidence in this report remain historical;
+the current final local source must receive a fresh Docker build when Docker
+is available. No commit, push, release, Docker publication, or production
+change was made in this pass.
+
+The actual local orchestrator was also exercised with:
+
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\release-local.ps1 -Version 140.0.0.0 -SkipDocker -OutputDir .\dist\release\140.0.0.0-hardening-20260816`
+
+It passed version synchronization, frontend checks/build, Python compilation,
+11 repository tests, 63 backend tests, 44 worker tests, 7 shared tests,
+version consistency, portable EXE smoke, current-user installer
+install/smoke/uninstall, and MSIX validation. Its manifest correctly records
+`INCOMPLETE` and `release_ready=false` because `-SkipDocker` was supplied. The
+staged Windows artifacts are saved under
+`dist/release/140.0.0.0-hardening-20260816/` with checksums in
+`SHA256SUMS.txt`. The worktree now has 31 application/source files modified,
+this report modified for the handoff, and the three relevant untracked source
+files listed above.
+
+## Full local release and isolated Powerhouse retest — 2026-08-17
+
+The Docker Desktop daemon became available and the current dirty checkout was
+tested without changing Git or production. A Docker context defect was found:
+the existing local `dist/` tree was approximately 10.5 GB and was not excluded
+from the build context. The root `.dockerignore` now excludes `dist/`, build
+outputs, frontend build caches, and local state/Redis data. The corrected
+context was approximately 77.6 MB. No large local output directory was deleted.
+
+The complete command passed:
+
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\\release-local.ps1 -Version 140.0.0.0 -OutputDir .\\dist\\release\\140.0.0.0-full-20260817 -Overwrite`
+
+Result: `PASS`; `TEST-RESULTS.md` reports `Release-ready: True`. The run passed
+frontend installation/check/lint/build, repository/backend/worker/shared
+tests, Python compilation, version consistency, all Compose profiles, portable
+EXE smoke, current-user installer install/smoke/uninstall, MSIX build and
+manifest validation, Docker build, image metadata, Docker save/archive checks,
+container startup, health/API/frontend, synthetic upload/compression/download,
+FFprobe validation, and isolated container cleanup.
+
+Current full-release artifacts:
+
+- `dist/release/140.0.0.0-full-20260817/8mblocal.exe` — 196,469,165 bytes —
+  SHA-256 `FE4E282D3241FCEFE2B5228DA2A4BD385FE1DF10A81744026E0A549783FDF0DC`.
+- `dist/release/140.0.0.0-full-20260817/8mblocal-Setup.exe` — 196,974,717
+  bytes — SHA-256
+  `8930024A32F8BB31B0C1F1CF4A6FB944A146C9AE31FAD840D7B526487780A1A0`.
+- `dist/release/140.0.0.0-full-20260817/8mblocal_140.0.0.0_x64.msix` —
+  195,145,105 bytes — SHA-256
+  `C9DB498BF533D652C15224CB67352096EE86DE259487FC129464DC3A66F7CCE2`.
+- `dist/release/140.0.0.0-full-20260817/8mblocal-docker.tar` — 1,515,115,520
+  bytes — SHA-256
+  `7843F163340528355C92FA92F84908ACF4563F366F44F8490D7FE904C4125AB7`.
+
+The local image was tagged
+`jms1717/8mblocal:local-140.0.0.0` and contained version `140.0.0.0`, source
+commit `f853c14e313c0940e12e879e281adf808cfb3208`, and the repository source
+label. The image tar was transferred to Powerhouse and its remote SHA-256
+matched the local hash.
+
+Powerhouse isolated test results:
+
+- Test image was loaded into a uniquely named isolated deployment with a
+  localhost-only port, temporary bind mounts, `--gpus all`, and 10 GiB shared
+  memory. No production volumes, `.env`, networks, queues, or media were used.
+- Health and version passed before and after a test-stack restart.
+- CPU `libx264`, `libx265`, and `libsvtav1` jobs passed.
+- GPU `h264_nvenc` and `hevc_nvenc` jobs passed.
+- Every downloaded output passed FFprobe with valid video/audio streams. HEVC
+  outputs used the `hvc1` MP4 sample-entry tag.
+- The worker removed transient upload inputs after completion.
+- The exact isolated container, image tag, and test directory were removed.
+  A root-owned transient subdirectory required a temporary root helper based
+  on the existing application image; no broad cleanup command was used.
+
+Production verification after cleanup: the existing `8mblocal` container
+remained running and healthy, still used
+`jms1717/8mblocal:codex-140.0.0.0-20260814`, still exposed port 8001, retained
+its existing uploads/outputs/.env mounts, and reported API version
+`140.0.0.0`. Production was not stopped, recreated, or deployed to during
+this retest.
+
+Remaining non-blocking items: npm audit still reports two low-severity
+transitive `cookie` advisories through the pinned SvelteKit dependency; the
+available forced remediation is a breaking downgrade and was not applied.
+FastAPI/Pydantic/Celery dependency deprecation warnings remain. The MSIX is an
+unsigned Store-submission package and still requires the normal signing/Store
+submission process. Real-device mobile playback should remain a manual check.
+
+## Dependency security fix and rebuilt artifacts — 2026-08-17
+
+The transitive npm advisory was fixed in the source checkout. SvelteKit 2.70.2
+declares `cookie ^0.6.0`, so `frontend/package.json` now pins a root npm
+override to the patched `cookie 0.7.2`; `frontend/package-lock.json` records
+the same version. This avoids npm's unsafe proposed SvelteKit downgrade to
+`0.0.30`.
+
+Validation after the change:
+
+- `npm ci --ignore-scripts --no-audit --no-fund`: passed.
+- `npm ls cookie @sveltejs/kit --all`: SvelteKit 2.70.2 with `cookie 0.7.2
+  overridden`.
+- `npm audit --omit=dev --audit-level=low`: `found 0 vulnerabilities`.
+- Frontend check, lint, and production build: passed with 0 Svelte errors and
+  0 warnings.
+- Complete `release-local.ps1` build, Windows portable/installer/MSIX smoke,
+  Docker build/save/runtime smoke, and all automated tests: passed.
+
+The rebuilt security-release artifacts are under
+`dist/release/140.0.0.0-security-20260817/`:
+
+- `8mblocal.exe` — SHA-256
+  `DB15AA03F28FA93D524689712EECA196A03ED98B35384EC024C9E769FDE83EBE`.
+- `8mblocal-Setup.exe` — SHA-256
+  `2FBD93623E9BE7AC00F46A011DDA03936F2516AE91BCAF66B3B2B21341ABCC80`.
+- `8mblocal_140.0.0.0_x64.msix` — SHA-256
+  `20A0C1C32D62118A24AE4414F3AFC7DA15C3FEEB32246685C2D1C65EB4286682`.
+- `8mblocal-docker.tar` — SHA-256
+  `AB968673C30D57C1EAB99E2F4C1C22580D2CEC55BA9CB2F3E8FED4CE348FE885`.
+
+No remote system was changed and no package was published.
+
+## v141 release candidate and permanent audit gates — 2026-08-17
+
+The active version was advanced through `scripts/set-version.ps1` to
+`141.0.0.0` / display `141.0.0`. The synchronizer was also corrected to handle
+CRLF Dockerfiles, and `scripts/check-version.ps1` now validates the Dockerfile
+version under that line-ending format.
+
+The local release workflow now permanently includes two required frontend
+security stages after `npm ci`:
+
+- `frontend-npm-audit` runs `npm audit --omit=dev --audit-level=low`.
+- `frontend-dependency-security` verifies the patched cookie override,
+  package-lock resolution, and installed `node_modules` version.
+
+The complete v141 command passed:
+
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\\release-local.ps1 -Version 141.0.0.0 -OutputDir .\\dist\\release\\141.0.0.0-full-20260817 -Overwrite`
+
+All 38 stages passed with zero failures and zero skipped stages. This included
+the new audit/regression gates, all frontend/Python tests, version and Compose
+validation, Windows portable EXE and installer smoke, MSIX validation, Docker
+build/save/runtime smoke, upload/compression/download, FFprobe, and cleanup.
+
+v141 artifacts:
+
+- `dist/release/141.0.0.0-full-20260817/8mblocal.exe` — 196,471,648 bytes —
+  SHA-256 `FC3A3F62156885CF0E5F5477C3845EF68A2A7F15F7C5ED3CBA9780DE9BCCC696`.
+- `dist/release/141.0.0.0-full-20260817/8mblocal-Setup.exe` — 196,973,808
+  bytes — SHA-256
+  `DAB082FDC3BA029268C7C93D222BF1B7701F29506AA01FFA32737C2DD2150752`.
+- `dist/release/141.0.0.0-full-20260817/8mblocal_141.0.0.0_x64.msix` —
+  195,147,418 bytes — SHA-256
+  `8432C5C4466DDE20BFEB6459685D1AE3CED196D2F388FB40AD8E2035F599582B`.
+- `dist/release/141.0.0.0-full-20260817/8mblocal-docker.tar` — 1,515,115,520
+  bytes — SHA-256
+  `2EA327D545799398FA2021EBA15BF2D07F02BF76A12898A2E5B8B2D667DF6125`.
+
+The local image tag is `jms1717/8mblocal:local-141.0.0.0`, with version
+`141.0.0.0` and source revision
+`f853c14e313c0940e12e879e281adf808cfb3208`. It was not pushed or deployed.
+
+The current v141 change list is recorded at the top of `CHANGELOG.md`. At the
+time this section was written, Powerhouse production remained unchanged and
+only the earlier isolated v140 test had been run there. The subsequent v141
+deployment and production smoke evidence is recorded in the next section.
+
+## v141 Powerhouse deployment and local PC installation — 2026-08-17
+
+The v141 Docker image was transferred to Powerhouse as a local tar archive and
+verified there with SHA-256
+`2EA327D545799398FA2021EBA15BF2D07F02BF76A12898A2E5B8B2D667DF6125`. The
+remote image was loaded as `jms1717/8mblocal:local-141.0.0.0` and deployed only
+to the exact production Compose service `8mblocal`. The production Compose
+image is now `jms1717/8mblocal:codex-141.0.0.0-20260817`; the old v140 image
+was retained for rollback.
+
+Before deployment, the protected rollback configuration backup was created at
+`/home/powerhouse/Docker/8mblocal/backups/codex-v141-20260817T123830Z`.
+Only the `8mblocal` container was recreated. The deployment began at
+`2026-08-17T12:41:18Z` and the application health check passed at
+`2026-08-17T12:41:25Z` (approximately seven seconds of application
+recreation/outage). Final verification showed the container running and
+healthy, port 8001 unchanged, the existing uploads/outputs/.env mounts
+unchanged, `/healthz` returning `{"ok":true}`, and `/api/version` returning
+`{"version":"141.0.0.0"}`. No unrelated container was restarted.
+
+A real production-path synthetic smoke then passed using the deployed v141
+image: upload, `hevc_nvenc` compression, download, and FFprobe validation.
+The downloaded file contained HEVC video with the `hvc1` MP4 sample-entry tag
+and AAC audio, with a valid 2.538667-second duration. The exact synthetic
+output and history entry were removed, and the transient uploaded input was
+confirmed absent. The temporary smoke directory was removed.
+
+The v141 installer was tested on this PC with the isolated current-user
+installation helper. It installed to a unique directory under:
+
+`dist/release/141.0.0.0-full-20260817/pc-installed-smoke-20260817/run-739f888b0a06405c9e1625eed2e8c14c/installed/`
+
+The existing installation was not overwritten. The installed copy passed the
+desktop shortcut target check, startup/health, frontend loading, API version
+`141.0.0.0`, synthetic upload, CPU transcode, status polling, download, and
+FFprobe validation. The uninstaller then removed the isolated application and
+shortcut while preserving its test user-data sentinel. No `8mblocal.exe`
+test process remained. The test logs and preserved smoke data remain under
+`dist/release/141.0.0.0-full-20260817/pc-installed-smoke-20260817/`.
+
+This PC run did not enable the optional authenticated settings sub-suite
+because the required temporary smoke credentials were not present in the
+current process environment; it therefore does not claim a fresh installed
+copy settings/authentication result. The full v141 release workflow and its
+automated settings/version tests remain recorded above.
+
+## v141 reliability audit and rebuild — 2026-08-17
+
+The focused audit found and fixed a real frontend reliability defect: the main
+compression page and Queue page closed native `EventSource` connections on a
+transient error, disabling the browser's automatic SSE reconnect and making a
+live or completed job appear stuck until Queue or a page refresh was opened.
+Those handlers now keep the stream open and allow native reconnect behavior.
+The batch page copy was also corrected to describe parallel processing when
+capacity allows.
+
+The cross-platform subprocess helper was hardened for platform-mocked test
+environments: it now checks that the Windows-only `CREATE_NO_WINDOW` constant
+exists before returning it. Two Windows storage tests were corrected to mock
+the Windows platform explicitly; they were test-environment defects, not
+runtime failures.
+
+Validation after the fixes:
+
+- Frontend `npm run check`: passed with 0 errors and 0 warnings.
+- Frontend production build: passed.
+- Dependency-backed Python suite in the application image: 134 passed, 2
+  platform-conditional skips, 5 existing deprecation warnings.
+- Complete `release-local.ps1 -Version 141.0.0.0` rebuild: all stages passed,
+  including frontend, Python, Windows EXE, installer, MSIX, Docker build/save,
+  container runtime, upload/compression/download, FFprobe, and cleanup.
+
+The rebuilt artifacts are under
+`dist/release/141.0.0.0-bugfix-20260817/`:
+
+- `8mblocal.exe` — 196,470,035 bytes — SHA-256
+  `0506C5C69A65E7F269110A1C22F4585A95AF3F44D185FBBD2DF6623FDBA65EF8`.
+- `8mblocal-Setup.exe` — 196,975,157 bytes — SHA-256
+  `7E0BE24F47A28156E2B77081C06314BA333D1B264A6F64F84DAE93C259579EDC`.
+- `8mblocal_141.0.0.0_x64.msix` — 195,146,142 bytes — SHA-256
+  `C7AF785E692BCF7DD7875791899985E88A27EA277169A6AB6729315DBB98A5F6`.
+- `8mblocal-docker.tar` — 1,515,116,544 bytes — SHA-256
+  `51AAD8469DBBC08B8FFD8FCD7F78DC5E7B6E508C7EDD905A311D8EF417171ABF`.
+
+This audit/rebuild changed only the local checkout. Powerhouse remains on the
+previously deployed v141 image; the new SSE fix has not been deployed there in
+this audit.
+
+## v141 additional reliability audit — 2026-08-17
+
+The follow-up source review found and fixed four additional edge cases:
+
+- Corrupt or hand-edited `codec_visibility` values could crash settings reads,
+  treat strings such as `"false"` as true, or hide every CPU fallback. Reads
+  now coerce supported scalar values, repair malformed sections, and guarantee
+  a usable CPU fallback without discarding unrelated settings.
+- Folder Watch now rehydrates persisted queued/running records after an API
+  restart so output validation and original-file actions are not lost when the
+  in-process pending map is rebuilt.
+- Direct compression and Folder Watch now persist job metadata before task
+  dispatch, eliminating a fast-worker race that could produce an output with no
+  queue record. Partial metadata from a failed direct request is cleaned up.
+- The native Windows launcher now reloads persisted media-storage, memory
+  budget, upload-limit, retention, history, concurrency, and logging settings
+  from the per-user `.env` file before importing runtime configuration.
+
+New regression coverage passed:
+
+- Focused tests: 19 passed, 1 existing Pydantic deprecation warning.
+- Full Python suite: 141 passed, 2 platform-conditional skips, 5 existing
+  deprecation warnings.
+- Frontend `npm run check`: 0 errors and 0 warnings.
+- Frontend production build: passed.
+- `npm audit --omit=dev --audit-level=high`: 0 vulnerabilities.
+- `scripts/check-version.ps1`: `VERSION_CHECK_PASSED=141.0.0.0`.
+- `scripts/check-frontend-dependencies.ps1`:
+  `FRONTEND_DEPENDENCY_SECURITY_CHECK=PASSED`.
+- `git diff --check`: passed.
+
+The existing `141.0.0.0-bugfix-20260817` Windows artifacts do not include
+these follow-up source edits because they were created before this audit. A
+new Windows release rebuild is required before distributing a refreshed EXE,
+installer, or MSIX. Powerhouse was not redeployed during this follow-up.
+
+## Follow-up artifacts and platform validation — 2026-08-17
+
+The follow-up source was rebuilt locally after the additional fixes.
+
+Windows-only release output:
+
+- `dist/release/141.0.0.0-followup-20260817/8mblocal.exe` — 196,473,397
+  bytes — SHA-256
+  `327132F3AA4467E878702BDA1F4D98F101F5B4F214EB81F43A3DED08ABA0208A`.
+- `dist/release/141.0.0.0-followup-20260817/8mblocal-Setup.exe` —
+  196,976,492 bytes — SHA-256
+  `F10ADED5DCEBF7252915D6F2F09C8059D0E3DDB71BDDC50F2D22657E46614B67`.
+- `dist/release/141.0.0.0-followup-20260817/8mblocal_141.0.0.0_x64.msix` —
+  195,148,886 bytes — SHA-256
+  `2E4840826DCFE50677A2013CAEDB5BE94F2829D930C36F5DE2ABE79EFDE16FE4`.
+
+The fresh portable and isolated installer smoke tests passed health, frontend,
+version, authentication, SSE authorization, settings and profile persistence,
+codec visibility, upload, transcode, download, and FFprobe validation. The
+installer was removed afterward and its test user-data sentinel was preserved.
+MSIX validation passed for identity `jms1717.8mb.local`, publisher
+`CN=AAE66F20-996E-4A3C-B08E-182952BAD9F7`, x64 architecture, version
+`141.0.0.0`, required `runFullTrust`, and no forbidden virtualization
+capabilities. The package is unsigned for Store submission; installation was
+not claimed.
+
+Docker-only release output:
+
+- Local tag: `jms1717/8mblocal:local-141.0.0.0`.
+- `dist/release/141.0.0.0-docker-followup-20260817/8mblocal-docker.tar` —
+  1,515,119,616 bytes — SHA-256
+  `C32266076ADDE2777E633A7BB52FA8C46EEAC6C982AB0FBD55CF7A0F6314D7B4`.
+
+The fresh Docker pass built the image, verified Compose configuration, checked
+image labels/environment metadata, saved and structurally inspected the tar,
+started a disposable container, created synthetic media, uploaded it,
+compressed it, downloaded it, validated both streams with FFprobe, and removed
+only the test container. The Docker image was not pushed. Windows stages were
+intentionally skipped in this Docker-only pass.

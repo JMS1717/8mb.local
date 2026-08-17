@@ -75,7 +75,6 @@ Write-GeneratedText (Join-RepoPath @('frontend', 'src', 'lib', 'generated-versio
  */
 export const APP_VERSION = '$FullVersion';
 export const APP_VERSION_DISPLAY = '$DisplayVersion';
-$( [Environment]::NewLine )
 "@
 Write-GeneratedText (Join-RepoPath @('backend-api', 'app', 'version.py')) @"
 """Generated application version data.
@@ -86,7 +85,6 @@ scripts/set-version.ps1. Do not edit it manually.
 
 APP_VERSION = "$FullVersion"
 APP_VERSION_DISPLAY = "$DisplayVersion"
-$( [Environment]::NewLine )
 "@
 
 $dockerfile = Join-RepoPath @('Dockerfile')
@@ -94,7 +92,7 @@ Update-Text $dockerfile {
     param($text)
     [regex]::Replace(
         $text,
-        '(?m)^(\s*ARG\s+BUILD_VERSION)(?:\s*=\s*[^\r\n]*)?$',
+        '(?m)^([ \t]*ARG[ \t]+BUILD_VERSION)(?:[ \t]*=[ \t]*[^\r\n]*)?\r?$',
         { param($match) $match.Groups[1].Value + '=' + $FullVersion }
     )
 }

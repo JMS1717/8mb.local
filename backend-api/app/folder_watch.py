@@ -94,10 +94,43 @@ class FolderWatchService:
         await self.stop()
         config = settings_manager.get_folder_watch_settings()
         if config.get('enabled'):
+            self._restore_pending_from_state()
             self._task = asyncio.create_task(self._run(config), name='8mblocal-folder-watch')
             logger.info('folder-watch enabled: input=%s recursive=%s', config.get('input_folder'), config.get('recursive'))
         else:
             logger.info('folder-watch disabled')
+
+    def _restore_pending_from_state(self) -> None:
+        """Rehydrate watcher-owned jobs after an API/desktop restart.
+
+        The Celery task and the per-file watcher state outlive the in-process
+        ``_pending`` dictionary. Restoring only queued/running records lets the
+        normal reconciliation path validate the output and apply the user's
+        original-file action when the worker finishes.
+        """
+        try:
+            state = settings_manager.get_folder_watch_state()
+        except Exception as exc:
+            logger.debug('folder-watch: persisted state unavailable: %s', exc)
+            return
+        if not isinstance(state, dict):
+            return
+        restored = 0
+        for record in state.values():
+            if not isinstance(record, dict):
+                continue
+            if str(record.get('status') or '') not in {'queued', 'running'}:
+                continue
+            task_id = str(record.get('task_id') or '')
+            if not task_id or not record.get('input_path') or not record.get('output_path'):
+                continue
+            if task_id in self._pending:
+                continue
+            self._pending[task_id] = dict(record)
+            restored += 1
+        if restored:
+            self._queued_total += restored
+            logger.info('folder-watch: restored %d pending job(s) after restart', restored)
 
     async def _run(self, config: dict[str, Any]) -> None:
         try:
@@ -179,6 +212,18 @@ class FolderWatchService:
         }
         settings_manager.update_folder_watch_state(_key(path), record)
         try:
+            # Register the job before dispatching. A fast worker can finish
+            # before the watcher returns, and a metadata failure must never
+            # leave an untracked output behind.
+            await store_job_metadata(
+                task_id,
+                job_id,
+                path.name,
+                float(profile.get('target_mb', 19.7)),
+                str(profile.get('video_codec', 'h264_nvenc')),
+                str(path),
+                str(output_path),
+            )
             await asyncio.to_thread(
                 celery_app.send_task,
                 'worker.worker.compress_video',
@@ -196,7 +241,6 @@ class FolderWatchService:
                     'max_output_fps': profile.get('max_output_fps'),
                 },
             )
-            await store_job_metadata(task_id, job_id, path.name, float(profile.get('target_mb', 19.7)), str(profile.get('video_codec', 'h264_nvenc')), str(path), str(output_path))
         except Exception:
             settings_manager.update_folder_watch_state(_key(path), {**record, 'status': 'failed'})
             raise

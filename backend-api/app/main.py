@@ -172,6 +172,19 @@ async def on_shutdown() -> None:
 # Serve pre-built frontend (unified container deployment)
 # ---------------------------------------------------------------------------
 frontend_build = Path(settings.FRONTEND_BUILD_DIR)
+
+
+def _safe_frontend_path(full_path: str) -> Path | None:
+    """Return a frontend file only when it remains under the build root."""
+    try:
+        root = frontend_build.resolve()
+        candidate = (root / full_path).resolve()
+        candidate.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return candidate if candidate.is_file() else None
+
+
 if frontend_build.exists():
     app.mount("/_app", StaticFiles(directory=frontend_build / "_app"), name="static-assets")
 
@@ -198,8 +211,8 @@ if frontend_build.exists():
             logger.debug("serve_spa: refusing to mask non-SPA path %r -> 404", full_path)
             raise HTTPException(status_code=404, detail="Not Found")
 
-        file_path = frontend_build / full_path
-        if file_path.is_file():
+        file_path = _safe_frontend_path(full_path)
+        if file_path is not None:
             media_type = None
             if full_path.endswith('.svg'):
                 media_type = "image/svg+xml"

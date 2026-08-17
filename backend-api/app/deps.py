@@ -24,6 +24,7 @@ from fastapi import HTTPException, UploadFile
 from redis.asyncio import Redis
 
 from shared.subprocess_utils import hidden_process_kwargs
+from shared.concurrency import resolve_worker_concurrency
 
 from .celery_app import celery_app
 from .config import settings
@@ -44,6 +45,8 @@ _WINDOWS_INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 _GIB = 1024 * 1024 * 1024
 _MEMORY_ADMISSION_LOCK = threading.Lock()
 _MEMORY_RESERVED_BYTES = 0
+_WINDOWS_MEMORY_ADMISSION_LOCK = threading.Lock()
+_WINDOWS_MEMORY_RESERVED_BYTES = 0
 
 
 def _media_storage_mode() -> str:
@@ -101,7 +104,7 @@ def _windows_memory_upload_limit_bytes() -> int:
         available = configured
     os_headroom = max(_GIB, int(available * 0.25))
     usable = max(0, min(configured, available - os_headroom))
-    concurrent_jobs = max(1, int(settings.WORKER_CONCURRENCY))
+    concurrent_jobs = resolve_worker_concurrency(settings.WORKER_CONCURRENCY)
     # Reserve roughly half of each job's budget for output and FFmpeg working
     # memory; the input remains a normal pathname with a cache hint.
     per_job_upload_budget = usable // concurrent_jobs // 2
@@ -190,6 +193,29 @@ def _release_memory_upload(expected_size: int | None) -> None:
         _MEMORY_RESERVED_BYTES = max(0, _MEMORY_RESERVED_BYTES - expected_size)
 
 
+def _reserve_windows_memory_upload(expected_size: int | None) -> bool:
+    """Reserve a conservative Windows cache-preferred upload budget."""
+    global _WINDOWS_MEMORY_RESERVED_BYTES
+    if expected_size is None or expected_size <= 0:
+        return False
+    with _WINDOWS_MEMORY_ADMISSION_LOCK:
+        capacity = _windows_memory_upload_limit_bytes()
+        if expected_size > max(0, capacity - _WINDOWS_MEMORY_RESERVED_BYTES):
+            return False
+        _WINDOWS_MEMORY_RESERVED_BYTES += expected_size
+        return True
+
+
+def _release_windows_memory_upload(expected_size: int | None) -> None:
+    global _WINDOWS_MEMORY_RESERVED_BYTES
+    if expected_size is None or expected_size <= 0:
+        return
+    with _WINDOWS_MEMORY_ADMISSION_LOCK:
+        _WINDOWS_MEMORY_RESERVED_BYTES = max(
+            0, _WINDOWS_MEMORY_RESERVED_BYTES - expected_size,
+        )
+
+
 def choose_upload_destination(destination: Path, expected_size: int | None) -> tuple[Path, int | None]:
     """Choose memory or disk immediately before an upload starts.
 
@@ -200,10 +226,34 @@ def choose_upload_destination(destination: Path, expected_size: int | None) -> t
     """
     mode = _media_storage_mode()
     disk_destination = _DISK_UPLOADS_DIR / destination.name
-    if os.name == 'nt' or mode == 'disk' or not Path('/dev/shm').is_dir():
-        if mode == 'memory' and os.name != 'nt' and not Path('/dev/shm').is_dir():
+    if os.name == 'nt':
+        if mode == 'disk':
+            return destination, None
+        if _reserve_windows_memory_upload(expected_size):
+            return destination, expected_size
+        if mode == 'memory':
+            raise HTTPException(
+                status_code=507,
+                detail="Insufficient available Windows RAM budget for this upload; use MEDIA_STORAGE=auto or disk",
+            )
+        logger.info(
+            "upload admission: using disk-backed Windows temp semantics because current RAM budget cannot fit %s",
+            destination.name,
+        )
+        return destination, None
+    if mode == 'disk' or not Path('/dev/shm').is_dir():
+        if mode == 'memory' and not Path('/dev/shm').is_dir():
             raise HTTPException(status_code=507, detail="Memory-backed temporary storage is unavailable")
         return destination, None
+    # Create the mount point before checking disk_usage. A fresh container
+    # otherwise reports zero capacity and explicit MEDIA_STORAGE=memory can
+    # fail before its first upload.
+    try:
+        MEMORY_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        if mode == 'memory':
+            raise HTTPException(status_code=507, detail="Memory-backed temporary storage could not be created")
+        return disk_destination, None
     if expected_size is None or expected_size <= 0 or not _reserve_memory_upload(int(expected_size)):
         if mode == 'memory':
             raise HTTPException(
@@ -211,13 +261,6 @@ def choose_upload_destination(destination: Path, expected_size: int | None) -> t
                 detail="Insufficient available shared memory for this upload; use MEDIA_STORAGE=auto or disk",
             )
         logger.info("upload admission: using disk because current RAM budget cannot fit %s", destination.name)
-        return disk_destination, None
-    try:
-        MEMORY_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        _release_memory_upload(int(expected_size))
-        if mode == 'memory':
-            raise HTTPException(status_code=507, detail="Memory-backed temporary storage could not be created")
         return disk_destination, None
     return MEMORY_UPLOADS_DIR / destination.name, int(expected_size)
 
@@ -543,10 +586,20 @@ async def save_upload_file(
     total_size = 0
     try:
         if allow_dynamic_storage:
-            destination, reservation = choose_upload_destination(destination, expected_size)
+            # Admission may refresh live GPU/RAM capacity with nvidia-smi.
+            # Keep that bounded subprocess and the accompanying filesystem
+            # checks off FastAPI's event loop so large uploads do not stall
+            # health, status, or SSE requests.
+            destination, reservation = await asyncio.to_thread(
+                choose_upload_destination, destination, expected_size,
+            )
             destination.parent.mkdir(parents=True, exist_ok=True)
         with destination.open("wb") as out:
-            if _windows_ram_preferred_mode():
+            windows_hint_admitted = (
+                _windows_ram_preferred_mode()
+                and (not allow_dynamic_storage or reservation is not None)
+            )
+            if windows_hint_admitted:
                 marked = mark_file_temporary(destination)
                 if not marked and _media_storage_mode() == "memory":
                     raise HTTPException(
@@ -582,7 +635,14 @@ async def save_upload_file(
             logger.warning("upload: could not remove failed partial file %s", destination)
         raise
     finally:
-        _release_memory_upload(reservation)
+        if os.name == 'nt':
+            _release_windows_memory_upload(reservation)
+        else:
+            _release_memory_upload(reservation)
+        try:
+            await upload.close()
+        except Exception:
+            pass
     return destination
 
 
@@ -630,7 +690,8 @@ async def store_job_metadata(
         await redis.setex(f"job:{task_id}", 86400, orjson.dumps(job_meta.dict()).decode())
         await redis.zadd("jobs:active", {task_id: time.time()})
     except Exception as e:
-        logger.warning(f"Failed to store job metadata for {task_id}: {e}")
+        logger.error("Failed to store job metadata for %s: %s", task_id, e)
+        raise
 
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,7 @@ import webbrowser
 from pathlib import Path
 
 # Generated from the root VERSION file by scripts/set-version.ps1.
-DESKTOP_VERSION = "140.0.0.0"
+DESKTOP_VERSION = "141.0.0.0"
 
 
 def _bundle_root() -> Path:
@@ -43,15 +43,41 @@ def _free_port(requested: int) -> int:
         return int(probe.getsockname()[1])
 
 
+def _load_persisted_environment(data_dir: Path) -> None:
+    """Load restart-sensitive values saved by the Settings page."""
+    env_path = data_dir / ".env"
+    if not env_path.is_file():
+        return
+    # These values are persisted by the Settings page and must be restored
+    # before the native runtime imports its configuration modules.
+    allowed = {
+        "AUTH_ENABLED", "AUTH_USER", "AUTH_PASS", "WORKER_CONCURRENCY",
+        "MEDIA_STORAGE", "MEDIA_MEMORY_LIMIT_GB", "MAX_UPLOAD_SIZE_MB",
+        "FILE_RETENTION_HOURS", "HISTORY_ENABLED", "SVTAV1_LP",
+        "LOG_LEVEL", "LOG_LEVEL_APP", "LOG_LEVEL_UVICORN",
+    }
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or key not in allowed or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip('"').strip("'")
+
+
 def _configure_environment(data_dir: Path, bundle_root: Path, port: int) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "uploads").mkdir(parents=True, exist_ok=True)
     (data_dir / "outputs").mkdir(parents=True, exist_ok=True)
 
+    _load_persisted_environment(data_dir)
     os.environ["LOCAL_RUNTIME"] = "1"
     os.environ.setdefault("AUTH_ENABLED", "false")
     os.environ.setdefault("HISTORY_ENABLED", "true")
-    os.environ.setdefault("WORKER_CONCURRENCY", "2")
+    os.environ.setdefault("WORKER_CONCURRENCY", "auto")
     os.environ["BACKEND_HOST"] = "127.0.0.1"
     os.environ["BACKEND_PORT"] = str(port)
     os.environ["APP_DATA_DIR"] = str(data_dir)
