@@ -271,7 +271,7 @@ class FolderWatchService:
                     settings_manager.update_folder_watch_state(_key(Path(record['input_path'])), record)
                     logger.warning('folder-watch: output validation failed for %s: %s', record['input_path'], exc)
                 self._pending.pop(task_id, None)
-            elif state in {'FAILURE', 'REVOKED'}:
+            elif state in {'FAILURE', 'REVOKED', 'CANCELED'}:
                 record = {**record, 'status': 'failed', 'error': f'worker state {state}'}
                 settings_manager.update_folder_watch_state(_key(Path(record['input_path'])), record)
                 self._pending.pop(task_id, None)

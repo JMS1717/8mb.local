@@ -27,7 +27,12 @@ export function uploadWithProgress(
   file: File,
   targetSizeMB: number,
   audioKbps = 128,
-  opts?: { auth?: { user: string; pass: string }; onProgress?: (percent: number) => void }
+  opts?: {
+    auth?: { user: string; pass: string };
+    onProgress?: (percent: number) => void;
+    onUploadComplete?: () => void;
+    timeoutMs?: number;
+  }
 ): Promise<any> {
   return new Promise((resolve, reject) => {
     const fd = new FormData();
@@ -36,7 +41,16 @@ export function uploadWithProgress(
     fd.append('audio_bitrate_kbps', String(audioKbps));
 
     const xhr = new XMLHttpRequest();
+    let settled = false;
+    const settle = (fn: (value?: any) => void, value?: any) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
     xhr.open('POST', `${BACKEND}/api/upload`);
+    // Large local uploads can legitimately take minutes. This timeout is for
+    // a stalled upload/analysis response, not a short request deadline.
+    xhr.timeout = Math.max(60_000, opts?.timeoutMs ?? 30 * 60 * 1000);
     if (opts?.auth) {
       xhr.setRequestHeader('Authorization', 'Basic ' + btoa(`${opts.auth.user}:${opts.auth.pass}`));
     }
@@ -46,18 +60,21 @@ export function uploadWithProgress(
         opts.onProgress(pct);
       }
     };
+    xhr.upload.onload = () => opts?.onUploadComplete?.();
     xhr.onload = () => {
       try {
         if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText || '{}'));
+          settle(resolve, JSON.parse(xhr.responseText || '{}'));
         } else {
-          reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+          settle(reject, new Error(xhr.responseText || `HTTP ${xhr.status}`));
         }
       } catch (err: any) {
-        reject(err);
+        settle(reject, err);
       }
     };
-    xhr.onerror = () => reject(new Error('Network error'));
+    xhr.onerror = () => settle(reject, new Error('Network error while uploading or analyzing'));
+    xhr.onabort = () => settle(reject, new Error('Upload canceled'));
+    xhr.ontimeout = () => settle(reject, new Error('Upload or server analysis timed out. The server may still be processing the file; check the queue before retrying.'));
     xhr.send(fd);
   });
 }
@@ -66,7 +83,12 @@ export function uploadWithProgress(
 export function uploadBatchWithProgress(
   files: File[],
   payload: BatchUploadPayload,
-  opts?: { auth?: { user: string; pass: string }; onProgress?: (percent: number, loadedBytes: number, totalBytes: number) => void }
+  opts?: {
+    auth?: { user: string; pass: string };
+    onProgress?: (percent: number, loadedBytes: number, totalBytes: number) => void;
+    onUploadComplete?: () => void;
+    timeoutMs?: number;
+  }
 ): Promise<any> {
   return new Promise((resolve, reject) => {
     if (!files || files.length === 0) {
@@ -105,7 +127,14 @@ export function uploadBatchWithProgress(
     appendMaybe('max_output_fps', payload.max_output_fps);
 
     const xhr = new XMLHttpRequest();
+    let settled = false;
+    const settle = (fn: (value?: any) => void, value?: any) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
     xhr.open('POST', `${BACKEND}/api/batches/upload`);
+    xhr.timeout = Math.max(60_000, opts?.timeoutMs ?? 60 * 60 * 1000);
     if (opts?.auth) {
       xhr.setRequestHeader('Authorization', 'Basic ' + btoa(`${opts.auth.user}:${opts.auth.pass}`));
     }
@@ -115,18 +144,21 @@ export function uploadBatchWithProgress(
         opts.onProgress(pct, e.loaded, e.total);
       }
     };
+    xhr.upload.onload = () => opts?.onUploadComplete?.();
     xhr.onload = () => {
       try {
         if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText || '{}'));
+          settle(resolve, JSON.parse(xhr.responseText || '{}'));
         } else {
-          reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+          settle(reject, new Error(xhr.responseText || `HTTP ${xhr.status}`));
         }
       } catch (err: any) {
-        reject(err);
+        settle(reject, err);
       }
     };
-    xhr.onerror = () => reject(new Error('Network error'));
+    xhr.onerror = () => settle(reject, new Error('Network error while uploading or analyzing'));
+    xhr.onabort = () => settle(reject, new Error('Batch upload canceled'));
+    xhr.ontimeout = () => settle(reject, new Error('Batch upload or server analysis timed out. Check the batch queue before retrying.'));
     xhr.send(fd);
   });
 }

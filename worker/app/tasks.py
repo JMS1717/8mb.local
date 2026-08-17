@@ -18,7 +18,11 @@ from typing import Dict, Optional
 from redis import Redis
 
 from shared.subprocess_utils import hidden_process_kwargs
-from shared.concurrency import AdaptiveConcurrencyGate, configured_worker_concurrency
+from shared.concurrency import (
+    AdaptiveConcurrencyGate,
+    JobCancellationRequested,
+    configured_worker_concurrency,
+)
 
 from .celery_app import celery_app
 from .constants import (
@@ -28,7 +32,7 @@ from .constants import (
 )
 from .utils import ffprobe_info, calc_bitrates
 from .auto_resolution import choose_auto_resolution
-from .hw_detect import get_hw_info, map_codec_to_hw, choose_best_codec
+from .hw_detect import get_hw_info, map_codec_to_hw, choose_best_codec, refresh_hw_info
 from .ffmpeg_helpers import cpu_filter_chain, replace_bitrate_args
 from .startup_tests import run_startup_tests
 from .progress import parse_ffmpeg_out_time, parse_time_string
@@ -39,8 +43,21 @@ logger = logging.getLogger(__name__)
 REDIS = None
 # Cache encoder test results to avoid slow init tests on every job
 ENCODER_TEST_CACHE: Dict[str, bool] = {}
+_ENCODER_TEST_CACHE_LOCK = threading.RLock()
 _LAST_PUBLISH_WARNING_TS = 0.0
 _ENCODE_GATE: AdaptiveConcurrencyGate | None = None
+
+
+def replace_encoder_test_cache(cache: Dict[str, bool]) -> None:
+    """Atomically replace the process-local probe snapshot."""
+    with _ENCODER_TEST_CACHE_LOCK:
+        ENCODER_TEST_CACHE.clear()
+        ENCODER_TEST_CACHE.update(cache or {})
+
+
+def encoder_test_cache_snapshot() -> Dict[str, bool]:
+    with _ENCODER_TEST_CACHE_LOCK:
+        return dict(ENCODER_TEST_CACHE)
 
 
 def _encode_gate() -> AdaptiveConcurrencyGate:
@@ -159,25 +176,10 @@ def get_gpu_env():
     Get environment with NVIDIA GPU variables and library paths for subprocess calls.
     Includes LD_LIBRARY_PATH locations needed for CUDA on WSL2 and NVIDIA toolkit.
     """
-    env = os.environ.copy()
-    # Ensure NVIDIA variables are set for GPU access
-    env['NVIDIA_VISIBLE_DEVICES'] = env.get('NVIDIA_VISIBLE_DEVICES', 'all')
-    env['NVIDIA_DRIVER_CAPABILITIES'] = env.get('NVIDIA_DRIVER_CAPABILITIES', 'compute,video,utility')
-    # Add common library locations (non-destructive append)
-    lib_paths = [
-        '/usr/local/nvidia/lib64',
-        '/usr/local/nvidia/lib',
-        '/usr/local/cuda/lib64',
-        '/usr/local/cuda/lib',
-        '/usr/lib/wsl/lib',  # WSL2 libcuda.so location
-        '/usr/lib/x86_64-linux-gnu',
-        '/usr/lib/x86_64-linux-gnu/dri',
-        '/usr/lib/dri',
-    ]
-    existing = env.get('LD_LIBRARY_PATH', '')
-    add = ':'.join(p for p in lib_paths if p)
-    env['LD_LIBRARY_PATH'] = (existing + (':' if existing and add else '') + add) if (existing or add) else ''
-    return env
+    # Keep jobs, detection, and startup probes on one environment builder.
+    from .hw_detect import get_gpu_env as _get_gpu_env
+
+    return _get_gpu_env()
 
 
 def _is_hardware_encoder(encoder: str) -> bool:
@@ -224,6 +226,12 @@ def _is_cancelled(task_id: str) -> bool:
         return str(val) == '1'
     except Exception:
         return False
+
+
+def _check_cancelled(task_id: str, phase: str) -> None:
+    """Raise the single cooperative cancellation signal used by a task."""
+    if task_id != "?" and _is_cancelled(task_id):
+        raise JobCancellationRequested(f"Job canceled during {phase}")
 
 
 def _history_filename(job_id: str, input_path: str) -> str:
@@ -278,28 +286,57 @@ def _cleanup_transient_input_after_task(func):
         if input_path is None and len(args) >= 3:
             input_path = args[2]  # bound self, job_id, input_path
         transient_input = bool(kwargs.get("transient_input", False))
+        task = args[0] if args else None
+        task_id = getattr(getattr(task, "request", None), "id", "?")
+        cancelled = lambda: task_id != "?" and _is_cancelled(task_id)
         gate = _encode_gate()
-        lease = gate.acquire()
-        logger.info(
-            "adaptive concurrency: acquired encode slot task_id=%s limit=%s",
-            getattr(getattr(args[0], "request", None), "id", "?"),
-            gate.current_limit(),
-        )
+        lease = None
         try:
+            _check_cancelled(task_id, "queued")
+            lease = gate.acquire(cancelled=cancelled)
+            _check_cancelled(task_id, "waiting_for_encode_slot")
+            logger.info(
+                "adaptive concurrency: acquired encode slot task_id=%s limit=%s",
+                task_id,
+                gate.current_limit(),
+            )
             return func(*args, **kwargs)
+        except JobCancellationRequested as exc:
+            message = str(exc) or "Job canceled by user"
+            _publish(task_id, {"type": "canceled", "message": message})
+            try:
+                task.update_state(
+                    # Use a normal custom Celery state for an executing task.
+                    # Celery treats REVOKED result payloads as exception data;
+                    # writing our plain cancellation metadata there makes the
+                    # Redis result impossible to decode and turns status into
+                    # HTTP 500. Queued tasks may still be reported as REVOKED
+                    # by Celery's control layer, but an acknowledged task has
+                    # one explicit CANCELED terminal state.
+                    state="CANCELED",
+                    meta={"state": "canceled", "phase": "canceled", "detail": message},
+                )
+            except Exception:
+                pass
+            # Ignore prevents Celery from converting a cooperative user
+            # cancellation into FAILURE after cleanup has completed.
+            from celery.exceptions import Ignore
+
+            raise Ignore() from exc
         finally:
-            gate.release(lease)
+            if lease is not None:
+                gate.release(lease)
             cleanup_transient_input(input_path, transient_input)
     return wrapper
 
 
 @celery_app.task(name="worker.worker.get_hardware_info")
-def get_hardware_info_task():
+def get_hardware_info_task(force_refresh: bool = False):
     """Return hardware acceleration info for the frontend."""
-    hw = get_hw_info() or {}
+    hw = get_hw_info(force_refresh=bool(force_refresh)) or {}
     # Include preferred codec suggestion using startup test cache if available
     try:
-        preferred = choose_best_codec(hw, encoder_test_cache=ENCODER_TEST_CACHE)
+        preferred = choose_best_codec(hw, encoder_test_cache=encoder_test_cache_snapshot())
         hw = dict(hw)  # copy
         hw["preferred"] = preferred
     except Exception:
@@ -315,13 +352,15 @@ def run_hardware_tests_task() -> dict:
     Returns a small summary with the number of cache entries updated.
     """
     try:
-        _hw_info = get_hw_info()
+        _hw_info = refresh_hw_info()
         cache = run_startup_tests(_hw_info)
-        try:
-            ENCODER_TEST_CACHE.update(cache)
-        except Exception:
-            pass
-        return {"status": "ok", "updated": len(cache)}
+        replace_encoder_test_cache(cache)
+        return {
+            "status": "ok",
+            "updated": len(cache),
+            "hw_info": _hw_info,
+            "probe_generation": _hw_info.get("probe_generation"),
+        }
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
@@ -337,11 +376,13 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                    target_video_bitrate_kbps: float | None = None,
                    max_output_fps: float | None = None,
                    transient_input: bool = False):
+    task_id = self.request.id
+    _check_cancelled(task_id, "queued")
     logger.info(
         "compress_video START task_id=%s job_id=%s codec=%s target_mb=%s preset=%s tune=%s "
         "audio=%s@%skbps container=%s audio_only=%s auto_res=%s max_wh=%s/%s "
         "target_res=%s fps_cap=%s force_hw_decode=%s fast_finalize=%s input=%s",
-        self.request.id, job_id, video_codec, target_size_mb, preset, tune,
+        task_id, job_id, video_codec, target_size_mb, preset, tune,
         audio_codec, audio_bitrate_kbps,
         Path(output_path).suffix.lstrip("."), audio_only, auto_resolution,
         max_width, max_height, target_resolution, max_output_fps,
@@ -356,8 +397,11 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             logger.warning("Could not remove canceled partial output: %s", output_path)
 
     # Detect hardware acceleration
-    _publish(self.request.id, {"type": "log", "message": "Initializing: detecting hardware…"})
+    _publish(task_id, {"type": "progress", "progress": 0.0, "phase": "probing"})
+    _publish(task_id, {"type": "log", "message": "Initializing: detecting hardware…"})
+    _check_cancelled(task_id, "detecting_hardware")
     hw_info = get_hw_info()
+    _check_cancelled(task_id, "detecting_hardware")
     available_cpu_encoders = set(hw_info.get("available_cpu_encoders") or [])
     logger.debug(
         "compress_video hw_info: type=%s device=%s encoders=%s",
@@ -367,8 +411,11 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     _publish(self.request.id, {"type": "log", "message": f"Hardware: {hw_info['type'].upper()} acceleration detected"})
     
     # Probe
-    _publish(self.request.id, {"type": "log", "message": "Initializing: probing input file…"})
+    _publish(task_id, {"type": "progress", "progress": 0.0, "phase": "probing"})
+    _publish(task_id, {"type": "log", "message": "Initializing: probing input file…"})
+    _check_cancelled(task_id, "probing_input")
     info = ffprobe_info(input_path, allow_audio_only=bool(audio_only))
+    _check_cancelled(task_id, "probing_input")
     duration = info.get("duration", 0.0)
     if start_time or end_time:
         try:
@@ -425,19 +472,37 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
 
     # Map requested codec to actual encoder and flags
     actual_encoder, v_flags, init_hw_flags = map_codec_to_hw(video_codec, hw_info)
+    requested_encoder = video_codec
+    resolved_encoder = actual_encoder
+    fallback_occurred = False
+    fallback_stage = "none"
+    fallback_reason = None
+    render_device = hw_info.get("vaapi_device") or hw_info.get("device")
+    logger.info(
+        "encoder selection task_id=%s requested=%s resolved=%s render_device=%s hardware=%s",
+        task_id, requested_encoder, resolved_encoder, render_device,
+        _is_hardware_encoder(resolved_encoder),
+    )
+    _publish(task_id, {"type": "log", "message": (
+        f"Encoder request: {requested_encoder}; resolved: {resolved_encoder}; "
+        f"device: {render_device or 'none'}"
+    )})
     
     # Fallback to CPU only if startup tests explicitly marked encoder as unavailable.
     # If cache is empty (tests still running in background), attempt hardware and rely on runtime fallback below.
     original_encoder = actual_encoder
     if actual_encoder not in CPU_ENCODERS:
-        global ENCODER_TEST_CACHE
+        test_cache = encoder_test_cache_snapshot()
         cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
         logger.debug(
             "startup-test cache lookup: key=%s present=%s value=%s",
-            cache_key, cache_key in ENCODER_TEST_CACHE,
-            ENCODER_TEST_CACHE.get(cache_key),
+            cache_key, cache_key in test_cache,
+            test_cache.get(cache_key),
         )
-        if cache_key in ENCODER_TEST_CACHE and not ENCODER_TEST_CACHE[cache_key]:
+        if cache_key in test_cache and not test_cache[cache_key]:
+            fallback_occurred = True
+            fallback_stage = "startup_probe"
+            fallback_reason = "startup encoder probe failed"
             _publish(self.request.id, {"type": "log", "message": f"⚠️ {actual_encoder} marked unavailable by startup tests, falling back to CPU"})
             _publish(self.request.id, {"type": "log", "message": (
                 "Note: The selected hardware encoder failed initialization during startup tests. "
@@ -453,7 +518,10 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             )
             _publish(self.request.id, {"type": "log", "message": f"Encoder: CPU ({actual_encoder})"})
     
-    _publish(self.request.id, {"type": "log", "message": f"Using encoder: {actual_encoder} (requested: {video_codec})"})
+    _publish(self.request.id, {"type": "log", "message": (
+        f"Using encoder: {actual_encoder} (requested: {video_codec})"
+        + (f"; fallback: {fallback_reason}" if fallback_occurred else "")
+    )})
     _publish(self.request.id, {"type": "log", "message": "Starting compression…"})
     # Mark task as started so queue shows running immediately
     try:
@@ -529,6 +597,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             if sys.platform != "win32":
                 popen_kwargs["start_new_session"] = True
             popen_kwargs.update(hidden_process_kwargs())
+            _check_cancelled(task_id, "preparing")
             audio_proc = subprocess.Popen(cmd, **popen_kwargs)
             while audio_proc.poll() is None:
                 if _is_cancelled(self.request.id):
@@ -558,10 +627,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
 
         if was_cancelled:
             remove_cancelled_output()
-            _publish(self.request.id, {"type": "canceled"})
-            msg = "Job canceled by user"
-            _publish(self.request.id, {"type": "error", "message": msg})
-            raise RuntimeError(msg)
+            raise JobCancellationRequested("Job canceled during encoding")
         if rc != 0:
             msg = f"Audio extraction failed with code {rc}"
             _publish(self.request.id, {"type": "error", "message": msg})
@@ -993,6 +1059,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         if sys.platform != "win32":
             _popen_kw["start_new_session"] = True
         _popen_kw.update(hidden_process_kwargs())
+        _check_cancelled(task_id, "encoding")
         proc_i = subprocess.Popen(command, **_popen_kw)
         logger.debug("ffmpeg Popen pid=%s", proc_i.pid)
         local_stderr = []
@@ -1217,15 +1284,13 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Start process and optionally fall back to CPU on failure
     last_progress = 0.0
     stderr_lines: list[str] = []
+    _check_cancelled(task_id, "preparing")
     rc, was_cancelled = run_ffmpeg_and_stream(cmd)
     last_successful_cmd: list[str] | None = cmd.copy() if rc == 0 and not was_cancelled else None
 
     if was_cancelled:
         remove_cancelled_output()
-        _publish(self.request.id, {"type": "canceled"})
-        msg = "Job canceled by user"
-        _publish(self.request.id, {"type": "error", "message": msg})
-        raise RuntimeError(msg)
+        raise JobCancellationRequested("Job canceled during encoding")
 
     # Decode-error retry: if the failure looks like a hardware decoder issue,
     # retry the same encoder with software decode before falling back to CPU.
@@ -1268,15 +1333,13 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         _publish(self.request.id, {"type": "log", "message": f"FFmpeg retry: {' '.join(retry_cmd)}"})
         stderr_lines = []
         last_progress = 0.0
+        _check_cancelled(task_id, "retrying")
         rc, was_cancelled = run_ffmpeg_and_stream(retry_cmd)
         if rc == 0 and not was_cancelled:
             last_successful_cmd = retry_cmd.copy()
         if was_cancelled:
             remove_cancelled_output()
-            _publish(self.request.id, {"type": "canceled"})
-            msg = "Job canceled by user"
-            _publish(self.request.id, {"type": "error", "message": msg})
-            raise RuntimeError(msg)
+            raise JobCancellationRequested("Job canceled during decode retry")
 
     if rc != 0 and _is_hardware_encoder(actual_encoder):
         _publish(self.request.id, {"type": "log", "message": f"⚠️ Hardware encode ({original_encoder}) failed (rc={rc}). Retrying on CPU..."})
@@ -1284,6 +1347,15 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             "Explanation: The hardware encoder failed at runtime. The worker will retry using a CPU encoder which is slower. "
             "This can happen if drivers, device nodes, or libraries are missing or if the encoder is unsupported by the current ffmpeg build. "
             "Run the encoder diagnostic tests from the UI or check logs to investigate."
+        )})
+        fallback_occurred = True
+        fallback_stage = "runtime_encode"
+        fallback_reason = "hardware encoder initialization or encode failed"
+        if stderr_lines:
+            fallback_reason = " ".join(str(line).strip() for line in stderr_lines[-3:] if str(line).strip())[:1000]
+        _publish(task_id, {"type": "log", "message": (
+            f"Hardware fallback: requested={requested_encoder} attempted={actual_encoder}; "
+            f"reason={fallback_reason}"
         )})
         try:
             fb_encoder, fb_flags = _cpu_fallback_for(actual_encoder, available_cpu_encoders)
@@ -1337,16 +1409,14 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             cmd2 += ["-c:a", chosen_audio_codec, "-b:a", a_bitrate_str]
         cmd2 += [*mp4_video_tag_args(output_path, fb_encoder), *mp4_flags, "-progress", "pipe:2", output_path]
 
+        _check_cancelled(task_id, "runtime_fallback")
         rc, was_cancelled = run_ffmpeg_and_stream(cmd2)
         if rc == 0 and not was_cancelled:
             last_successful_cmd = cmd2.copy()
 
     if was_cancelled:
         remove_cancelled_output()
-        _publish(self.request.id, {"type": "canceled"})
-        msg = "Job canceled by user"
-        _publish(self.request.id, {"type": "error", "message": msg})
-        raise RuntimeError(msg)
+        raise JobCancellationRequested("Job canceled during fallback encoding")
 
     if rc != 0:
         recent_stderr = '\n'.join(stderr_lines[-20:]) if stderr_lines else 'No stderr output'
@@ -1362,11 +1432,13 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     except Exception:
         pass
     _publish(self.request.id, {"type": "log", "message": "Encoding complete. Finalizing output..."})
+    _check_cancelled(task_id, "finalizing")
 
     # CRITICAL: Wait for file to be fully written and readable (especially on networked/slow filesystems)
     max_wait = 10  # seconds
     file_ready = False
     for attempt in range(max_wait * 5):  # Check every 200ms
+        _check_cancelled(task_id, "finalizing")
         try:
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 # Try to open the file to ensure it's not locked
@@ -1399,6 +1471,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         pass
 
     # Checking file size and preparing for possible retry
+    _check_cancelled(task_id, "finalizing")
     final_size_mb = round(final_size / (1024*1024), 2) if final_size else 0
     
     # Check if file is too large (>2% over target) and retry with lower bitrate (size-target mode only)
@@ -1472,6 +1545,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             # Run the retry encode
             last_progress = 0.0
             stderr_lines = []
+            _check_cancelled(task_id, "retrying")
             rc, was_cancelled = run_ffmpeg_and_stream(retry_cmd)
             
             if was_cancelled:
@@ -1487,10 +1561,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                         os.replace(retry_backup_path, output_path)
                     except Exception:
                         logger.warning("Could not restore oversized output after canceled retry: %s", output_path)
-                _publish(self.request.id, {"type": "canceled"})
-                msg = "Job canceled during retry"
-                _publish(self.request.id, {"type": "error", "message": msg})
-                raise RuntimeError(msg)
+                raise JobCancellationRequested("Job canceled during retry")
 
             retry_output_path = retry_staging_path or output_path
             retry_output_valid = False
@@ -1560,6 +1631,15 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         # This is the encoder that produced the final output, which may be a
         # CPU encoder after a controlled hardware fallback.
         "encoder": actual_encoder,
+        "requested_encoder": requested_encoder,
+        "resolved_encoder": resolved_encoder,
+        "actual_encoder": actual_encoder,
+        "hardware_used": _is_hardware_encoder(actual_encoder),
+        "fallback_occurred": fallback_occurred,
+        "fallback_stage": fallback_stage,
+        "fallback_reason": fallback_reason,
+        "render_device": render_device,
+        "hardware_device": render_device,
         "duration_s": duration,
         "target_size_mb": target_size_mb,
         "final_size_mb": final_size_mb,

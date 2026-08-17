@@ -26,7 +26,7 @@ export interface SSEConnectedEvent {
 export interface SSEProgressEvent {
 	type: 'progress';
 	progress: number;
-	phase?: 'encoding' | 'finalizing' | 'done';
+	phase?: 'queued' | 'waiting' | 'probing' | 'encoding' | 'finalizing' | 'canceled' | 'done';
 	eta_seconds?: number;
 	speed_x?: number;
 }

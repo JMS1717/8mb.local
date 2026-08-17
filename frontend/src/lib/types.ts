@@ -126,6 +126,16 @@ export interface CompressStats {
 	target_size_mb: number;
 	final_size_mb: number;
 	target_video_bitrate_kbps?: number | null;
+	encoder?: string | null;
+	requested_encoder?: string | null;
+	resolved_encoder?: string | null;
+	actual_encoder?: string | null;
+	hardware_used?: boolean | null;
+	hardware_device?: string | null;
+	render_device?: string | null;
+	fallback_occurred?: boolean | null;
+	fallback_stage?: string | null;
+	fallback_reason?: string | null;
 }
 
 /** Preset profile as returned by the settings API. */

@@ -6,7 +6,7 @@
   import { autoDownloadOnce, clearActiveJobId, downloadFile, getActiveJobId, setActiveJobId } from '$lib/activeJob';
   import { stagePendingBatchFiles } from '$lib/pendingBatch';
   import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
-  import { availableCodecOptions, codecColor, codecIcon, encoderDisplayName, type CodecOption } from '$lib/codecs';
+  import { availableCodecOptions, classifyEncoder, codecColor, codecIcon, encoderDisplayName, type CodecOption } from '$lib/codecs';
   import { APP_VERSION } from '$lib/generated-version';
 
   let file: File | null = null;
@@ -177,6 +177,7 @@
   let displayedProgress = 0;
   let logLines: string[] = [];
   let doneStats: any = null;
+  let encoderTelemetry: any = null;
   let isCompressing = false;
   let esRef: EventSource | null = null;
   let errorText: string | null = null;
@@ -349,11 +350,32 @@
     // and reconnect when the user returns from Queue, Settings, or History.
     const trackedJob = getActiveJobId();
     if (trackedJob) {
-      taskId = trackedJob;
-      logLines = ['Reconnected to the active background job.', ...logLines];
-      reconnectStream();
+      await restoreTrackedJob(trackedJob);
     }
   });
+
+  async function restoreTrackedJob(candidate: string): Promise<void> {
+    try {
+      const status = await getJobStatus(candidate);
+      const state = String(status?.state || '').toUpperCase();
+      const activeStates = new Set(['PENDING', 'RECEIVED', 'STARTED', 'PROGRESS', 'RUNNING', 'QUEUED', 'WAITING']);
+      if (activeStates.has(state)) {
+        taskId = candidate;
+        logLines = ['Reconnected to the active background job.', ...logLines];
+        reconnectStream();
+        return;
+      }
+    } catch {
+      // A missing task after a container/Redis restart is stale local state,
+      // not an active compression job.
+    }
+    clearActiveJobId(candidate);
+    taskId = null;
+    isCompressing = false;
+    isCancelling = false;
+    isFinalizing = false;
+    logLines = ['Previous job state was no longer available; ready for a new upload.', ...logLines];
+  }
 
   async function refreshRecentHistory(): Promise<void> {
     try {
@@ -607,7 +629,13 @@
     uploadProgress = 0;
     errorText = null;
     try {
-      jobInfo = await uploadWithProgress(file, targetMB, audioKbps, { onProgress: (p:number)=>{ uploadProgress = p; } });
+      jobInfo = await uploadWithProgress(file, targetMB, audioKbps, {
+        onProgress: (p:number)=>{ uploadProgress = p; },
+        onUploadComplete: () => {
+          uploadProgress = 100;
+          logLines = ['Upload complete; analyzing on the server…', ...logLines].slice(0, 500);
+        },
+      });
       uploadedFileName = file.name; // Mark this file as uploaded
       // Set warn based on current client-side estimate
       warnText = (estimated && estimated.video_kbps < 100) ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
@@ -762,6 +790,8 @@
           // Handle completion
           if (data.type === 'done') {
             doneStats = data.stats;
+            encoderTelemetry = data.stats || null;
+            if (data.stats?.actual_encoder) encodeMethod = String(data.stats.actual_encoder);
             progress = 100;
             displayedProgress = 100;
             isCompressing = false;
@@ -913,7 +943,7 @@
             clearInterval(finalizePoller);
             finalizePoller = null;
             reconnectStream();
-          } else if (state === 'FAILURE' || state === 'REVOKED') {
+          } else if (state === 'FAILURE' || state === 'REVOKED' || state === 'CANCELED') {
             clearInterval(finalizePoller);
             finalizePoller = null;
             reconnectStream();
@@ -948,6 +978,8 @@
         }
         if (data.type === 'done') {
           doneStats = data.stats;
+          encoderTelemetry = data.stats || null;
+          if (data.stats?.actual_encoder) encodeMethod = String(data.stats.actual_encoder);
           progress = 100;
           displayedProgress = 100;
           isCompressing = false;
@@ -994,6 +1026,7 @@
     displayedProgress = 0;
     logLines = [];
     doneStats = null;
+    encoderTelemetry = null;
     warnText = null;
     errorText = null;
     isUploading = false;
@@ -1637,16 +1670,23 @@
           </div>
         {/if}
         {#if encodeMethod}
-          {#if /_nvenc$/.test(encodeMethod)}
-            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: NVIDIA NVENC</span>
+          {@const encoderInfo = classifyEncoder(encodeMethod)}
+          {#if encoderInfo.hardware}
+            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: {encoderInfo.label} ({encodeMethod})</span>
           {:else}
-            <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-200 border border-slate-600/40">Encoder: CPU ({encodeMethod})</span>
+            <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-200 border border-slate-600/40">Encoder: CPU/software ({encodeMethod})</span>
+          {/if}
+          {#if encoderTelemetry?.fallback_occurred}
+            <div class="text-xs text-amber-300 mt-1">
+              Requested: {encoderTelemetry.requested_encoder || videoCodec} → CPU fallback: {encoderTelemetry.actual_encoder || encodeMethod}
+              {#if encoderTelemetry.fallback_reason}<span class="text-gray-400"> ({encoderTelemetry.fallback_reason})</span>{/if}
+            </div>
           {/if}
         {:else}
           <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-600/40">Encoder: detecting…</span>
         {/if}
       </div>
-      {#if encodeMethod && encodeMethod.startsWith('lib') && hardwareType !== 'cpu'}
+      {#if encoderTelemetry?.fallback_occurred}
         <div class="text-xs text-amber-300 mt-1">Hardware encoder unavailable for this job — using CPU fallback.</div>
       {/if}
       

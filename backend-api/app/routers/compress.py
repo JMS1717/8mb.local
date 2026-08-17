@@ -203,6 +203,13 @@ async def queue_status():
                             res = celery_app.AsyncResult(task_id)
                             celery_state = res.state
                             meta = res.info if isinstance(res.info, dict) else {}
+                            for telemetry_key in (
+                                'requested_encoder', 'resolved_encoder', 'actual_encoder',
+                                'hardware_used', 'hardware_device', 'fallback_occurred',
+                                'fallback_stage', 'fallback_reason',
+                            ):
+                                if meta.get(telemetry_key) is not None:
+                                    setattr(job_meta, telemetry_key, meta[telemetry_key])
                             
                             if celery_state == 'PENDING':
                                 job_meta.state = 'queued'
@@ -247,6 +254,12 @@ async def queue_status():
                                 if not job_meta.completed_at:
                                     job_meta.completed_at = time.time()
                                 job_meta.error = str(meta) if meta else 'Unknown error'
+                            elif celery_state in ('REVOKED', 'CANCELED'):
+                                job_meta.state = 'canceled'
+                                job_meta.phase = 'canceled'
+                                if not job_meta.completed_at:
+                                    job_meta.completed_at = time.time()
+                                job_meta.error = None
                             
                             await redis.setex(f"job:{task_id}", 86400, orjson.dumps(job_meta.dict()).decode())
                         except Exception:

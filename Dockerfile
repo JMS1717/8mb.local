@@ -50,7 +50,7 @@ RUN git clone --depth 1 --branch ${INTEL_MEDIA_DRIVER_VERSION} \
     cmake --install media-driver/build && rm -rf media-driver
 
 # Intel oneVPL dispatcher. Ubuntu 22.04's package is older than the oneVPL
-# 2.6 minimum required by FFmpeg 6.1, so pin the latest upstream release.
+# 2.6 minimum required by FFmpeg 6.1, so pin the upstream dispatcher release.
 ARG LIBVPL_VERSION=v2023.4.0
 RUN git clone --depth 1 --branch ${LIBVPL_VERSION} https://github.com/intel/libvpl.git && \
     cmake -S libvpl -B libvpl/build \
@@ -196,10 +196,13 @@ RUN mkdir -p /app/uploads /app/outputs /var/log/supervisor /var/lib/redis /var/l
 # Set NVIDIA driver capabilities for NVENC/NVDEC support
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 ENV NVIDIA_VISIBLE_DEVICES=all
-ENV LIBVA_DRIVERS_PATH=/usr/local/lib/dri
+# Keep the source-built Intel iHD driver first while retaining Mesa's AMD and
+# other VAAPI drivers from the distro directory. A single /usr/local-only path
+# makes radeonsi invisible and breaks AMD VAAPI.
+ENV LIBVA_DRIVERS_PATH=/usr/local/lib/dri:/usr/lib/x86_64-linux-gnu/dri:/usr/lib/dri
 # Keep the source-built Intel stack ahead of Jammy's older VA/Gmm libraries.
-# Worker probes append system paths for GPU discovery, so relying only on
-# ldconfig would allow an incompatible system libigdgmm to win.
+# This is intentional: only the matching source-built Intel artifacts are
+# loaded from /usr/local; AMD continues to use the distro Mesa driver.
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
 
 # Configure supervisord

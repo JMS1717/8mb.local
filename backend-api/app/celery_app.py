@@ -60,7 +60,7 @@ if _local_enabled():
             return snapshot.get("result")
 
         def ready(self) -> bool:
-            return self.state in {"SUCCESS", "FAILURE", "REVOKED"}
+            return self.state in {"SUCCESS", "FAILURE", "REVOKED", "CANCELED"}
 
         def successful(self) -> bool:
             return self.state == "SUCCESS"
@@ -182,8 +182,8 @@ if _local_enabled():
             kwargs: dict[str, Any],
         ) -> Any:
             snapshot = _task_snapshot(task_id)
-            if (snapshot and snapshot.get("state") == "REVOKED") or _is_cancel_requested(task_id):
-                _update_task(task_id, state="REVOKED", info={"detail": "Cancellation requested"})
+            if (snapshot and snapshot.get("state") in {"REVOKED", "CANCELED"}) or _is_cancel_requested(task_id):
+                _update_task(task_id, state="CANCELED", info={"detail": "Cancellation requested"})
                 return None
             _update_task(task_id, state="STARTED", info={"progress": 0.0, "phase": "queued"})
             try:
@@ -222,9 +222,9 @@ if _local_enabled():
                 return value
             except Exception as exc:
                 snapshot = _task_snapshot(task_id) or {}
-                canceled = snapshot.get("state") == "REVOKED" or _is_cancel_requested(task_id)
+                canceled = snapshot.get("state") in {"REVOKED", "CANCELED"} or _is_cancel_requested(task_id)
                 if canceled:
-                    _update_task(task_id, state="REVOKED", info=snapshot.get("info") or {}, error=str(exc))
+                    _update_task(task_id, state="CANCELED", info=snapshot.get("info") or {}, error=str(exc))
                     logger.info("local task canceled id=%s name=%s", task_id, name)
                 else:
                     _update_task(task_id, state="FAILURE", info=snapshot.get("info") or {}, error=str(exc))
@@ -236,11 +236,11 @@ if _local_enabled():
             with self._lock:
                 future = self._futures.get(str(task_id))
             if future is not None and future.cancel():
-                _update_task(str(task_id), state="REVOKED", info={"detail": "Cancellation requested"})
+                _update_task(str(task_id), state="CANCELED", info={"detail": "Cancellation requested"})
             elif future is None:
                 # Preserve Celery's behavior for an unknown task ID without
                 # overwriting a result that may have completed already.
-                _update_task(str(task_id), state="REVOKED", info={"detail": "Cancellation requested"})
+                _update_task(str(task_id), state="CANCELED", info={"detail": "Cancellation requested"})
 
         def shutdown(self) -> None:
             """Cancel local jobs and wait for FFmpeg workers to stop.

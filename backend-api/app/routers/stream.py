@@ -46,7 +46,7 @@ def _terminal_or_progress_event(task_id: str) -> dict | None:
             except Exception:
                 detail = "Compression failed"
         return {"type": "error", "task_id": task_id, "message": str(detail)}
-    if state == "REVOKED":
+    if state in {"REVOKED", "CANCELED"}:
         return {"type": "canceled", "task_id": task_id, "message": "Job canceled by user"}
     return None
 

@@ -344,7 +344,7 @@ _hw_info_refresh_lock: asyncio.Lock | None = None
 # ---------------------------------------------------------------------------
 # Hardware info helpers
 # ---------------------------------------------------------------------------
-def _fetch_hw_info_blocking(timeout: int = 5) -> dict:
+def _fetch_hw_info_blocking(timeout: int = 5, force_refresh: bool = False) -> dict:
     """Synchronously call the Celery ``get_hardware_info`` task.
 
     Blocks the caller for up to ``timeout`` seconds; never call this directly
@@ -354,7 +354,10 @@ def _fetch_hw_info_blocking(timeout: int = 5) -> dict:
     t0 = time.time()
     try:
         logger.debug("hw-info: sending celery task (timeout=%ss)", timeout)
-        result = celery_app.send_task("worker.worker.get_hardware_info")
+        result = celery_app.send_task(
+            "worker.worker.get_hardware_info",
+            kwargs={"force_refresh": bool(force_refresh)},
+        )
         info = result.get(timeout=timeout) or {"type": "cpu", "available_encoders": {}}
         logger.debug(
             "hw-info: celery task returned in %.2fs: type=%s encoders=%s",
@@ -411,7 +414,11 @@ async def get_hw_info_cached_async() -> dict:
         if HW_INFO_CACHE is not None and (now - HW_INFO_CACHE_TS) < HW_INFO_TTL_SECONDS:
             return HW_INFO_CACHE
         logger.debug("hw-info: async refresh starting (offloading celery.get to thread)")
-        fresh = await asyncio.to_thread(_fetch_hw_info_blocking, HW_INFO_RPC_TIMEOUT_SECONDS)
+        fresh = await asyncio.to_thread(
+            _fetch_hw_info_blocking,
+            HW_INFO_RPC_TIMEOUT_SECONDS,
+            False,
+        )
         if fresh:
             HW_INFO_CACHE = fresh
             HW_INFO_CACHE_TS = time.time()
@@ -426,7 +433,7 @@ def get_hw_info_fresh(timeout: int = 10) -> dict:
     startup ``sync_codec_settings_from_tests`` bootstrap loop.
     """
     global HW_INFO_CACHE, HW_INFO_CACHE_TS
-    info = _fetch_hw_info_blocking(timeout=timeout)
+    info = _fetch_hw_info_blocking(timeout=timeout, force_refresh=True)
     if info:
         HW_INFO_CACHE = info
         HW_INFO_CACHE_TS = time.time()
@@ -437,7 +444,7 @@ def get_hw_info_fresh(timeout: int = 10) -> dict:
 async def get_hw_info_fresh_async(timeout: int = 10) -> dict:
     """Async force-refresh; offloads the Celery RPC to a worker thread."""
     global HW_INFO_CACHE, HW_INFO_CACHE_TS
-    info = await asyncio.to_thread(_fetch_hw_info_blocking, timeout)
+    info = await asyncio.to_thread(_fetch_hw_info_blocking, timeout, True)
     if info:
         HW_INFO_CACHE = info
         HW_INFO_CACHE_TS = time.time()
@@ -451,6 +458,16 @@ def invalidate_hw_info_cache() -> None:
     logger.debug("hw-info: cache invalidated")
     HW_INFO_CACHE = None
     HW_INFO_CACHE_TS = 0.0
+
+
+def set_hw_info_cache(info: dict | None) -> None:
+    """Install a worker-returned snapshot without issuing a second probe."""
+    global HW_INFO_CACHE, HW_INFO_CACHE_TS
+    if info:
+        HW_INFO_CACHE = info
+        HW_INFO_CACHE_TS = time.time()
+    else:
+        invalidate_hw_info_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -1085,7 +1102,7 @@ async def refresh_batch_payload(batch_payload: dict) -> dict:
                 progress = 100.0
                 output_path = meta.get("output_path") or output_path
                 error = None
-            elif celery_state in ("FAILURE", "REVOKED"):
+            elif celery_state in ("FAILURE", "REVOKED", "CANCELED"):
                 state = "failed" if celery_state == "FAILURE" else "canceled"
                 progress = 100.0
                 if not error:

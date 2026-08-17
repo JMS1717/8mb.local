@@ -47,6 +47,16 @@ class StatusResponse(BaseModel):
     progress: Optional[float] = None
     detail: Optional[str] = None
     encoder: Optional[str] = None
+    phase: Optional[str] = None
+    requested_encoder: Optional[str] = None
+    resolved_encoder: Optional[str] = None
+    actual_encoder: Optional[str] = None
+    hardware_used: Optional[bool] = None
+    fallback_occurred: Optional[bool] = None
+    fallback_stage: Optional[str] = None
+    fallback_reason: Optional[str] = None
+    render_device: Optional[str] = None
+    hardware_device: Optional[str] = None
 
 class ProgressEvent(BaseModel):
     type: Literal['progress','log','done','error','retry','canceled','connected','ping']
@@ -162,7 +172,7 @@ class JobMetadata(BaseModel):
     video_codec: str
     state: Literal['queued', 'running', 'completed', 'failed', 'canceled'] = 'queued'
     progress: float = 0.0
-    phase: Optional[Literal['queued', 'encoding', 'finalizing', 'done']] = 'queued'  # NEW: Current phase
+    phase: Optional[Literal['queued', 'waiting', 'probing', 'encoding', 'finalizing', 'canceled', 'done']] = 'queued'
     created_at: float  # Unix timestamp
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
@@ -170,6 +180,14 @@ class JobMetadata(BaseModel):
     output_path: Optional[str] = None
     input_path: Optional[str] = None
     final_size_mb: Optional[float] = None
+    requested_encoder: Optional[str] = None
+    resolved_encoder: Optional[str] = None
+    actual_encoder: Optional[str] = None
+    hardware_used: Optional[bool] = None
+    hardware_device: Optional[str] = None
+    fallback_occurred: Optional[bool] = None
+    fallback_stage: Optional[str] = None
+    fallback_reason: Optional[str] = None
     # Time estimation fields
     last_progress_update: Optional[float] = None  # Timestamp of last progress update
     estimated_completion_time: Optional[float] = None  # Estimated Unix timestamp when job will complete
