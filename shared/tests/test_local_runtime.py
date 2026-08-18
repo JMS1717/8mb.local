@@ -49,6 +49,27 @@ class TestLocalRuntime(unittest.TestCase):
         self.assertEqual(job["state"], "running")
         self.assertEqual(job["progress"], 42.5)
 
+    def test_structured_telemetry_survives_pubsub_gap(self):
+        redis = get_sync_redis()
+        redis.setex("job:task-telemetry", 60, json.dumps({"state": "queued"}))
+        record_worker_event(
+            "task-telemetry",
+            {
+                "type": "telemetry",
+                "telemetry": {
+                    "requested_encoder": "hevc_qsv",
+                    "resolved_encoder": "hevc_qsv",
+                    "hardware_type": "intel_qsv",
+                    "hardware_device": "/dev/dri/renderD128",
+                    "fallback_occurred": False,
+                },
+            },
+        )
+        snapshot = task_snapshot("task-telemetry")
+        self.assertEqual(snapshot["info"]["resolved_encoder"], "hevc_qsv")
+        job = json.loads(redis.get("job:task-telemetry"))
+        self.assertEqual(job["hardware_device"], "/dev/dri/renderD128")
+
     def test_done_event_exposes_output_metadata_to_local_downloads(self):
         record_worker_event(
             "task-2",

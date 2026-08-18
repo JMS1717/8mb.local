@@ -7,20 +7,20 @@ Date: 2026-08-18
 This audit uses the issue #44 functional baseline without changing `main`:
 
 - Branch: `agent/issue-45-docker-size`
-- Source commit used for the final build and published image: `c04b850eec30879f160959c70c4ea2d06200dd35`
+- Historical source commit used for the first lean-image build: `c04b850eec30879f160959c70c4ea2d06200dd35`
 - Parent issue #44 test commit: `0138df78bf46e5e87d026f1f4708251b311cedcc`
 - `main` reference at the start of the issue #44 work: `d991b907e1e47283dd0a2f4e251d7c4dc878896c`
 - Initial prototype tag: `jms1717/8mblocal:issue45-slim-a`
 - Pre-publish clean candidate tag: `jms1717/8mblocal:issue45-slim-clean`
-- Final immutable tag: `jms1717/8mblocal:issue45-slim-c04b850`
-- Final published digest: `sha256:af7c61dc4fd38e07febd461aefaac9128f5e17e22b3bc915490df1123c22140d`
-- Final local image size: `501,348,738` bytes
+- Historical immutable tag: `jms1717/8mblocal:issue45-slim-c04b850`
+- Historical published digest: `sha256:af7c61dc4fd38e07febd461aefaac9128f5e17e22b3bc915490df1123c22140d`
+- Historical local image size: `501,348,738` bytes
 
-The issue branch was pushed to GitHub. The immutable Docker Hub test tag was
-published and pulled fresh for validation. The image was then deployed only to
-the Powerhouse `8mblocal` Compose service after an isolated RAM test. No merge
-to `main`, normal/latest Docker tag, GitHub release, or Partner Center change
-was performed.
+The records above describe the earlier `c04b850` artifact. The current
+promotion creates a new immutable image from the final telemetry/P010
+checkout; its commit, tag, digest, and host validation are recorded in the
+promotion record below. No merge to `main`, normal/latest Docker tag, GitHub
+release, or Partner Center change is part of this audit.
 
 ## Finding
 
@@ -40,7 +40,7 @@ The measurements below intentionally distinguish several Docker size concepts:
 | `docker system df` unique size | 1.16 GB | 1.546 GB |
 | `docker save` archive | not recreated for baseline | 501,387,776 bytes |
 
-The `docker system df` values include Docker's layer accounting and shared-layer state, so they should not be compared as a simple compressed registry size. The candidate's live root is approximately 1.02 GB and its image metadata/save size is approximately 501 MB. A registry push was intentionally not performed, so no registry digest or registry-compressed measurement is claimed.
+The `docker system df` values include Docker's layer accounting and shared-layer state, so they should not be compared as a simple compressed registry size. The historical candidate's live root was approximately 1.02 GB and its image metadata/save size approximately 501 MB. The historical candidate was later pushed and pulled by digest; the new promotion records its own fresh registry result separately.
 
 The candidate removes these major final-image costs:
 
@@ -248,6 +248,46 @@ validation, and restart recovery. The command used
 mentioned a batch scenario, but batch was explicitly skipped and is not
 claimed as part of this run.
 
+### Current issue #44 telemetry and 10-bit validation
+
+The current uncommitted checkout contains the accepted follow-up changes on
+top of the historical lean image. They were validated in the isolated
+`10thGenLaptop` deployment on port 8002 without changing the existing port
+8001 service.
+
+- HEVC QSV and HEVC VAAPI real jobs completed with the exact requested encoder,
+  `hardware_used=true`, and `/dev/dri/renderD128`.
+- The 10-bit path uses P010 software frames and the `main10` profile for HEVC
+  QSV and VAAPI while retaining NV12 for 8-bit sources and H.264. Source HDR
+  color metadata is passed through when it is present. The exact 10-bit
+  Intel/Main10 and HDR-preservation validation is part of the accepted test
+  evidence for this checkout.
+- The controlled QSV/VAAPI benchmark remains the authoritative performance
+  comparison. The earlier apparent QSV slowdown was not an apples-to-apples
+  encoder comparison: QSV received a quality/preset argument (`-preset
+  slower` in the earlier comparison), while VAAPI did not receive an
+  equivalent setting. Raw UI-run FPS therefore is not evidence that VAAPI is
+  inherently faster or that encoder preference should change.
+- The original `Encoder: detecting...` symptom was a frontend reporting race:
+  the badge depended too heavily on transient text/SSE messages and classified
+  only NVENC as hardware. Structured requested/resolved/actual encoder,
+  hardware, device, decoder, and fallback telemetry is now persisted in the
+  existing job/status state and replayed on SSE reconnect. The UI priority is
+  actual encoder, then resolved encoder, then clearly identified requested
+  encoder; text parsing is compatibility-only.
+- Active-job status, progress, encoder identity, `/dev/dri/renderD128`, and
+  job isolation survived late SSE reconnect/page-refresh validation. The QSV
+  recovery task was `46ac6c06-0b3e-466f-9853-ffa50142d8e2`; the VAAPI recovery
+  task was `cdf18448-7e3a-4497-8758-4d9bbb053d3a`. `Encoder: detecting...`
+  was not reproduced on the new build, and no duplicate or cross-job
+  telemetry was observed.
+- There is still no automated browser-unit runner in the repository. Active
+  frontend behavior was manually observed on port 8002, while reconnect
+  recovery was validated through the same HTTP/SSE status paths used by the
+  page.
+- AMD VAAPI remains structurally supported and its driver discovery remains
+  cross-vendor, but a physical AMD exact-encoder run is still outstanding.
+
 The first Powerhouse RAM probe used `/api/health` and therefore stopped before
 upload because the actual endpoint is `/healthz`; this was a harness error, not
 an application failure. The corrected probe passed and its uniquely named
@@ -320,17 +360,12 @@ No application source, Windows packaging, Compose, or media-stack behavior was c
 
 ## Recommendation and remaining work
 
-The lean universal runtime is a strong issue #45 candidate and is functionally validated for CPU, NVIDIA NVENC/NVDEC/CUDA scaling, Intel H.264/HEVC QSV/VAAPI on a 10th-generation Intel host, and cross-vendor driver discovery. It should remain on this issue branch until reviewed.
+The lean universal runtime plus the accepted P010/HDR and durable telemetry
+changes are ready for review on `agent/issue-45-docker-size`. The current
+promotion record below is the source of truth for the newly committed image;
+the historical `c04b850` tag is retained only as a rollback/reference artifact.
 
-Before merging or publishing a normal tag:
-
-1. Build the candidate on a clean Linux builder as a reproducibility check.
-2. Run an exact AMD VAAPI encode on an AMD host; the image currently passes structural AMD-driver checks only.
-3. Confirm the normal release workflow records the smaller candidate's image size and does not require the old CUDA runtime base.
-4. Decide whether to clarify the local-only `jms1717/8mblocal:vaapi` Compose image tag in a separate documentation change.
-
-The issue-45 image is ready for OneCreek/maintainer review and the current
-Powerhouse deployment is healthy. Intel H.264/HEVC QSV/VAAPI and NVIDIA
-H.264/HEVC real application paths are proven on the available hosts. AMD
-hardware remains the only unexecuted hardware proof in this cycle; no claim is
-made that an AMD encode passed.
+The remaining hardware gap is physical AMD VAAPI exact-encoder validation. The
+image passes structural AMD driver-discovery checks, but no AMD encode is
+claimed until it is run on an AMD host. Normal release tags, `latest`, a merge
+to `main`, and Partner Center changes are outside this promotion.

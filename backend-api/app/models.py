@@ -55,15 +55,19 @@ class StatusResponse(BaseModel):
     fallback_occurred: Optional[bool] = None
     fallback_stage: Optional[str] = None
     fallback_reason: Optional[str] = None
+    hardware_type: Optional[str] = None
     render_device: Optional[str] = None
     hardware_device: Optional[str] = None
+    decoder: Optional[dict] = None
 
 class ProgressEvent(BaseModel):
-    type: Literal['progress','log','done','error','retry','canceled','connected','ping']
+    type: Literal['progress','log','done','error','retry','canceled','connected','ping','telemetry']
     task_id: str
     progress: Optional[float] = None
     message: Optional[str] = None
     stats: Optional[dict] = None
+    telemetry: Optional[dict] = None
+    phase: Optional[str] = None
     download_url: Optional[str] = None
 
 class AuthSettings(BaseModel):
@@ -188,6 +192,8 @@ class JobMetadata(BaseModel):
     fallback_occurred: Optional[bool] = None
     fallback_stage: Optional[str] = None
     fallback_reason: Optional[str] = None
+    hardware_type: Optional[str] = None
+    decoder: Optional[dict] = None
     # Time estimation fields
     last_progress_update: Optional[float] = None  # Timestamp of last progress update
     estimated_completion_time: Optional[float] = None  # Estimated Unix timestamp when job will complete

@@ -206,7 +206,7 @@ async def queue_status():
                             for telemetry_key in (
                                 'requested_encoder', 'resolved_encoder', 'actual_encoder',
                                 'hardware_used', 'hardware_device', 'fallback_occurred',
-                                'fallback_stage', 'fallback_reason',
+                                'fallback_stage', 'fallback_reason', 'hardware_type', 'decoder',
                             ):
                                 if meta.get(telemetry_key) is not None:
                                     setattr(job_meta, telemetry_key, meta[telemetry_key])

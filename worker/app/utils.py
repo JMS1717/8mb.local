@@ -268,6 +268,13 @@ def ffprobe_info(input_path: str, allow_audio_only: bool = False) -> dict:
     v_width = None
     v_height = None
     v_fps: Optional[float] = None
+    v_pix_fmt: Optional[str] = None
+    v_profile: Optional[str] = None
+    v_color_space: Optional[str] = None
+    v_color_transfer: Optional[str] = None
+    v_color_primaries: Optional[str] = None
+    v_color_range: Optional[str] = None
+    v_bits_per_raw_sample: Optional[int] = None
     display_aspect_ratio: Optional[str] = None
     has_audio = False
     has_video = False
@@ -279,6 +286,25 @@ def ffprobe_info(input_path: str, allow_audio_only: bool = False) -> dict:
             if bitrate is not None and bitrate >= 0:
                 v_bitrate = bitrate / 1000.0
             v_codec = s.get("codec_name")
+            if not v_pix_fmt:
+                v_pix_fmt = s.get("pix_fmt")
+            if not v_profile:
+                v_profile = s.get("profile")
+            if not v_color_space:
+                v_color_space = s.get("color_space")
+            if not v_color_transfer:
+                v_color_transfer = s.get("color_transfer")
+            if not v_color_primaries:
+                v_color_primaries = s.get("color_primaries")
+            if not v_color_range:
+                v_color_range = s.get("color_range")
+            if v_bits_per_raw_sample is None:
+                try:
+                    parsed_bits = int(float(s.get("bits_per_raw_sample") or 0))
+                    if parsed_bits > 0:
+                        v_bits_per_raw_sample = parsed_bits
+                except (TypeError, ValueError):
+                    pass
             width = _parse_finite_float(s.get("width"))
             height = _parse_finite_float(s.get("height"))
             if width is not None and width > 0:
@@ -327,6 +353,13 @@ def ffprobe_info(input_path: str, allow_audio_only: bool = False) -> dict:
         "video_bitrate_kbps": v_bitrate,
         "audio_bitrate_kbps": a_bitrate,
         "video_codec": v_codec,
+        "video_pix_fmt": v_pix_fmt,
+        "video_profile": v_profile,
+        "video_color_space": v_color_space,
+        "video_color_transfer": v_color_transfer,
+        "video_color_primaries": v_color_primaries,
+        "video_color_range": v_color_range,
+        "video_bits_per_raw_sample": v_bits_per_raw_sample,
         "width": v_width,
         "height": v_height,
         "display_width": disp_w,

@@ -185,6 +185,9 @@
   let encoderTelemetry: any = null;
   let isCompressing = false;
   let esRef: EventSource | null = null;
+  // Incremented whenever a stream is closed or replaced. Late SSE callbacks
+  // from an older task must never update the current job's UI.
+  let streamGeneration = 0;
   let errorText: string | null = null;
   let isUploading = false;
   let uploadProgress = 0;
@@ -366,6 +369,7 @@
       const activeStates = new Set(['PENDING', 'RECEIVED', 'STARTED', 'PROGRESS', 'RUNNING', 'QUEUED', 'WAITING']);
       if (activeStates.has(state)) {
         taskId = candidate;
+        applyJobStatus(status);
         logLines = ['Reconnected to the active background job.', ...logLines];
         reconnectStream();
         return;
@@ -567,21 +571,67 @@
         ? `${decoder[1]} (${decoder[2].toLowerCase()})`
         : decoder[1];
     } else {
+      const softwareDecoder = msg.match(/^Decoder:\s*Software\s*\(([^)]+)\)/i);
+      if (softwareDecoder) {
+        decodeMethod = `${softwareDecoder[1]} (software)`;
+      }
       const av1Software = msg.match(/^Decoder:\s*(libdav1d)\b.*\bAV1\b/i);
-      if (av1Software) {
+      if (!softwareDecoder && av1Software) {
         decodeMethod = `${av1Software[1]} (av1)`;
-      } else {
+      } else if (!softwareDecoder && !av1Software) {
         const fallbackDecoder = msg.match(/^Decoder:\s*([\w-]+)/i);
         if (fallbackDecoder) decodeMethod = fallbackDecoder[1];
       }
     }
 
-    const usingEncoder = msg.match(/Using\s+encoder:\s*([\w-]+)/i);
-    if (usingEncoder) encodeMethod = usingEncoder[1];
+    // Text logs are only a compatibility/display fallback. Once structured
+    // telemetry has resolved an encoder, a late log from the same or an old
+    // stream must not overwrite it.
+    const structuredEncoder = encoderTelemetry?.actual_encoder
+      || encoderTelemetry?.resolved_encoder
+      || encoderTelemetry?.requested_encoder;
+    if (!structuredEncoder) {
+      const usingEncoder = msg.match(/Using\s+encoder:\s*([\w-]+)/i);
+      if (usingEncoder) encodeMethod = usingEncoder[1];
 
-    const encoder = msg.match(/Encoder:\s*CPU\s*\(([^)]+)\)/i)
-      || msg.match(/Encoder:\s*([\w-]+)/i);
-    if (encoder) encodeMethod = encoder[1];
+      const encoder = msg.match(/Encoder:\s*[^()]+\(([^)]+)\)/i)
+        || msg.match(/Encoder:\s*CPU\s*\(([^)]+)\)/i)
+        || msg.match(/Encoder:\s*([\w-]+)/i);
+      if (encoder) encodeMethod = encoder[1];
+    }
+  }
+
+  /** Apply durable status/SSE telemetry; non-null fields merge monotonically. */
+  function applyStructuredTelemetry(source: any): void {
+    const incoming = source?.telemetry || source?.stats || source;
+    if (!incoming || typeof incoming !== 'object') return;
+    const fields = [
+      'requested_encoder', 'resolved_encoder', 'actual_encoder',
+      'hardware_used', 'hardware_type', 'hardware_device', 'render_device',
+      'fallback_occurred', 'fallback_stage', 'fallback_reason', 'decoder',
+    ];
+    if (!fields.some((key) => incoming[key] !== undefined && incoming[key] !== null)) return;
+    const merged = { ...(encoderTelemetry || {}) };
+    for (const key of fields) {
+      if (incoming[key] !== undefined && incoming[key] !== null) merged[key] = incoming[key];
+    }
+    encoderTelemetry = merged;
+    const displayedEncoder = merged.actual_encoder || merged.resolved_encoder || merged.requested_encoder;
+    if (displayedEncoder) encodeMethod = String(displayedEncoder);
+    const decoder = merged.decoder;
+    if (decoder && typeof decoder === 'object' && decoder.name) {
+      decodeMethod = `${decoder.name}${decoder.hardware_used ? ' (hardware)' : ' (software)'}`;
+    }
+  }
+
+  function applyJobStatus(status: any): void {
+    if (!status || typeof status !== 'object') return;
+    if (typeof status.progress === 'number') {
+      progress = status.progress;
+      displayedProgress = status.progress;
+    }
+    if (status.phase === 'finalizing') isFinalizing = true;
+    applyStructuredTelemetry(status);
   }
 
   function setPresetMB(mb:number){ targetMB = mb; }
@@ -591,6 +641,12 @@
   function invalidateStagedInput(): void {
     stagedInputValid = false;
     stagedInputToken = null;
+  }
+
+  function closeProgressStream(): void {
+    streamGeneration += 1;
+    try { esRef?.close(); } catch {}
+    esRef = null;
   }
 
   function selectFile(next: File | null): void {
@@ -692,6 +748,28 @@
     if (isCompressing) return; // prevent double submission
     if (!file) { errorText = 'Please select a file first.'; return; }
 
+    // A new compression run gets a clean presentation state. Keep the
+    // browser File so a canceled/completed/failed transient upload can be
+    // re-staged on demand, but never carry its old logs or stream forward.
+    closeProgressStream();
+    logLines = [];
+    doneStats = null;
+    encoderTelemetry = null;
+    decodeMethod = null;
+    encodeMethod = null;
+    progress = 0;
+    displayedProgress = 0;
+    currentSpeedX = null;
+    etaSeconds = null;
+    etaLabel = null;
+    hasProgress = false;
+    isReady = false;
+    isFinalizing = false;
+    isRetrying = false;
+    retryMessage = '';
+    if (taskId) clearActiveJobId(taskId);
+    taskId = null;
+
     // The worker deletes transient inputs after success, failure, and
     // cancellation. Re-stage the retained browser File on demand instead of
     // asking the user to click Re-analyze manually.
@@ -715,10 +793,9 @@
       etaSeconds = null;
       etaLabel = null;
       currentSpeedX = null;
-      // Do not carry the previous job's decoder/encoder into this job.
-      decodeMethod = null;
-      encodeMethod = null;
-      logLines = ['Starting compression…', ...logLines].slice(0, 500);
+      // Do not carry the previous job's decoder/encoder or FFmpeg logs into
+      // this job. The upload/analyze messages below now belong only to it.
+      logLines = ['Starting compression…'];
       const estMb =
         targetMode === 'bitrate' && effectiveDuration > 0
           ? ((targetVideoKbps + (audioCodec === 'none' ? 0 : audioKbps)) * effectiveDuration) / 8192.0
@@ -775,14 +852,21 @@
       // Open SSE progress stream
       logLines = ['✓ Job started. Opening progress stream...', ...logLines].slice(0, 500);
       
+      const currentStreamGeneration = ++streamGeneration;
       const es = openProgressStream(task_id);
       esRef = es;
+      void getJobStatus(task_id).then((status) => {
+        if (streamGeneration !== currentStreamGeneration || taskId !== task_id) return;
+        applyJobStatus(status);
+      }).catch(() => {});
       
       es.onopen = () => {
+        if (streamGeneration !== currentStreamGeneration || taskId !== task_id) return;
         logLines = ['✅ Connected to progress stream', ...logLines].slice(0, 500);
       };
       
       es.onmessage = (ev) => {
+        if (streamGeneration !== currentStreamGeneration || taskId !== task_id) return;
         try {
           const data = JSON.parse(ev.data);
           
@@ -798,6 +882,7 @@
           
           // Handle progress updates
           if (data.type === 'progress') {
+            applyStructuredTelemetry(data);
             progress = data.progress;
             
             // ETA from server if present; otherwise hide (no client-side guess)
@@ -840,6 +925,10 @@
               isFinalizing = false;
             }
           }
+
+          if (data.type === 'telemetry') {
+            applyStructuredTelemetry(data);
+          }
           
           // Handle log messages
           if (data.type === 'log' && data.message) {
@@ -859,9 +948,8 @@
           // Handle completion
           if (data.type === 'done') {
             doneStats = data.stats;
-            encoderTelemetry = data.stats || null;
+            applyStructuredTelemetry(data.stats || {});
             invalidateStagedInput();
-            if (data.stats?.actual_encoder) encodeMethod = String(data.stats.actual_encoder);
             progress = 100;
             displayedProgress = 100;
             isCompressing = false;
@@ -874,7 +962,7 @@
             
             logLines = ['✅ Compression complete!', ...logLines].slice(0, 500);
             
-            try { esRef?.close(); esRef = null; } catch {}
+            closeProgressStream();
             clearActiveJobId(task_id);
             setTimeout(() => refreshRecentHistory(), 100);
             
@@ -903,7 +991,7 @@
             isFinalizing = false;
             isCancelling = false;
             clearActiveJobId(task_id);
-            try { esRef?.close(); } catch {}
+            closeProgressStream();
           }
           
           // Handle retry
@@ -951,7 +1039,7 @@
             isFinalizing = false;
             isCancelling = false;
             clearActiveJobId(task_id);
-            try { esRef?.close(); } catch {}
+            closeProgressStream();
           }
           
         } catch (e) {
@@ -960,6 +1048,7 @@
       };
       
       es.onerror = (err) => {
+        if (streamGeneration !== currentStreamGeneration || taskId !== task_id) return;
         console.error('SSE error:', err);
 
         // Keep the EventSource open. Native EventSource reconnects
@@ -1033,16 +1122,26 @@
     if (!taskId) return;
     const reconnectTaskId = taskId;
     errorText = null;
-    try { esRef?.close(); } catch {}
+    closeProgressStream();
+    const reconnectGeneration = ++streamGeneration;
     const es = openProgressStream(reconnectTaskId);
     esRef = es;
     isCompressing = true;
+    void getJobStatus(reconnectTaskId).then((status) => {
+      if (streamGeneration !== reconnectGeneration || taskId !== reconnectTaskId) return;
+      applyJobStatus(status);
+    }).catch(() => {});
     es.onmessage = (ev) => {
+      if (streamGeneration !== reconnectGeneration || taskId !== reconnectTaskId) return;
       try { const data = JSON.parse(ev.data);
         if (data.type === 'progress') {
+          applyStructuredTelemetry(data);
           progress = Number(data.progress || 0);
           displayedProgress = progress;
           isFinalizing = data.phase === 'finalizing';
+        }
+        if (data.type === 'telemetry') {
+          applyStructuredTelemetry(data);
         }
         if (data.type === 'log' && data.message) {
           logLines = [data.message, ...logLines].slice(0, 500);
@@ -1050,9 +1149,8 @@
         }
         if (data.type === 'done') {
           doneStats = data.stats;
-          encoderTelemetry = data.stats || null;
+          applyStructuredTelemetry(data.stats || {});
           invalidateStagedInput();
-          if (data.stats?.actual_encoder) encodeMethod = String(data.stats.actual_encoder);
           progress = 100;
           displayedProgress = 100;
           isCompressing = false;
@@ -1060,7 +1158,7 @@
           isCancelling = false;
           isReady = true;
           clearActiveJobId(reconnectTaskId);
-          try { esRef?.close(); } catch {}
+          closeProgressStream();
           setTimeout(() => refreshRecentHistory(), 100);
           if (autoDownload) setTimeout(() => { void autoDownloadOnce(reconnectTaskId, downloadUrl(reconnectTaskId)); }, 500);
         }
@@ -1072,7 +1170,7 @@
           isFinalizing = false;
           isCancelling = false;
           clearActiveJobId(reconnectTaskId);
-          try { esRef?.close(); } catch {}
+          closeProgressStream();
         }
         if (data.type === 'canceled') {
           logLines = ['Job canceled', ...logLines];
@@ -1081,11 +1179,12 @@
           isFinalizing = false;
           isCancelling = false;
           clearActiveJobId(reconnectTaskId);
-          try { esRef?.close(); } catch {}
+          closeProgressStream();
         }
       } catch {}
     }
     es.onerror = () => {
+      if (streamGeneration !== reconnectGeneration || taskId !== reconnectTaskId) return;
       logLines = ['Progress connection interrupted; reconnecting automatically...', ...logLines].slice(0, 500);
     }
   }
@@ -1115,7 +1214,7 @@
     showTryDownload = false;
     if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
     if (finalizePoller) { clearInterval(finalizePoller); finalizePoller = null; }
-    try { esRef?.close(); } catch {}
+    closeProgressStream();
     // Note: we intentionally do NOT clear `file` or `fileSizeLabel` here
   }
 
@@ -1148,7 +1247,7 @@
 
   onDestroy(() => {
     stopActiveBatchPolling();
-    try { esRef?.close(); } catch {}
+    closeProgressStream();
     esRef = null;
     if (finalizePoller) { clearInterval(finalizePoller); finalizePoller = null; }
     if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
@@ -1751,15 +1850,19 @@
           </div>
         {/if}
         {#if encodeMethod}
+          {@const displayedEncoder = encoderTelemetry?.actual_encoder || encoderTelemetry?.resolved_encoder || encoderTelemetry?.requested_encoder || encodeMethod}
+          {@const requestedOnly = !!encoderTelemetry?.requested_encoder && !encoderTelemetry?.resolved_encoder && !encoderTelemetry?.actual_encoder}
           {@const encoderInfo = classifyEncoder(encodeMethod)}
-          {#if encoderInfo.hardware}
-            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: {encoderInfo.label} ({encodeMethod})</span>
+          {#if requestedOnly}
+            <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-600/40">Encoder requested: {displayedEncoder}</span>
+          {:else if encoderInfo.hardware}
+            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: {encoderInfo.label} ({displayedEncoder})</span>
           {:else}
-            <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-200 border border-slate-600/40">Encoder: CPU/software ({encodeMethod})</span>
+            <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-200 border border-slate-600/40">Encoder: CPU/software ({displayedEncoder})</span>
           {/if}
           {#if encoderTelemetry?.fallback_occurred}
             <div class="text-xs text-amber-300 mt-1">
-              Requested: {encoderTelemetry.requested_encoder || videoCodec} → CPU fallback: {encoderTelemetry.actual_encoder || encodeMethod}
+              Requested: {encoderTelemetry.requested_encoder || videoCodec} → CPU fallback: {encoderTelemetry.actual_encoder || displayedEncoder}
               {#if encoderTelemetry.fallback_reason}<span class="text-gray-400"> ({encoderTelemetry.fallback_reason})</span>{/if}
             </div>
           {/if}

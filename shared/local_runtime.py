@@ -336,6 +336,11 @@ def cancel_task(task_id: str) -> None:
 
 def record_worker_event(task_id: str, event: dict[str, Any]) -> None:
     """Mirror worker progress into local result and queue metadata."""
+    telemetry_keys = (
+        "requested_encoder", "resolved_encoder", "actual_encoder",
+        "hardware_used", "hardware_type", "hardware_device", "render_device",
+        "fallback_occurred", "fallback_stage", "fallback_reason", "decoder",
+    )
     kind = str(event.get("type") or "log")
     task_state = {
         "progress": "PROGRESS",
@@ -355,12 +360,17 @@ def record_worker_event(task_id: str, event: dict[str, Any]) -> None:
             "output_path", "final_size_mb", "duration_s", "target_size_mb", "encoder",
             "requested_encoder", "resolved_encoder", "actual_encoder", "hardware_used",
             "hardware_device", "render_device", "fallback_occurred", "fallback_stage",
-            "fallback_reason",
+            "fallback_reason", "hardware_type", "decoder",
         ):
             if stats.get(key) is not None:
                 info[key] = stats[key]
         info.setdefault("progress", 100.0)
         info.setdefault("detail", "done")
+    elif kind == "telemetry":
+        telemetry = event.get("telemetry") if isinstance(event.get("telemetry"), dict) else {}
+        for key in telemetry_keys:
+            if telemetry.get(key) is not None:
+                info[key] = telemetry[key]
     if kind == "error":
         update_task(task_id, state=task_state, info=info, error=str(event.get("message") or "Compression failed"))
     elif kind == "done":
@@ -376,13 +386,19 @@ def record_worker_event(task_id: str, event: dict[str, Any]) -> None:
     except (TypeError, ValueError):
         return
     now = time.time()
-    if kind in {"log", "progress", "retry"}:
+    if kind in {"log", "progress", "retry", "telemetry"}:
         job["state"] = "running"
         job.setdefault("started_at", now)
         if kind == "progress":
             job["progress"] = max(0.0, min(100.0, float(event.get("progress") or 0.0)))
             job["phase"] = event.get("phase") or job.get("phase") or "encoding"
-    elif kind == "done":
+    telemetry = event.get("telemetry") if isinstance(event.get("telemetry"), dict) else {}
+    if kind == "done" and isinstance(event.get("stats"), dict):
+        telemetry = event["stats"]
+    for key in telemetry_keys:
+        if telemetry.get(key) is not None:
+            job[key] = telemetry[key]
+    if kind == "done":
         job.update({"state": "completed", "phase": "done", "progress": 100.0, "completed_at": now})
         stats = event.get("stats") if isinstance(event.get("stats"), dict) else {}
         if stats.get("output_path"):

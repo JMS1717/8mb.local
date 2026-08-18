@@ -23,7 +23,9 @@ def cpu_filter_chain(filters: list[str] | None) -> list[str]:
                 item = "scale=" + item.split("=", 1)[1]
             if item == "hwdownload" or item.startswith("hwupload"):
                 continue
-            if item.startswith("format=") and ("vaapi" in item or item == "format=nv12"):
+            if item.startswith("format=") and (
+                "vaapi" in item or item in {"format=nv12", "format=p010", "format=p010le"}
+            ):
                 continue
             converted.append(item)
     return [",".join(converted)] if converted else []

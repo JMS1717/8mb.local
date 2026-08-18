@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Tuple
 from shared.subprocess_utils import hidden_process_kwargs
 
 from .constants import AMF_ENCODERS, CPU_ENCODERS, QSV_ENCODERS, VAAPI_ENCODERS
-from .qsv_filters import qsv_input_filter, qsv_probe_size
+from .qsv_filters import qsv_input_filter, qsv_probe_size, vaapi_input_filter
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +201,7 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
         if encoder_name in QSV_ENCODERS or encoder_name in VAAPI_ENCODERS:
             upload_filter = qsv_input_filter(sys.platform)
             if encoder_name in VAAPI_ENCODERS:
-                upload_filter = "format=nv12|vaapi,hwupload"
+                upload_filter = vaapi_input_filter()
             cmd += ["-vf", upload_filter]
         elif encoder_name in AMF_ENCODERS:
             # AMF is a native Windows path and is most portable with the

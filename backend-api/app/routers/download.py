@@ -101,6 +101,24 @@ async def job_status(task_id: str):
         logger.warning("Using durable canceled state for undecodable Celery result %s: %s", task_id, exc)
         state = "CANCELED"
         meta = {}
+    # The worker mirrors encoder telemetry into the existing durable queue
+    # record. Prefer that snapshot over an older Celery result metadata value
+    # so a runtime fallback cannot be hidden by stale progress state.
+    telemetry_keys = (
+        "requested_encoder", "resolved_encoder", "actual_encoder",
+        "hardware_used", "hardware_type", "hardware_device", "render_device",
+        "fallback_occurred", "fallback_stage", "fallback_reason", "decoder",
+    )
+    try:
+        durable_raw = await redis.get(f"job:{task_id}")
+        durable = orjson.loads(durable_raw) if durable_raw else {}
+        if isinstance(durable, dict):
+            meta = dict(meta)
+            for key in telemetry_keys:
+                if durable.get(key) is not None:
+                    meta[key] = durable[key]
+    except Exception as exc:
+        logger.debug("Could not merge durable telemetry for %s: %s", task_id[:8], exc)
     # Celery reports unknown task IDs as PENDING. Check the durable queue
     # record so a browser restored after a Redis/container reset does not treat
     # a random stale localStorage ID as an active job forever.
@@ -126,8 +144,10 @@ async def job_status(task_id: str):
         fallback_occurred=meta.get("fallback_occurred"),
         fallback_stage=meta.get("fallback_stage"),
         fallback_reason=meta.get("fallback_reason"),
+        hardware_type=meta.get("hardware_type"),
         render_device=meta.get("render_device"),
         hardware_device=meta.get("hardware_device", meta.get("render_device")),
+        decoder=meta.get("decoder"),
     )
 
 

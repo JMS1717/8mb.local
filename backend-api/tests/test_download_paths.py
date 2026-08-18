@@ -35,6 +35,11 @@ class _UndecodableCanceledResult:
         raise ValueError("Exception information must include the exception type")
 
 
+class _RunningResult:
+    state = "PROGRESS"
+    info = {"progress": 42.0, "phase": "encoding"}
+
+
 class TestDownloadPaths(unittest.TestCase):
     def test_job_status_reports_final_encoder(self):
         with patch("app.routers.download.celery_app.AsyncResult", return_value=_CompletedResult()):
@@ -52,6 +57,22 @@ class TestDownloadPaths(unittest.TestCase):
             status = asyncio.run(job_status("task-canceled"))
         self.assertEqual(status.state, "CANCELED")
         self.assertEqual(status.phase, None)
+
+    def test_running_status_merges_durable_encoder_telemetry(self):
+        durable = {
+            "requested_encoder": "hevc_qsv",
+            "resolved_encoder": "hevc_qsv",
+            "hardware_type": "intel_qsv",
+            "hardware_device": "/dev/dri/renderD128",
+            "decoder": {"name": "software", "hardware_used": False},
+        }
+        with patch("app.routers.download.celery_app.AsyncResult", return_value=_RunningResult()), \
+             patch("app.routers.download.redis.get", new=AsyncMock(return_value=__import__("orjson").dumps(durable))):
+            status = asyncio.run(job_status("task-running"))
+        self.assertEqual(status.resolved_encoder, "hevc_qsv")
+        self.assertEqual(status.hardware_type, "intel_qsv")
+        self.assertEqual(status.hardware_device, "/dev/dri/renderD128")
+        self.assertEqual(status.decoder["name"], "software")
 
     def test_output_media_types_match_containers(self):
         self.assertEqual(_media_type_for_path(Path("output.mp4")), "video/mp4")
