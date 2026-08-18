@@ -33,7 +33,13 @@ from .constants import (
 from .utils import ffprobe_info, calc_bitrates
 from .auto_resolution import choose_auto_resolution
 from .hw_detect import get_hw_info, map_codec_to_hw, choose_best_codec, refresh_hw_info
-from .ffmpeg_helpers import cpu_filter_chain, replace_bitrate_args
+from .ffmpeg_helpers import (
+    COLOR_METADATA_OPTIONS,
+    cpu_filter_chain,
+    ffmpeg_rejected_color_metadata,
+    remove_option_pairs,
+    replace_bitrate_args,
+)
 from .startup_tests import run_startup_tests
 from .progress import parse_ffmpeg_out_time, parse_time_string
 from .qsv_filters import (
@@ -1161,7 +1167,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Upload only after all software filters have been applied on the fallback
     # path.  The optimized path keeps frames on QSV surfaces instead.
     source_pixel_format = hardware_input_pixel_format(actual_encoder, info)
-    color_metadata_args = source_color_metadata_args(info)
+    # This is the only metadata-derived FFmpeg option list.  It is produced by
+    # the allowlist normalizer; raw ffprobe strings must never reach a command.
+    active_color_metadata_args = source_color_metadata_args(info)
     if actual_encoder in QSV_ENCODERS:
         if qsv_hardware_decode:
             # The decoder emits QSV surfaces.  Use QSV VPP only when the job
@@ -1254,7 +1262,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         *duration_opts,  # -t or -to for duration/end
         "-c:v", actual_encoder,  # Use detected encoder
         *v_flags,
-        *color_metadata_args,
+        *active_color_metadata_args,
     ]
     
     if vf_filters:
@@ -1529,6 +1537,31 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         remove_cancelled_output()
         raise JobCancellationRequested("Job canceled during encoding")
 
+    # Defense in depth for a future FFmpeg/driver-specific metadata rejection.
+    # Never retry indefinitely and never classify this optional-flag failure as
+    # proof that the selected hardware encoder is unavailable.
+    if (
+        rc != 0
+        and not was_cancelled
+        and active_color_metadata_args
+        and ffmpeg_rejected_color_metadata(stderr_lines)
+    ):
+        _publish(self.request.id, {"type": "log", "message": (
+            "FFmpeg rejected optional source color metadata; omitting those "
+            "optional flags and retrying once with the same encoder."
+        )})
+        active_color_metadata_args = []
+        metadata_retry_cmd = remove_option_pairs(cmd, COLOR_METADATA_OPTIONS)
+        _check_cancelled(task_id, "metadata_retry")
+        stderr_lines = []
+        last_progress = 0.0
+        rc, was_cancelled = run_ffmpeg_and_stream(metadata_retry_cmd)
+        if rc == 0 and not was_cancelled:
+            last_successful_cmd = metadata_retry_cmd.copy()
+        if was_cancelled:
+            remove_cancelled_output()
+            raise JobCancellationRequested("Job canceled during metadata retry")
+
     # Decode-error retry: if a hardware decoder path fails, retry the same
     # encoder with software decode before falling back to CPU.  QSV decode is
     # deliberately included here because decoder support can vary by source
@@ -1604,7 +1637,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         retry_cmd += [
             *abr_rate_control_args(actual_encoder),
             *preset_flags, *tune_flags,
-            *color_metadata_args,
+            *active_color_metadata_args,
         ]
         if chosen_audio_codec is None:
             retry_cmd += ["-an"]
@@ -1688,7 +1721,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         if cpu_vf:
             cmd2 += ["-vf", ",".join(cpu_vf)]
         cmd2 += abr_rate_control_args(fb_encoder)
-        cmd2 += color_metadata_args
+        cmd2 += active_color_metadata_args
         if fb_encoder == "libx264":
             cmd2 += ["-preset","medium","-tune","film"]
         elif fb_encoder == "libx265":

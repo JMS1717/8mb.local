@@ -43,11 +43,13 @@ def parse_fps_fraction(val: Any) -> Optional[float]:
             num, den = float(parts[0]), float(parts[1])
             if den == 0:
                 return None
-            return num / den
+            fps = num / den
+            return fps if math.isfinite(fps) and 0.0 < fps <= 1000.0 else None
         except (TypeError, ValueError):
             return None
     try:
-        return float(s)
+        fps = float(s)
+        return fps if math.isfinite(fps) and 0.0 < fps <= 1000.0 else None
     except (TypeError, ValueError):
         return None
 
@@ -69,13 +71,44 @@ def _normalize_rotation_degrees(val: Any) -> Optional[int]:
         x = float(str(val).strip())
     except (TypeError, ValueError):
         return None
-    r = int(round(x)) % 360
-    if r < 0:
-        r += 360
-    # Snap near-multiples of 90 (some matrices use float-ish values)
-    if r % 90 != 0:
-        r = (int(round(r / 90.0)) * 90) % 360
-    return r
+    if not math.isfinite(x) or abs(x) > 3600.0:
+        return None
+    nearest = round(x / 90.0) * 90
+    # Accept float-ish matrix values, but do not turn arbitrary angles into a
+    # different display orientation.
+    if not math.isclose(x, nearest, rel_tol=0.0, abs_tol=0.01):
+        return None
+    return int(nearest) % 360
+
+
+def _parse_media_dimension(value: Any) -> Optional[int]:
+    """Validate a decoded video dimension before it reaches scaling logic."""
+    parsed = _parse_finite_float(value)
+    if parsed is None or not parsed.is_integer() or not 1 <= parsed <= 32768:
+        return None
+    return int(parsed)
+
+
+def _parse_media_duration(value: Any) -> Optional[float]:
+    """Reject non-finite, non-positive, or absurd probe durations."""
+    parsed = _parse_finite_float(value)
+    if parsed is None or not 0.0 < parsed <= 365 * 24 * 60 * 60:
+        return None
+    return parsed
+
+
+def _normalize_aspect_ratio(value: Any) -> Optional[str]:
+    """Return a bounded ``N:D`` display aspect ratio for heuristics/logging."""
+    if value is None or ":" not in str(value):
+        return None
+    left, right = str(value).strip().replace(" ", "").split(":", 1)
+    try:
+        a, b = float(left), float(right)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(x) and 0.0 < x <= 1000.0 for x in (a, b)):
+        return None
+    return f"{a:g}:{b:g}"
 
 
 def parse_stream_rotation_degrees(stream: dict, format_tags: Optional[dict] = None) -> int:
@@ -259,8 +292,8 @@ def ffprobe_info(input_path: str, allow_audio_only: bool = False) -> dict:
         format_tags = ((data.get("format") or {}).get("tags") or {}) if isinstance(data, dict) else {}
     if not isinstance(data, dict):
         raise RuntimeError("ffprobe returned an unexpected JSON shape")
-    duration = _parse_finite_float((data.get("format") or {}).get("duration"))
-    if duration is None or duration <= 0:
+    duration = _parse_media_duration((data.get("format") or {}).get("duration"))
+    if duration is None:
         raise RuntimeError("Input has no usable media duration")
     v_bitrate = None
     a_bitrate = None
@@ -299,34 +332,35 @@ def ffprobe_info(input_path: str, allow_audio_only: bool = False) -> dict:
             if not v_color_range:
                 v_color_range = s.get("color_range")
             if v_bits_per_raw_sample is None:
-                try:
-                    parsed_bits = int(float(s.get("bits_per_raw_sample") or 0))
-                    if parsed_bits > 0:
-                        v_bits_per_raw_sample = parsed_bits
-                except (TypeError, ValueError):
-                    pass
-            width = _parse_finite_float(s.get("width"))
-            height = _parse_finite_float(s.get("height"))
-            if width is not None and width > 0:
-                v_width = int(width)
-            if height is not None and height > 0:
-                v_height = int(height)
+                parsed_bits_raw = _parse_finite_float(s.get("bits_per_raw_sample"))
+                if (
+                    parsed_bits_raw is not None
+                    and parsed_bits_raw.is_integer()
+                    and 1 <= parsed_bits_raw <= 64
+                ):
+                    v_bits_per_raw_sample = int(parsed_bits_raw)
+            width = _parse_media_dimension(s.get("width"))
+            height = _parse_media_dimension(s.get("height"))
+            if width is not None:
+                v_width = width
+            if height is not None:
+                v_height = height
         if s.get("codec_type") == "video":
             has_video = True
             # For some inputs, bit_rate may be missing on the stream; keep codec/size discovery regardless
             if s.get("codec_name") and not v_codec:
                 v_codec = s.get("codec_name")
-            width = _parse_finite_float(s.get("width"))
-            height = _parse_finite_float(s.get("height"))
-            if width is not None and width > 0 and not v_width:
-                v_width = int(width)
-            if height is not None and height > 0 and not v_height:
-                v_height = int(height)
+            width = _parse_media_dimension(s.get("width"))
+            height = _parse_media_dimension(s.get("height"))
+            if width is not None and not v_width:
+                v_width = width
+            if height is not None and not v_height:
+                v_height = height
             if not video_seen:
                 rotation_degrees = parse_stream_rotation_degrees(s, format_tags)
                 dar = s.get("display_aspect_ratio")
                 if isinstance(dar, str) and dar.strip():
-                    display_aspect_ratio = dar.strip()
+                    display_aspect_ratio = _normalize_aspect_ratio(dar)
                 v_fps = parse_fps_fraction(s.get("avg_frame_rate"))
                 if v_fps is None or v_fps <= 0:
                     v_fps = parse_fps_fraction(s.get("r_frame_rate"))

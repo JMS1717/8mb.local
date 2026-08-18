@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 import sys
 
+from .media_metadata import source_color_metadata_args
+
 
 def source_is_10bit(info: dict | None) -> bool:
     """Return whether the probed source needs a 10-bit hardware surface."""
@@ -35,23 +37,6 @@ def hardware_profile_flags(encoder: str, pixel_format: str) -> list[str]:
     if pixel_format == "p010le" and str(encoder).lower() in {"hevc_qsv", "hevc_vaapi"}:
         return ["-profile:v", "main10"]
     return []
-
-
-def source_color_metadata_args(info: dict | None) -> list[str]:
-    """Preserve known source color metadata on the encoded video stream."""
-    if not info:
-        return []
-    args: list[str] = []
-    for option, key in (
-        ("-color_range", "video_color_range"),
-        ("-colorspace", "video_color_space"),
-        ("-color_primaries", "video_color_primaries"),
-        ("-color_trc", "video_color_transfer"),
-    ):
-        value = str(info.get(key) or "").strip()
-        if value and value.lower() not in {"unknown", "n/a", "none"}:
-            args.extend([option, value])
-    return args
 
 
 def qsv_input_filter(platform: str | None = None, pixel_format: str = "nv12") -> str:
