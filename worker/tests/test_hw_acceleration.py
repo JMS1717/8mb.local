@@ -11,8 +11,11 @@ from worker.app.tasks import _persist_job_telemetry, _publish
 from worker.app.qsv_filters import (
     hardware_input_pixel_format,
     hardware_profile_flags,
+    qsv_hardware_decode_supported,
     qsv_input_filter,
     qsv_probe_size,
+    qsv_scaled_dimensions,
+    qsv_vpp_filter,
     source_color_metadata_args,
     vaapi_input_filter,
 )
@@ -159,6 +162,22 @@ class TestHardwareMapping(unittest.TestCase):
 
 
 class TestHardwareFallbackHelpers(unittest.TestCase):
+    def test_linux_qsv_hardware_decode_is_limited_to_upright_h264_hevc(self):
+        self.assertTrue(qsv_hardware_decode_supported("linux", "h264", "h264_qsv"))
+        self.assertTrue(qsv_hardware_decode_supported("linux", "hevc", "hevc_qsv"))
+        self.assertFalse(qsv_hardware_decode_supported("linux", "av1", "hevc_qsv"))
+        self.assertFalse(qsv_hardware_decode_supported("linux", "h264", "hevc_vaapi"))
+        self.assertFalse(qsv_hardware_decode_supported("linux", "h264", "h264_qsv", 90))
+        self.assertFalse(qsv_hardware_decode_supported("win32", "h264", "h264_qsv"))
+
+    def test_qsv_vpp_filter_and_even_aspect_dimensions(self):
+        self.assertEqual(qsv_scaled_dimensions(3840, 2280, max_height=1080), (1818, 1080))
+        self.assertEqual(qsv_scaled_dimensions(1920, 1080, max_width=3840), None)
+        self.assertEqual(
+            qsv_vpp_filter("p010le", 1818, 1080, 24),
+            "vpp_qsv=w=1818:h=1080:framerate=24:format=p010le",
+        )
+
     def test_windows_qsv_uses_internal_upload_for_real_surfaces(self):
         self.assertEqual(qsv_input_filter("win32"), "format=nv12")
         self.assertEqual(qsv_probe_size("win32"), "1080x1920")

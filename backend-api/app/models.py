@@ -23,7 +23,7 @@ class CompressRequest(BaseModel):
     video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','libx264','libx265','libsvtav1','libaom-av1'] = 'h264_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
     audio_bitrate_kbps: int = Field(default=128, ge=0, le=2000)
-    preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
+    preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p4'  # Added 'extraquality'
     container: Literal['mp4','mkv'] = 'mp4'
     tune: Literal['hq','ll','ull','lossless'] = 'hq'
     max_width: Optional[int] = Field(default=None, gt=0, le=16384)
@@ -87,7 +87,7 @@ class DefaultPresets(BaseModel):
     target_mb: float = Field(default=19.7, gt=0, le=51200)
     video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','libx264','libx265','libsvtav1','libaom-av1'] = 'h264_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
-    preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p6'  # Added 'extraquality'
+    preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p4'  # Added 'extraquality'
     audio_kbps: Literal[64,96,128,160,192,256] = 128
     container: Literal['mp4','mkv'] = 'mp4'
     tune: Literal['hq','ll','ull','lossless'] = 'hq'

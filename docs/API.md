@@ -11,7 +11,7 @@ $upload = curl.exe -s -F "file=@input.mp4" -F "target_size_mb=19.7" http://127.0
 $job = curl.exe -s -H "Content-Type: application/json" -d (@{
   job_id=$upload.job_id; filename=$upload.filename; target_size_mb=19.7
   video_codec='libx264'; audio_codec='aac'; audio_bitrate_kbps=128
-  preset='p6'; container='mp4'; tune='hq'
+  preset='p4'; container='mp4'; tune='hq'
 } | ConvertTo-Json -Compress) http://127.0.0.1:8001/api/compress | ConvertFrom-Json
 
 do {

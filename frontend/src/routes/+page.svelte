@@ -18,7 +18,7 @@
   let targetVideoKbps = 2500;
   let videoCodec: string = 'av1_nvenc';
   let audioCodec: 'libopus' | 'aac' | 'none' = 'libopus';
-  let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p6';
+  let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p4';
   let audioKbps: 32|48|64|96|128|160|192|256 = 128;
   // Auto audio bitrate control: downshift audio for extreme compressions
   let autoAudioBitrate: boolean = true;

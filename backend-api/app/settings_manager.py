@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 _APP_DATA_DIR = Path(settings.APP_DATA_DIR)
 ENV_FILE = Path(os.getenv("ENV_FILE", str(_APP_DATA_DIR / ".env")))
 SETTINGS_FILE = Path(os.getenv("SETTINGS_FILE", str(_APP_DATA_DIR / "settings.json")))
+_DEFAULT_PRESET = 'p4'
 
 _DEFAULT_SIZE_BUTTONS = [4, 5, 8, 9.7, 19.7, 50, 100]
 _LEGACY_STOCK_SIZE_BUTTONS = [4, 5, 8, 9.7, 20, 50, 100]
@@ -80,7 +81,7 @@ def _legacy_stock_profiles() -> list[dict[str, Any]]:
 def _default_preset_profiles() -> list[dict[str, Any]]:
     """Return stock profiles for a new install, including Discord headroom."""
     return [
-        {"name": "Discord 19.7 MB", "target_mb": 19.7, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+        {"name": "Discord 19.7 MB", "target_mb": 19.7, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": _DEFAULT_PRESET, "audio_kbps": 128, "container": "mp4", "tune": "hq"},
         *_legacy_stock_profiles(),
     ]
 
@@ -179,12 +180,20 @@ def _ensure_defaults() -> Dict[str, Any]:
     if legacy_stock_candidate and _is_untouched_legacy_stock(data):
         data['size_buttons'] = list(_DEFAULT_SIZE_BUTTONS)
         data['preset_profiles'] = [
-            {"name": "Discord 19.7 MB", "target_mb": 19.7, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": "p6", "audio_kbps": 128, "container": "mp4", "tune": "hq"},
+            {"name": "Discord 19.7 MB", "target_mb": 19.7, "video_codec": "h264_nvenc", "audio_codec": "libopus", "preset": _DEFAULT_PRESET, "audio_kbps": 128, "container": "mp4", "tune": "hq"},
             *data['preset_profiles'],
         ]
         data['default_preset'] = 'Discord 19.7 MB'
         data['default_preset_managed'] = True
         changed = True
+    # Migrate only the application-managed Discord profile. Explicitly saved
+    # or edited profiles retain their chosen preset, including P6/P7.
+    if data.get('default_preset_managed', True) is not False:
+        for profile in data.get('preset_profiles', []):
+            if profile.get('name') == 'Discord 19.7 MB' and profile.get('preset') == 'p6':
+                profile['preset'] = _DEFAULT_PRESET
+                changed = True
+                break
     visibility = data.get('codec_visibility')
     if not isinstance(visibility, dict):
         # A hand-edited or truncated settings file must not prevent startup.
@@ -356,7 +365,7 @@ def _profile_to_dict(p: Dict[str, Any]) -> dict:
         'target_mb': float(p.get('target_mb', 19.7)),
         'video_codec': p.get('video_codec', 'h264_nvenc'),
         'audio_codec': p.get('audio_codec', 'libopus'),
-        'preset': p.get('preset', 'p6'),
+        'preset': p.get('preset', _DEFAULT_PRESET),
         'audio_kbps': int(p.get('audio_kbps', 128)),
         'container': p.get('container', 'mp4'),
         'tune': p.get('tune', 'hq'),
@@ -393,7 +402,7 @@ def get_default_presets() -> dict:
         'target_mb': 19.7,
         'video_codec': 'h264_nvenc',
         'audio_codec': 'libopus',
-        'preset': 'p6',
+        'preset': _DEFAULT_PRESET,
         'audio_kbps': 128,
         'container': 'mp4',
         'tune': 'hq',
@@ -662,6 +671,8 @@ def update_preset_profile(name: str, updates: Dict[str, Any]):
     for i, p in enumerate(data['preset_profiles']):
         if p.get('name') == name:
             data['preset_profiles'][i] = { **p, **{k:v for k,v in updates.items() if k != 'name'} }
+            if data.get('default_preset') == name:
+                data['default_preset_managed'] = False
             _write_settings(data)
             return
     raise ValueError("preset not found")

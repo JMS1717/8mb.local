@@ -236,7 +236,7 @@ class FolderWatchService:
                     'video_codec': str(profile.get('video_codec', 'h264_nvenc')),
                     'audio_codec': str(profile.get('audio_codec', 'libopus')),
                     'audio_bitrate_kbps': int(profile.get('audio_kbps', 128)),
-                    'preset': str(profile.get('preset', 'p6')),
+                    'preset': str(profile.get('preset', 'p4')),
                     'tune': str(profile.get('tune', 'hq')),
                     'max_output_fps': profile.get('max_output_fps'),
                 },

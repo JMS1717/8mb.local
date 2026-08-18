@@ -39,7 +39,10 @@ from .progress import parse_ffmpeg_out_time, parse_time_string
 from .qsv_filters import (
     hardware_input_pixel_format,
     hardware_profile_flags,
+    qsv_hardware_decode_supported,
     qsv_input_filter,
+    qsv_scaled_dimensions,
+    qsv_vpp_filter,
     source_is_10bit,
     source_color_metadata_args,
 )
@@ -1102,6 +1105,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
 
     # Optional output frame-rate cap: only when we know source fps is above the cap (same as input otherwise).
     input_fps = info.get("video_fps")
+    qsv_frame_rate: float | None = None
     if max_output_fps is not None and float(max_output_fps) > 0:
         cap = float(max_output_fps)
         if input_fps is None:
@@ -1113,6 +1117,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             pass  # already at or below cap — preserve input fps
         else:
             fps_filter = f"fps=fps={cap}"
+            qsv_frame_rate = cap
             has_npp = any("scale_npp=" in f for f in vf_filters)
             cuda_hw_frames = (
                 actual_encoder.endswith("_nvenc")
@@ -1141,17 +1146,63 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             ip = f"{float(input_fps):.3g}"
             _publish(self.request.id, {"type": "log", "message": f"Frame rate: capping at {cap:g} fps (source ~{ip} fps)"})
 
-    # QSV and VAAPI encode hardware frames, but software decode and software
-    # scaling remain the most reliable path across Intel/AMD driver versions.
-    # Upload only after all software filters (scale/fps) have been applied.
+    # Keep the software filter chain for fallback.  Linux Intel QSV can use
+    # hardware decode and VPP for upright H.264/HEVC sources, but unsupported
+    # input/profile/driver combinations must return to this proven path.
+    software_vf_filters = list(vf_filters)
+
+    qsv_hardware_decode = qsv_hardware_decode_supported(
+        sys.platform,
+        in_codec,
+        actual_encoder,
+        rot_deg,
+    )
+
+    # Upload only after all software filters have been applied on the fallback
+    # path.  The optimized path keeps frames on QSV surfaces instead.
     source_pixel_format = hardware_input_pixel_format(actual_encoder, info)
     color_metadata_args = source_color_metadata_args(info)
     if actual_encoder in QSV_ENCODERS:
-        # Linux oneVPL requires a fixed pool; native Windows QSV performs its
-        # own upload because explicit D3D11 hwupload rejects some real-world
-        # rotated/vertical AV1 surfaces with E_INVALIDARG (0x80070057).
-        qsv_filter = qsv_input_filter(sys.platform, source_pixel_format)
-        vf_filters.append(qsv_filter)
+        if qsv_hardware_decode:
+            # The decoder emits QSV surfaces.  Use QSV VPP only when the job
+            # needs scaling, frame-rate capping, or a 10-bit -> 8-bit
+            # conversion for an H.264 output.  With no such work, passing the
+            # surfaces directly avoids both a download and an upload.
+            qsv_dims = qsv_scaled_dimensions(disp_w, disp_h, max_width, max_height)
+            qsv_needs_format = source_is_10bit(info) and source_pixel_format == "nv12"
+            if qsv_dims or qsv_frame_rate is not None or qsv_needs_format:
+                qsv_width = qsv_dims[0] if qsv_dims else None
+                qsv_height = qsv_dims[1] if qsv_dims else None
+                vf_filters = [qsv_vpp_filter(
+                    source_pixel_format,
+                    qsv_width,
+                    qsv_height,
+                    qsv_frame_rate,
+                )]
+            else:
+                vf_filters = []
+            input_opts += [
+                "-hwaccel", "qsv",
+                "-hwaccel_output_format", "qsv",
+                "-c:v", f"{in_codec}_qsv",
+            ]
+            decoder_info.update({
+                "name": f"{in_codec}_qsv",
+                "hardware_used": True,
+                "hardware_type": "intel_qsv",
+                "device": render_device,
+            })
+            _publish_telemetry()
+            _publish(self.request.id, {"type": "log", "message": (
+                f"Decoder: {in_codec}_qsv (Intel Quick Sync hardware)"
+                "; keeping frames on QSV surfaces"
+            )})
+        else:
+            # Linux oneVPL requires a fixed pool; native Windows QSV performs
+            # its own upload because explicit D3D11 hwupload rejects some
+            # real-world rotated/vertical AV1 surfaces.
+            qsv_filter = qsv_input_filter(sys.platform, source_pixel_format)
+            vf_filters.append(qsv_filter)
         v_flags += hardware_profile_flags(actual_encoder, source_pixel_format)
         if source_pixel_format == "p010le":
             _publish(self.request.id, {"type": "log", "message": (
@@ -1165,8 +1216,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         _publish(self.request.id, {
             "type": "log",
             "message": (
-                f"Encoder: {_encoder_display_label(actual_encoder)} ({actual_encoder}) with software decode and "
-                + ("QSV internal upload" if sys.platform == "win32" else "QSV hardware upload")
+                f"Encoder: {_encoder_display_label(actual_encoder)} ({actual_encoder}) with "
+                + ("QSV hardware decode/VPP" if qsv_hardware_decode else "software decode and "
+                   + ("QSV internal upload" if sys.platform == "win32" else "QSV hardware upload"))
             ),
         })
     elif actual_encoder in VAAPI_ENCODERS:
@@ -1477,27 +1529,70 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         remove_cancelled_output()
         raise JobCancellationRequested("Job canceled during encoding")
 
-    # Decode-error retry: if the failure looks like a hardware decoder issue,
-    # retry the same encoder with software decode before falling back to CPU.
+    # Decode-error retry: if a hardware decoder path fails, retry the same
+    # encoder with software decode before falling back to CPU.  QSV decode is
+    # deliberately included here because decoder support can vary by source
+    # profile even when the encoder probe passed.
     decode_fail_hints = ["cuvid", "error while opening decoder", "hwaccel", "not supported"]
+
+    def strip_decode_options(options: list[str]) -> list[str]:
+        """Remove decoder selection flags while preserving trim/seek options."""
+        result: list[str] = []
+        skip_next = False
+        for option in options:
+            if skip_next:
+                skip_next = False
+                continue
+            if option in {"-c:v", "-hwaccel", "-hwaccel_output_format", "-hwaccel_device"}:
+                skip_next = True
+                continue
+            result.append(option)
+        return result
+
+    qsv_decode_hints = decode_fail_hints + [
+        "qsv", "onevpl", "mfx", "function not implemented", "device failed",
+    ]
+    qsv_decode_retry = (
+        qsv_hardware_decode
+        and rc != 0
+        and any(h in "\n".join(stderr_lines).lower() for h in qsv_decode_hints)
+    )
+    nvenc_decode_retry = (
+        actual_encoder.endswith("_nvenc")
+        and any(h in "\n".join(stderr_lines).lower() for h in decode_fail_hints)
+    )
     if (
         rc != 0
         and not was_cancelled
-        and actual_encoder.endswith("_nvenc")
-        and any(h in '\n'.join(stderr_lines).lower() for h in decode_fail_hints)
+        and (qsv_decode_retry or nvenc_decode_retry)
     ):
         _publish(self.request.id, {"type": "log", "message": "⚠️ Hardware decode failed. Retrying with software decoder..."})
-        sw_input_opts = [o for i, o in enumerate(input_opts)
-                         if not (o in ("-c:v",) or
-                                 (i > 0 and input_opts[i-1] == "-c:v"))]
+        sw_input_opts = strip_decode_options(input_opts)
         if in_codec == "av1":
             sw_input_opts += ["-c:v", "libdav1d"]
-        sw_vf = cpu_filter_chain(vf_filters)
+        retry_init_flags: list[str] = []
+        if qsv_decode_retry:
+            # Keep the QSV encoder device, but replace the decoder's QSV
+            # surfaces with the original software filters and the proven
+            # Linux QSV upload path.
+            retry_init_flags = list(init_hw_flags)
+            sw_vf = list(software_vf_filters)
+            sw_vf.append(qsv_input_filter(sys.platform, source_pixel_format))
+            decoder_info.update({
+                "name": "software",
+                "hardware_used": False,
+                "hardware_type": None,
+                "device": None,
+            })
+            _publish_telemetry()
+        else:
+            sw_vf = cpu_filter_chain(vf_filters)
         sw_v_flags = v_flags
         if "-pix_fmt" not in v_flags and actual_encoder.endswith("_nvenc"):
             sw_v_flags = ["-pix_fmt", "yuv420p"] + sw_v_flags
         retry_cmd = [
             "ffmpeg", "-hide_banner", "-y",
+            *retry_init_flags,
             *sw_input_opts,
             "-i", input_path,
             *duration_opts,
@@ -1528,6 +1623,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             raise JobCancellationRequested("Job canceled during decode retry")
 
     if rc != 0 and _is_hardware_encoder(actual_encoder):
+        failed_encoder = actual_encoder
         _publish(self.request.id, {"type": "log", "message": f"⚠️ Hardware encode ({original_encoder}) failed (rc={rc}). Retrying on CPU..."})
         _publish(self.request.id, {"type": "log", "message": (
             "Explanation: The hardware encoder failed at runtime. The worker will retry using a CPU encoder which is slower. "
@@ -1540,13 +1636,13 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         if stderr_lines:
             fallback_reason = " ".join(str(line).strip() for line in stderr_lines[-3:] if str(line).strip())[:1000]
         _publish(task_id, {"type": "log", "message": (
-            f"Hardware fallback: requested={requested_encoder} attempted={actual_encoder}; "
+            f"Hardware fallback: requested={requested_encoder} attempted={failed_encoder}; "
             f"reason={fallback_reason}"
         )})
         try:
-            fb_encoder, fb_flags = _cpu_fallback_for(actual_encoder, available_cpu_encoders)
+            fb_encoder, fb_flags = _cpu_fallback_for(failed_encoder, available_cpu_encoders)
         except RuntimeError as exc:
-            logger.error("No approved CPU fallback for %s: %s", actual_encoder, exc)
+            logger.error("No approved CPU fallback for %s: %s", failed_encoder, exc)
             _publish(self.request.id, {"type": "error", "message": str(exc)})
             raise
         logger.info(
@@ -1565,15 +1661,21 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         _publish_telemetry()
 
         # Strip any hardware decode options; use software decode for CPU fallback
-        cpu_input_opts = [o for i, o in enumerate(input_opts)
-                          if not (o in ("-c:v",) or
-                                  (i > 0 and input_opts[i-1] == "-c:v"))]
+        cpu_input_opts = strip_decode_options(input_opts)
         # Use libdav1d for AV1 input, otherwise let FFmpeg auto-select
         if in_codec == "av1":
             cpu_input_opts += ["-c:v", "libdav1d"]
         # Strip all hardware-frame filters for the CPU path. This also handles
         # a joined chain such as ``scale=...,hwdownload,format=yuv420p``.
-        cpu_vf = cpu_filter_chain(vf_filters)
+        # A QSV hardware-decode job may have a vpp_qsv filter.  Use the
+        # original software chain for fallback rather than trying to translate
+        # a QSV VPP expression into a generic CPU scale expression.
+        cpu_source_filters = (
+            software_vf_filters
+            if failed_encoder in QSV_ENCODERS
+            else vf_filters
+        )
+        cpu_vf = cpu_filter_chain(cpu_source_filters)
 
         cmd2 = [
             "ffmpeg", "-hide_banner", "-y",

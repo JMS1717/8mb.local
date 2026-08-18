@@ -1,6 +1,7 @@
-"""Platform-specific QSV software-frame filter selection."""
+"""Platform-specific QSV decode, VPP, and software-upload helpers."""
 from __future__ import annotations
 
+import math
 import sys
 
 
@@ -65,6 +66,76 @@ def qsv_input_filter(platform: str | None = None, pixel_format: str = "nv12") ->
     if current == "win32":
         return f"format={pixel_format}"
     return f"format={pixel_format},hwupload=extra_hw_frames=64"
+
+
+def qsv_hardware_decode_supported(
+    platform: str | None,
+    source_codec: str | None,
+    encoder: str,
+    rotation_degrees: int | float = 0,
+) -> bool:
+    """Return whether the optimized Linux QSV decode path is safe to try.
+
+    The tested oneVPL path keeps H.264/HEVC frames on QSV surfaces.  It is
+    intentionally limited to Linux Intel QSV jobs and upright sources.  The
+    existing software path remains necessary for AV1, rotated phone media,
+    Windows native QSV, and any runtime that rejects the probe at execution.
+    """
+    current = platform or sys.platform
+    codec = str(source_codec or "").lower()
+    try:
+        rotated = int(float(rotation_degrees or 0)) % 360 != 0
+    except (TypeError, ValueError):
+        rotated = True
+    return (
+        current != "win32"
+        and codec in {"h264", "hevc"}
+        and str(encoder).lower() in {"h264_qsv", "hevc_qsv"}
+        and not rotated
+    )
+
+
+def qsv_vpp_filter(
+    pixel_format: str = "nv12",
+    width: int | None = None,
+    height: int | None = None,
+    frame_rate: float | None = None,
+) -> str:
+    """Build a QSV-native VPP filter for scaling and/or frame-rate capping."""
+    options: list[str] = []
+    if width and height:
+        options.extend([f"w={int(width)}", f"h={int(height)}"])
+    if frame_rate is not None and float(frame_rate) > 0:
+        options.append(f"framerate={float(frame_rate):g}")
+    options.append(f"format={pixel_format}")
+    return "vpp_qsv=" + ":".join(options)
+
+
+def qsv_scaled_dimensions(
+    source_width: int | float | None,
+    source_height: int | float | None,
+    max_width: int | float | None = None,
+    max_height: int | float | None = None,
+) -> tuple[int, int] | None:
+    """Calculate even dimensions matching the existing aspect-ratio scaling."""
+    try:
+        width = float(source_width or 0)
+        height = float(source_height or 0)
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    bounds = [1.0]
+    if max_width and float(max_width) > 0:
+        bounds.append(float(max_width) / width)
+    if max_height and float(max_height) > 0:
+        bounds.append(float(max_height) / height)
+    scale = min(bounds)
+    if scale >= 1.0:
+        return None
+    scaled_width = max(2, int(math.floor((width * scale) / 2.0) * 2))
+    scaled_height = max(2, int(math.floor((height * scale) / 2.0) * 2))
+    return scaled_width, scaled_height
 
 
 def vaapi_input_filter(pixel_format: str = "nv12") -> str:
