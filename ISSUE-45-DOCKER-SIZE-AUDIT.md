@@ -15,12 +15,55 @@ This audit uses the issue #44 functional baseline without changing `main`:
 - Historical immutable tag: `jms1717/8mblocal:issue45-slim-c04b850`
 - Historical published digest: `sha256:af7c61dc4fd38e07febd461aefaac9128f5e17e22b3bc915490df1123c22140d`
 - Historical local image size: `501,348,738` bytes
+- Current validated source commit: `91ebad248631b62fb3e3c64b1185b03a43acb312`
+- Current immutable tag: `jms1717/8mblocal:issue45-intel-91ebad2`
+- Current registry digest: `sha256:74d7a5a9dcf475382cc842cee2c3c85c522870b23608e698ebb8d942ae172c2f`
+- Current local image size: `501,360,409` bytes
 
 The records above describe the earlier `c04b850` artifact. The current
 promotion creates a new immutable image from the final telemetry/P010
 checkout; its commit, tag, digest, and host validation are recorded in the
 promotion record below. No merge to `main`, normal/latest Docker tag, GitHub
 release, or Partner Center change is part of this audit.
+
+## Final promotion record
+
+The final functional commit was pushed to `agent/issue-45-docker-size` and the
+documentation record was updated afterward. The exact image was built with
+`BUILD_COMMIT=91ebad248631b62fb3e3c64b1185b03a43acb312`, published only under
+`jms1717/8mblocal:issue45-intel-91ebad2`, and pulled fresh on
+`10thGenLaptop`. The pulled image reported the same registry digest, version
+`141.0.0.0`, commit `91ebad2`, FFmpeg `n6.1.1`, and no missing libraries in
+the FFmpeg/iHD `ldd` checks.
+
+The fresh pulled image passed exact application jobs for `hevc_qsv` and
+`hevc_vaapi` on `/dev/dri/renderD128`, including real 10-bit Main10/P010 jobs
+with preserved `yuv420p10le`, BT.2020, SMPTE 2084, and limited-range metadata.
+Durable status and late SSE replay returned the same actual encoder and
+hardware telemetry. The disposable port-8003 validation container passed its
+health check and was removed. The pre-existing port-8001 deployment was not
+changed during this validation.
+
+Powerhouse was then updated by changing only the 8mb.local Compose image
+reference. The previous production image remained available:
+`jms1717/8mblocal:issue45-slim-c04b850`, image ID
+`sha256:5a796aa8a329962ba7fc43893000bbd3b998c6e6da416c800118a8a617734b4f`,
+registry digest
+`sha256:af7c61dc4fd38e07febd461aefaac9128f5e17e22b3bc915490df1123c22140d`.
+The new production image used the current immutable tag and registry digest
+above. The current Compose/.env backup is
+`/home/powerhouse/Docker/8mblocal/.codex-issue45-promotion-20260818-165608`;
+the prior backup was preserved unchanged.
+
+The production recreate window was 10 seconds (`2026-08-18T16:56:31Z` to
+`2026-08-18T16:56:41Z`). Health, version `141.0.0.0`, exact H.264/HEVC
+NVENC application encodes, CUDA/NVDEC/`scale_npp`, 10 GiB tmpfs-backed
+`MEDIA_STORAGE=auto` staging, transient-input cleanup, cancellation followed
+by a successful new compression, history/download behavior, and restart
+recovery all passed. The unrelated-container inventory remained 34. The
+old production image and rollback backups remain available. All temporary
+10thGenLaptop containers/directories and Powerhouse test outputs/history rows
+were removed; normal port 8001 remains healthy.
 
 ## Finding
 
@@ -220,7 +263,7 @@ CPU fallback could not masquerade as hardware success. `av1_qsv` and
 remained available as the CPU fallback. No host application directory or
 existing container was changed.
 
-### Published-image Intel validation
+### Historical published-image Intel validation (`c04b850`)
 
 The final immutable image was pulled directly on the 10th-generation Intel
 host before deployment to Powerhouse. Its local inspection reported the same
@@ -293,7 +336,7 @@ upload because the actual endpoint is `/healthz`; this was a harness error, not
 an application failure. The corrected probe passed and its uniquely named
 resources were removed.
 
-### Powerhouse deployment and RAM validation
+### Historical Powerhouse deployment and RAM validation (`c04b850`)
 
 Read-only production inspection found:
 
