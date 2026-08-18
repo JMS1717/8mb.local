@@ -102,7 +102,7 @@ This repository is one shared source codebase for the frontend, backend, worker,
 One command runs the automated checks and builds the portable EXE, installer EXE, Store MSIX, and local Docker image:
 
 ```powershell
-.\release-local.ps1 -Version 141.0.0.0
+.\release-local.ps1 -Version 142.0.0.0
 ```
 
 GitHub is not required to generate these files. GitHub Actions may still provide an independent compatibility check later. The local workflow never pushes its Docker image, publishes a release, deploys the application, or submits the MSIX; Microsoft Partner Center remains a separate manual submission step.
@@ -130,19 +130,19 @@ Useful commands:
 
 ```powershell
 # Validate tools and show the plan without changing versions or building
-.\release-local.ps1 -Version 141.0.0.0 -DryRun
+.\release-local.ps1 -Version 142.0.0.0 -DryRun
 
 # Full local release
-.\release-local.ps1 -Version 141.0.0.0
+.\release-local.ps1 -Version 142.0.0.0
 
 # Windows artifacts only
-.\release-local.ps1 -Version 141.0.0.0 -SkipDocker
+.\release-local.ps1 -Version 142.0.0.0 -SkipDocker
 
 # Docker artifact only
-.\release-local.ps1 -Version 141.0.0.0 -SkipWindows
+.\release-local.ps1 -Version 142.0.0.0 -SkipWindows
 
 # Windows EXE and installer without MSIX
-.\release-local.ps1 -Version 141.0.0.0 -SkipMsix
+.\release-local.ps1 -Version 142.0.0.0 -SkipMsix
 ```
 
 `-SkipTests` is troubleshooting-only and marks the result incomplete. `-OutputDir` selects another output folder, `-KeepTemp` preserves temporary files, and `-Overwrite` may reuse only a release directory previously created and marked by this script. Arbitrary existing directories, source directories, and ancestor paths are protected from overwrite.
@@ -150,8 +150,8 @@ Useful commands:
 Verify generated checksums from the release directory:
 
 ```powershell
-Get-Content .\dist\release\141.0.0.0\SHA256SUMS.txt
-Get-FileHash .\dist\release\141.0.0.0\8mblocal.exe -Algorithm SHA256
+Get-Content .\dist\release\142.0.0.0\SHA256SUMS.txt
+Get-FileHash .\dist\release\142.0.0.0\8mblocal.exe -Algorithm SHA256
 ```
 
 When a build fails, inspect `TEST-RESULTS.md`, `BUILD-MANIFEST.json`, and the named stage log, correct the source or environment issue, and rerun into a new output directory. A run that skips required stages is never reported as release-ready.
