@@ -47,7 +47,11 @@ RUN git clone --depth 1 --branch ${INTEL_MEDIA_DRIVER_VERSION} \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
       -DINSTALL_DRIVER_SYSCONF=OFF && \
     cmake --build media-driver/build -j"$(nproc)" && \
-    cmake --install media-driver/build && rm -rf media-driver
+    cmake --install media-driver/build && \
+    # The release driver contains a large unstripped symbol table.  Keep the
+    # runtime code, but do not carry build/debug symbols into the final image.
+    strip --strip-unneeded /usr/local/lib/dri/iHD_drv_video.so && \
+    rm -rf media-driver
 
 # Intel oneVPL dispatcher. Ubuntu 22.04's package is older than the oneVPL
 # 2.6 minimum required by FFmpeg 6.1, so pin the upstream dispatcher release.
@@ -109,8 +113,11 @@ RUN npm run build && \
     find build -name "*.ts" -delete
 
 # Stage 3: Runtime with all services
-# Use CUDA 12.2 runtime: minimum driver 535; supports RTX 50-series and older (535+) systems
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+# Use plain Ubuntu for the application runtime.  NVIDIA Container Toolkit
+# injects the host driver libraries/devices at runtime; only the NPP shared
+# libraries directly required by FFmpeg's scale_npp path are copied below.
+# This avoids shipping the full CUDA toolkit/runtime library tree.
+FROM ubuntu:22.04
 
 # Build metadata. scripts/set-version.ps1 keeps the default synchronized with
 # the root VERSION file; release builders override these values explicitly.
@@ -141,6 +148,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Copy FFmpeg from build stage (only what we need)
 COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg-build /usr/local/bin/ffprobe /usr/local/bin/ffprobe
+# FFmpeg links these NPP components for the existing NVIDIA scale_npp path.
+# CUDA driver libraries and NVENC/NVDEC implementations are supplied by the
+# NVIDIA Container Toolkit from the host at runtime.
+COPY --from=ffmpeg-build /usr/local/cuda-12.2/targets/x86_64-linux/lib/libnppc.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/cuda-12.2/targets/x86_64-linux/lib/libnppig.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/cuda-12.2/targets/x86_64-linux/lib/libnppicc.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/cuda-12.2/targets/x86_64-linux/lib/libnppidei.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/cuda-12.2/targets/x86_64-linux/lib/libnppif.so* /usr/local/lib/
 # SVT-AV1 is built from source in ffmpeg-build (not Ubuntu packages)
 COPY --from=ffmpeg-build /usr/local/lib/libSvtAv1Enc.so* /usr/local/lib/
 # Intel oneVPL dispatcher built above (the GPU implementation is supplied by
