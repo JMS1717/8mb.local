@@ -2,6 +2,37 @@
 from __future__ import annotations
 
 
+COLOR_METADATA_OPTIONS = frozenset({
+    "-color_range", "-colorspace", "-color_primaries", "-color_trc",
+})
+
+
+def remove_option_pairs(command: list[str], options: set[str] | frozenset[str]) -> list[str]:
+    """Remove option/value pairs without changing any other command argument."""
+    updated: list[str] = []
+    i = 0
+    while i < len(command):
+        token = command[i]
+        if token in options and i + 1 < len(command):
+            i += 2
+            continue
+        updated.append(token)
+        i += 1
+    return updated
+
+
+def ffmpeg_rejected_color_metadata(stderr_lines: list[str] | tuple[str, ...] | str) -> bool:
+    """Recognize an optional color-option rejection for one bounded retry."""
+    text = "\n".join(stderr_lines) if not isinstance(stderr_lines, str) else stderr_lines
+    lowered = text.casefold()
+    has_color_option = any(option.lstrip("-") in lowered for option in COLOR_METADATA_OPTIONS)
+    has_rejection = any(token in lowered for token in (
+        "unable to parse", "error setting option", "invalid argument",
+        "invalid value", "undefined constant", "cannot set",
+    ))
+    return has_color_option and has_rejection
+
+
 def cpu_filter_chain(filters: list[str] | None) -> list[str]:
     """Convert a hardware-frame filter chain to a CPU-safe chain.
 
