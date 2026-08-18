@@ -7,14 +7,20 @@ Date: 2026-08-18
 This audit uses the issue #44 functional baseline without changing `main`:
 
 - Branch: `agent/issue-45-docker-size`
-- Source commit: `ccff12c693733c13475c5a29524ac7ca0b39fcbf`
+- Source commit used for the final build and published image: `c04b850eec30879f160959c70c4ea2d06200dd35`
 - Parent issue #44 test commit: `0138df78bf46e5e87d026f1f4708251b311cedcc`
 - `main` reference at the start of the issue #44 work: `d991b907e1e47283dd0a2f4e251d7c4dc878896c`
 - Initial prototype tag: `jms1717/8mblocal:issue45-slim-a`
-- Clean candidate tag: `jms1717/8mblocal:issue45-slim-clean`
-- Clean candidate local image ID: `sha256:6290bdc9dfe37000ee5426a0f283b9e6362248b2b7346b217616407c7e9daefe`
+- Pre-publish clean candidate tag: `jms1717/8mblocal:issue45-slim-clean`
+- Final immutable tag: `jms1717/8mblocal:issue45-slim-c04b850`
+- Final published digest: `sha256:af7c61dc4fd38e07febd461aefaac9128f5e17e22b3bc915490df1123c22140d`
+- Final local image size: `501,348,738` bytes
 
-No production deployment, Docker Hub push, Git push, merge, or release was performed.
+The issue branch was pushed to GitHub. The immutable Docker Hub test tag was
+published and pulled fresh for validation. The image was then deployed only to
+the Powerhouse `8mblocal` Compose service after an isolated RAM test. No merge
+to `main`, normal/latest Docker tag, GitHub release, or Partner Center change
+was performed.
 
 ## Finding
 
@@ -130,7 +136,7 @@ The candidate labels and application metadata agree:
 
 ```text
 org.opencontainers.image.version = 141.0.0.0
-org.opencontainers.image.revision = ccff12c
+org.opencontainers.image.revision = c04b850
 /app/VERSION = 141.0.0.0
 ```
 
@@ -214,6 +220,93 @@ CPU fallback could not masquerade as hardware success. `av1_qsv` and
 remained available as the CPU fallback. No host application directory or
 existing container was changed.
 
+### Published-image Intel validation
+
+The final immutable image was pulled directly on the 10th-generation Intel
+host before deployment to Powerhouse. Its local inspection reported the same
+registry digest:
+
+```text
+jms1717/8mblocal:issue45-slim-c04b850
+sha256:af7c61dc4fd38e07febd461aefaac9128f5e17e22b3bc915490df1123c22140d
+size=501,348,738 bytes
+```
+
+The extended exact-codec E2E against that pulled image passed:
+
+| Requested encoder | Actual encoder | Result |
+|---|---|---|
+| `h264_qsv` | `h264_qsv` | PASS |
+| `hevc_qsv` | `hevc_qsv` | PASS |
+| `h264_vaapi` | `h264_vaapi` | PASS |
+| `hevc_vaapi` | `hevc_vaapi` | PASS |
+
+The same run passed edge cases, invalid-file rejection and cleanup, SSE
+terminal replay, active cancellation, history/download recovery, FFprobe
+validation, and restart recovery. The command used
+`--require-exact-codecs --skip-batch`; the harness summary's generic wording
+mentioned a batch scenario, but batch was explicitly skipped and is not
+claimed as part of this run.
+
+The first Powerhouse RAM probe used `/api/health` and therefore stopped before
+upload because the actual endpoint is `/healthz`; this was a harness error, not
+an application failure. The corrected probe passed and its uniquely named
+resources were removed.
+
+### Powerhouse deployment and RAM validation
+
+Read-only production inspection found:
+
+- Host: `powerhouse`; project directory: `/home/powerhouse/Docker/8mblocal`.
+- Production service/container: `8mblocal`, port 8001, NVIDIA GPU request,
+  persistent binds for `uploads`, `outputs`, and `.env`.
+- Before replacement: `jms1717/8mblocal:v141`, image ID
+  `sha256:e081be23957560969474841d90210055a41925c6e7facb9dc7e5c1990e0cdfaf`.
+- Before replacement: healthy, no running FFmpeg process, and zero running
+  compression jobs.
+- Host GPU: Quadro RTX 4000, driver `535.261.03`.
+- Host memory at inspection: 94 GiB total, 22 GiB available; root disk had
+  338 GiB free.
+
+Before changing the service, the exact Compose file and `.env` were backed up
+under:
+
+```text
+/home/powerhouse/Docker/8mblocal/.codex-issue45-backup-20260818-1442
+```
+
+The Compose image reference was changed only for the `8mblocal` service to the
+immutable issue-45 tag. The existing dynamic RAM configuration was retained:
+`MEDIA_STORAGE=auto`, `MEDIA_MEMORY_LIMIT_GB=10`, and a 10 GiB Docker shared
+memory mount. The service was recreated at `2026-08-18T14:41:16Z` and was
+healthy at final verification. The observed recreate window was about 6
+seconds; `/healthz` returned `{"ok":true}` afterward.
+
+The isolated RAM test used the published image with a unique localhost-only
+port and temporary binds. It proved:
+
+- `/dev/shm` was a `tmpfs` mount with a 10 GiB ceiling.
+- The application selected `/dev/shm/8mb.local/uploads` in explicit memory
+  mode.
+- Upload staging appeared at that path.
+- Exact `h264_nvenc` compression completed with
+  `hardware_used=true`, `fallback_occurred=false`, and
+  `actual_encoder=h264_nvenc`.
+- FFprobe validated the output.
+- The transient source was absent from both `/dev/shm` and disk upload paths
+  immediately after success.
+
+The production smoke test then repeated the same proof with `MEDIA_STORAGE=auto`
+on the live service. A synthetic 8-second video staged in `/dev/shm`, completed
+as exact `h264_nvenc`, produced a valid MP4, and had its transient source
+removed. The test output and its single test history row were deleted by exact
+path/task ID afterward. Final production verification showed the new immutable
+image running and healthy, unchanged port 8001, the same GPU request and
+persistent mounts, and no uniquely named test container or temporary test
+directory remaining. The unrelated-container inventory remained 34 running
+services before/after this deployment check; no unrelated service was
+restarted or modified.
+
 ## Files changed
 
 - `Dockerfile`
@@ -236,4 +329,8 @@ Before merging or publishing a normal tag:
 3. Confirm the normal release workflow records the smaller candidate's image size and does not require the old CUDA runtime base.
 4. Decide whether to clarify the local-only `jms1717/8mblocal:vaapi` Compose image tag in a separate documentation change.
 
-The branch is not production-ready solely from this audit because HEVC Intel and AMD hardware were not both available here. No claim is made that those unavailable hardware paths passed.
+The issue-45 image is ready for OneCreek/maintainer review and the current
+Powerhouse deployment is healthy. Intel H.264/HEVC QSV/VAAPI and NVIDIA
+H.264/HEVC real application paths are proven on the available hosts. AMD
+hardware remains the only unexecuted hardware proof in this cycle; no claim is
+made that an AMD encode passed.
