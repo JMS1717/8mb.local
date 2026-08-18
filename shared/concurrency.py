@@ -13,7 +13,7 @@ import subprocess
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 import psutil
 
@@ -26,6 +26,10 @@ GPU_MEMORY_PER_JOB_MB = 512
 ADAPTIVE_GATE_REFRESH_SECONDS = 2.0
 ADAPTIVE_LEASE_TTL_SECONDS = 3600
 ADAPTIVE_REDIS_KEY = "8mblocal:adaptive:encode"
+
+
+class JobCancellationRequested(Exception):
+    """Cooperative cancellation requested while a job is waiting or running."""
 
 
 def _nvidia_inventory() -> list[dict[str, Any]]:
@@ -254,10 +258,22 @@ return 0
             self._cached_at = now
         return max(1, int(self._cached_limit))
 
-    def acquire(self) -> str:
+    def acquire(self, cancelled: Callable[[], bool] | None = None) -> str:
+        """Acquire a slot, checking ``cancelled`` while waiting.
+
+        A task can spend a long time queued behind the adaptive limit.  The
+        callback is deliberately checked before every broker/local wait so a
+        cancellation request cannot strand a task before it enters the worker
+        function that normally polls cancellation.
+        """
         token = uuid.uuid4().hex
+        def check_cancelled() -> None:
+            if cancelled is not None and cancelled():
+                raise JobCancellationRequested("Job canceled while waiting for an encode slot")
+
         if self.redis is not None:
             while True:
+                check_cancelled()
                 limit = self.current_limit()
                 try:
                     accepted = self.redis.eval(
@@ -273,19 +289,46 @@ return 0
                     # Redis is also the task broker; retry a transient eval
                     # failure instead of turning a valid encode into a false
                     # application failure.
-                    time.sleep(1.0)
+                    if cancelled is not None:
+                        deadline = time.monotonic() + 1.0
+                        while time.monotonic() < deadline:
+                            check_cancelled()
+                            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+                    else:
+                        time.sleep(1.0)
                     continue
                 if int(accepted or 0) == 1:
+                    try:
+                        check_cancelled()
+                    except JobCancellationRequested:
+                        try:
+                            self.redis.zrem(self.key, token)
+                        except Exception:
+                            pass
+                        raise
                     self._start_lease_refresh(token)
                     return token
-                time.sleep(0.5)
+                if cancelled is not None:
+                    deadline = time.monotonic() + 0.5
+                    while time.monotonic() < deadline:
+                        check_cancelled()
+                        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+                else:
+                    time.sleep(0.5)
 
         while True:
+            check_cancelled()
             with self._condition:
                 if self._active < self.current_limit():
                     self._active += 1
+                    try:
+                        check_cancelled()
+                    except JobCancellationRequested:
+                        self._active = max(0, self._active - 1)
+                        self._condition.notify_all()
+                        raise
                     return token
-                self._condition.wait(timeout=0.5)
+                self._condition.wait(timeout=0.1 if cancelled is not None else 0.5)
 
     def release(self, token: str) -> None:
         if self.redis is not None:

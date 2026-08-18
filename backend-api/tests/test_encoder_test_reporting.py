@@ -75,6 +75,42 @@ class TestEncoderTestReporting(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertEqual(result["encode_message"], "Hardware initialization failed")
 
+    def test_forced_rerun_detail_map_overrides_stale_redis_result(self):
+        hw_info = {
+            "type": "intel_qsv",
+            "available_encoders": {"h264": "h264_qsv"},
+            "tested_encoders": {"h264_qsv": False},
+            "encoder_test_generation": "new-generation",
+            "encoder_test_results": {
+                "h264_qsv": {
+                    "codec": "h264_qsv",
+                    "actual_encoder": "h264_qsv",
+                    "encode_passed": False,
+                    "decode_passed": None,
+                    "passed": False,
+                    "message": "VAAPI driver load failure",
+                    "probe_generation": "new-generation",
+                }
+            },
+            "available_cpu_encoders": ["libx264"],
+        }
+
+        async def stale_get(key):
+            if key == "encoder_test_json:h264_qsv":
+                return json.dumps({"passed": True, "message": "stale pass"})
+            return None
+
+        with patch.object(
+            system,
+            "get_hw_info_cached_async",
+            new=AsyncMock(return_value=hw_info),
+        ), patch.object(system.redis, "get", side_effect=stale_get):
+            response = asyncio.run(system.system_encoder_tests())
+
+        result = next(item for item in response["results"] if item["codec"] == "h264_qsv")
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["encode_message"], "VAAPI driver load failure")
+
 
 if __name__ == "__main__":
     unittest.main()

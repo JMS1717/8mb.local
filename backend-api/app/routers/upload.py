@@ -172,7 +172,7 @@ async def upload_batch(
     video_codec: str = Form("av1_nvenc"),
     audio_codec: str = Form("libopus"),
     audio_bitrate_kbps: int = Form(128),
-    preset: str = Form("p6"),
+    preset: str = Form("p4"),
     container: str = Form("mp4"),
     tune: str = Form("hq"),
     max_width: int | None = Form(None),

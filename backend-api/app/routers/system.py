@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import time
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -23,6 +24,7 @@ from ..deps import (
     get_system_capabilities,
     invalidate_hw_info_cache,
     redis,
+    set_hw_info_cache,
     sync_codec_settings_from_tests,
 )
 from .. import settings_manager
@@ -259,8 +261,21 @@ async def system_encoder_tests():
             encode_msg = "Unknown"
             actual_encoder = codec
             persisted_result = False
+            current_detail = (hw_info.get("encoder_test_results") or {}).get(codec)
+            if isinstance(current_detail, dict):
+                # A forced worker rerun returns this generation-tagged detail
+                # map. Prefer it over Redis, whose 30-day keys may belong to a
+                # previous GPU, driver, or container boot.
+                persisted_result = True
+                actual_encoder = current_detail.get("actual_encoder", codec)
+                encode_passed = bool(current_detail.get("encode_passed"))
+                encode_msg = current_detail.get("message") or (
+                    "OK" if encode_passed else "Failed"
+                )
 
-            if runtime_probe_authoritative and codec in _HARDWARE_ENCODERS:
+            if persisted_result:
+                pass
+            elif runtime_probe_authoritative and codec in _HARDWARE_ENCODERS:
                 # Redis may contain a result from another GPU, driver, or
                 # container boot. The current worker probe is authoritative.
                 encode_detail_raw = None
@@ -300,14 +315,21 @@ async def system_encoder_tests():
                     encode_msg = "Not available or not tested"
 
             decode_detail_raw = await redis.get(f"encoder_test_decode_json:{codec}")
+            if isinstance(current_detail, dict) and "decode_passed" in current_detail:
+                decode_passed = current_detail.get("decode_passed")
+                decode_msg = (
+                    "OK" if decode_passed else "Decoder failed"
+                ) if decode_passed is not None else None
+                decode_detail_raw = None
             if (
                 runtime_probe_authoritative
                 and codec in _HARDWARE_ENCODERS
                 and codec not in detected_tests
             ):
                 decode_detail_raw = None
-            decode_passed = None
-            decode_msg = None
+            if not isinstance(current_detail, dict):
+                decode_passed = None
+                decode_msg = None
             if decode_detail_raw:
                 try:
                     decode_detail = json.loads(decode_detail_raw)
@@ -367,14 +389,21 @@ async def rerun_encoder_tests():
     try:
         task = celery_app.send_task("worker.worker.run_hardware_tests")
 
-        def _wait() -> None:
+        def _wait() -> dict | None:
             try:
-                task.get(timeout=90)
+                return task.get(timeout=90)
             except Exception as e:
                 logger.warning("rerun_encoder_tests: task.get raised: %s", e)
+                return None
 
-        await asyncio.to_thread(_wait)
-        invalidate_hw_info_cache()
+        result = await asyncio.to_thread(_wait)
+        if isinstance(result, dict) and result.get("status") == "ok":
+            # The worker already performed the forced rediscovery. Reuse its
+            # snapshot instead of immediately running a second probe that can
+            # reintroduce a race with a driver/device change.
+            set_hw_info_cache(result.get("hw_info"))
+        else:
+            invalidate_hw_info_cache()
         logger.info("encoder-tests/rerun: completed")
         return await system_encoder_tests()
     except Exception as e:
@@ -431,17 +460,44 @@ async def gpu_diagnostics():
     preferred_device = os.environ.get("VAAPI_DEVICE", "").strip()
     if preferred_device and os.path.exists(preferred_device):
         render_nodes.append(preferred_device)
+
+    def dri_vendor(path: str) -> str:
+        vendor_path = f"/sys/class/drm/{os.path.basename(path)}/device/vendor"
+        try:
+            value = Path(vendor_path).read_text(encoding="utf-8").strip().lower()
+        except (FileNotFoundError, PermissionError, OSError):
+            return "unknown"
+        return {
+            "0x8086": "intel",
+            "8086": "intel",
+            "0x1002": "amd",
+            "1002": "amd",
+            "0x10de": "nvidia",
+            "10de": "nvidia",
+        }.get(value, "unknown")
+
     try:
-        render_nodes.extend(
-            f"/dev/dri/{name}"
-            for name in sorted(os.listdir("/dev/dri"))
-            if name.startswith("renderD")
-        )
+        for name in sorted(os.listdir("/dev/dri")):
+            if not name.startswith("renderD"):
+                continue
+            path = f"/dev/dri/{name}"
+            # NVIDIA's render node is not an Intel/AMD VAAPI device. Keep it
+            # out of the VAAPI diagnostics unless the operator explicitly
+            # selected it with VAAPI_DEVICE.
+            if path != preferred_device and dri_vendor(path) == "nvidia":
+                continue
+            render_nodes.append(path)
     except (FileNotFoundError, PermissionError, OSError):
         pass
     render_nodes = list(dict.fromkeys(render_nodes))
     vaapi_device = render_nodes[0] if render_nodes else None
-    checks: dict = {"dri_devices": {"paths": render_nodes, "exists": bool(render_nodes)}}
+    checks: dict = {
+        "dri_devices": {
+            "paths": render_nodes,
+            "devices": [{"path": path, "vendor": dri_vendor(path)} for path in render_nodes],
+            "exists": bool(render_nodes),
+        }
+    }
 
     try:
         devs = []

@@ -74,7 +74,7 @@
   let targetMB = 19.7;
   let targetMode: 'size' | 'bitrate' = 'size';
   let targetVideoKbps = 2500;
-  let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p6';
+  let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p4';
   let videoCodec = 'av1_nvenc';
   let audioCodec: 'libopus'|'aac'|'none' = 'libopus';
   let audioKbps = 128;

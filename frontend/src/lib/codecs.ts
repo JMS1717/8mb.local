@@ -1,6 +1,14 @@
 /** Codec labels and groups shared by the single-file and batch screens. */
 export type CodecGroup = 'nvidia' | 'intel' | 'amd' | 'vaapi' | 'cpu';
 
+export type EncoderKind = 'nvenc' | 'qsv' | 'vaapi' | 'amf' | 'videotoolbox' | 'cpu' | 'unknown';
+
+export type EncoderClassification = {
+  kind: EncoderKind;
+  hardware: boolean;
+  label: string;
+};
+
 export type CodecOption = {
   value: string;
   label: string;
@@ -38,6 +46,18 @@ export function encoderDisplayName(value: string): string {
   if (value === 'libx264') return 'H.264 CPU fallback (FFmpeg: libx264)';
   if (value === 'libx265') return 'HEVC CPU fallback (FFmpeg: libx265)';
   return value;
+}
+
+/** Canonical classification for encoder badges and diagnostics. */
+export function classifyEncoder(value: unknown): EncoderClassification {
+  const encoder = String(value || '').trim().toLowerCase();
+  if (encoder.endsWith('_nvenc')) return { kind: 'nvenc', hardware: true, label: 'NVIDIA NVENC' };
+  if (encoder.endsWith('_qsv')) return { kind: 'qsv', hardware: true, label: 'Intel Quick Sync' };
+  if (encoder.endsWith('_vaapi')) return { kind: 'vaapi', hardware: true, label: 'VAAPI hardware' };
+  if (encoder.endsWith('_amf')) return { kind: 'amf', hardware: true, label: 'AMD AMF' };
+  if (encoder.includes('videotoolbox')) return { kind: 'videotoolbox', hardware: true, label: 'Apple VideoToolbox' };
+  if (encoder.startsWith('lib') || encoder.includes('cpu')) return { kind: 'cpu', hardware: false, label: 'CPU/software' };
+  return { kind: 'unknown', hardware: false, label: 'software' };
 }
 
 export function codecIcon(group: CodecGroup): string {

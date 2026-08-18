@@ -14,41 +14,27 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Dict, List, Tuple
 
 from shared.subprocess_utils import hidden_process_kwargs
 
 from .constants import AMF_ENCODERS, CPU_ENCODERS, QSV_ENCODERS, VAAPI_ENCODERS
-from .qsv_filters import qsv_input_filter, qsv_probe_size
+from .qsv_filters import qsv_input_filter, qsv_probe_size, vaapi_input_filter
 
 logger = logging.getLogger(__name__)
 
 
 def get_gpu_env() -> dict[str, str]:
-    """Get subprocess environment for CUDA and VAAPI/QSV."""
-    env = os.environ.copy()
-    env["NVIDIA_VISIBLE_DEVICES"] = env.get("NVIDIA_VISIBLE_DEVICES", "all")
-    env["NVIDIA_DRIVER_CAPABILITIES"] = env.get(
-        "NVIDIA_DRIVER_CAPABILITIES", "compute,video,utility"
-    )
-    lib_paths = [
-        "/usr/local/nvidia/lib64",
-        "/usr/local/nvidia/lib",
-        "/usr/local/cuda/lib64",
-        "/usr/local/cuda/lib",
-        "/usr/lib/wsl/lib",
-        "/usr/lib/x86_64-linux-gnu",
-        "/usr/lib/x86_64-linux-gnu/dri",
-        "/usr/lib/dri",
-    ]
-    existing = env.get("LD_LIBRARY_PATH", "")
-    add = ":".join(p for p in lib_paths if p)
-    env["LD_LIBRARY_PATH"] = (
-        (existing + (":" if existing and add else "") + add)
-        if (existing or add)
-        else ""
-    )
-    return env
+    """Get the canonical subprocess environment for GPU probes.
+
+    Keep startup probes on the same VAAPI driver search path as detection and
+    real jobs.  Having a second environment builder was an easy way for a
+    probe to pass while the worker later loaded a different driver.
+    """
+    from .hw_detect import get_gpu_env as _get_gpu_env
+
+    return _get_gpu_env()
 
 
 def _ffmpeg_has_nvenc(env: dict[str, str]) -> bool:
@@ -215,7 +201,7 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
         if encoder_name in QSV_ENCODERS or encoder_name in VAAPI_ENCODERS:
             upload_filter = qsv_input_filter(sys.platform)
             if encoder_name in VAAPI_ENCODERS:
-                upload_filter = "format=nv12|vaapi,hwupload"
+                upload_filter = vaapi_input_filter()
             cmd += ["-vf", upload_filter]
         elif encoder_name in AMF_ENCODERS:
             # AMF is a native Windows path and is most portable with the
@@ -414,6 +400,31 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
     failed = len(test_results) - passed
     logger.info("Encoder validation complete: tested=%s passed=%s failed=%s", len(test_results), passed, failed)
 
+    # Make this rerun the worker's authoritative snapshot.  In particular,
+    # do not leave a previous PASS for a device/codec that disappeared.
+    generation = str(hw_info.get("probe_generation") or "")
+    hw_info["encoder_test_results"] = {
+        codec: {
+            "codec": codec,
+            "actual_encoder": actual_encoder,
+            "encode_passed": encode_passed,
+            "decode_passed": decode_status,
+            "passed": status == "PASS",
+            "message": message or ("OK" if encode_passed else "Failed during init"),
+            "probe_generation": generation,
+        }
+        for codec, (actual_encoder, status, decode_status, message, encode_passed)
+        in test_results.items()
+    }
+    hw_info["tested_encoders"] = {
+        actual_encoder: bool(encode_passed)
+        for actual_encoder, _status, _decode_status, _message, encode_passed
+        in test_results.values()
+        if actual_encoder.endswith(("_nvenc", "_qsv", "_vaapi", "_amf"))
+    }
+    hw_info["encoder_test_generation"] = generation
+    hw_info["encoder_test_timestamp"] = int(time.time())
+
     # Persist both the compact status and details consumed by the API.
     try:
         if os.getenv("LOCAL_RUNTIME", "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -427,6 +438,25 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
                 os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"),
                 decode_responses=True,
             )
+        # These are the only encoder-test keys owned by this application.
+        # Clear the complete known set before writing the new snapshot so a
+        # removed GPU or unsupported codec cannot survive for 30 days in Redis.
+        known_codecs = [
+            "h264_nvenc", "hevc_nvenc", "av1_nvenc",
+            "h264_qsv", "hevc_qsv", "av1_qsv",
+            "h264_vaapi", "hevc_vaapi", "av1_vaapi",
+            "h264_amf", "hevc_amf", "av1_amf",
+            "libx264", "libx265", "libsvtav1",
+        ]
+        redis_client.delete(*[
+            key
+            for codec in known_codecs
+            for key in (
+                f"encoder_test:{codec}",
+                f"encoder_test_json:{codec}",
+                f"encoder_test_decode_json:{codec}",
+            )
+        ])
         for codec, (actual_encoder, status, decode_status, message, encode_passed) in test_results.items():
             overall_passed = status == "PASS"
             redis_client.setex(
@@ -440,6 +470,7 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
                     "actual_encoder": actual_encoder,
                     "passed": encode_passed,
                     "message": message or ("OK" if encode_passed else "Failed during init"),
+                    "probe_generation": generation,
                 }),
             )
             if decode_status is not None:
@@ -450,6 +481,7 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
                         "codec": codec,
                         "passed": decode_status,
                         "message": "OK" if decode_status else "Decoder failed",
+                        "probe_generation": generation,
                     }),
                 )
     except Exception as exc:

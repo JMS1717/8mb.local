@@ -18,7 +18,11 @@ from typing import Dict, Optional
 from redis import Redis
 
 from shared.subprocess_utils import hidden_process_kwargs
-from shared.concurrency import AdaptiveConcurrencyGate, configured_worker_concurrency
+from shared.concurrency import (
+    AdaptiveConcurrencyGate,
+    JobCancellationRequested,
+    configured_worker_concurrency,
+)
 
 from .celery_app import celery_app
 from .constants import (
@@ -28,19 +32,55 @@ from .constants import (
 )
 from .utils import ffprobe_info, calc_bitrates
 from .auto_resolution import choose_auto_resolution
-from .hw_detect import get_hw_info, map_codec_to_hw, choose_best_codec
+from .hw_detect import get_hw_info, map_codec_to_hw, choose_best_codec, refresh_hw_info
 from .ffmpeg_helpers import cpu_filter_chain, replace_bitrate_args
 from .startup_tests import run_startup_tests
 from .progress import parse_ffmpeg_out_time, parse_time_string
-from .qsv_filters import qsv_input_filter
+from .qsv_filters import (
+    hardware_input_pixel_format,
+    hardware_profile_flags,
+    qsv_hardware_decode_supported,
+    qsv_input_filter,
+    qsv_scaled_dimensions,
+    qsv_vpp_filter,
+    source_is_10bit,
+    source_color_metadata_args,
+)
 
 logger = logging.getLogger(__name__)
 
 REDIS = None
 # Cache encoder test results to avoid slow init tests on every job
 ENCODER_TEST_CACHE: Dict[str, bool] = {}
+_ENCODER_TEST_CACHE_LOCK = threading.RLock()
 _LAST_PUBLISH_WARNING_TS = 0.0
 _ENCODE_GATE: AdaptiveConcurrencyGate | None = None
+
+_ENCODER_TELEMETRY_KEYS = (
+    "requested_encoder",
+    "resolved_encoder",
+    "actual_encoder",
+    "hardware_used",
+    "hardware_type",
+    "hardware_device",
+    "render_device",
+    "fallback_occurred",
+    "fallback_stage",
+    "fallback_reason",
+    "decoder",
+)
+
+
+def replace_encoder_test_cache(cache: Dict[str, bool]) -> None:
+    """Atomically replace the process-local probe snapshot."""
+    with _ENCODER_TEST_CACHE_LOCK:
+        ENCODER_TEST_CACHE.clear()
+        ENCODER_TEST_CACHE.update(cache or {})
+
+
+def encoder_test_cache_snapshot() -> Dict[str, bool]:
+    with _ENCODER_TEST_CACHE_LOCK:
+        return dict(ENCODER_TEST_CACHE)
 
 
 def _encode_gate() -> AdaptiveConcurrencyGate:
@@ -159,29 +199,30 @@ def get_gpu_env():
     Get environment with NVIDIA GPU variables and library paths for subprocess calls.
     Includes LD_LIBRARY_PATH locations needed for CUDA on WSL2 and NVIDIA toolkit.
     """
-    env = os.environ.copy()
-    # Ensure NVIDIA variables are set for GPU access
-    env['NVIDIA_VISIBLE_DEVICES'] = env.get('NVIDIA_VISIBLE_DEVICES', 'all')
-    env['NVIDIA_DRIVER_CAPABILITIES'] = env.get('NVIDIA_DRIVER_CAPABILITIES', 'compute,video,utility')
-    # Add common library locations (non-destructive append)
-    lib_paths = [
-        '/usr/local/nvidia/lib64',
-        '/usr/local/nvidia/lib',
-        '/usr/local/cuda/lib64',
-        '/usr/local/cuda/lib',
-        '/usr/lib/wsl/lib',  # WSL2 libcuda.so location
-        '/usr/lib/x86_64-linux-gnu',
-        '/usr/lib/x86_64-linux-gnu/dri',
-        '/usr/lib/dri',
-    ]
-    existing = env.get('LD_LIBRARY_PATH', '')
-    add = ':'.join(p for p in lib_paths if p)
-    env['LD_LIBRARY_PATH'] = (existing + (':' if existing and add else '') + add) if (existing or add) else ''
-    return env
+    # Keep jobs, detection, and startup probes on one environment builder.
+    from .hw_detect import get_gpu_env as _get_gpu_env
+
+    return _get_gpu_env()
 
 
 def _is_hardware_encoder(encoder: str) -> bool:
     return encoder in HW_ENCODERS
+
+
+def _encoder_display_label(encoder: str) -> str:
+    """Return a truthful short label for worker log messages."""
+    value = str(encoder or "").lower()
+    if value.endswith("_qsv"):
+        return "Intel Quick Sync"
+    if value.endswith("_vaapi"):
+        return "VAAPI hardware"
+    if value.endswith("_nvenc"):
+        return "NVIDIA NVENC"
+    if value.endswith("_amf"):
+        return "AMD AMF"
+    if value.startswith("lib"):
+        return "CPU/software"
+    return "software"
 
 
 
@@ -201,6 +242,14 @@ def _publish(task_id: str, event: Dict) -> bool:
     global _LAST_PUBLISH_WARNING_TS
     event.setdefault("task_id", task_id)
     try:
+        # Pub/Sub is intentionally transient, so mirror structured encoder
+        # state into the existing durable queue record before publishing it.
+        # This makes status/reconnect authoritative even when the browser
+        # subscribes after the selection event was emitted.
+        if event.get("type") == "telemetry":
+            _persist_job_telemetry(task_id, event.get("telemetry") or {})
+        elif event.get("type") == "done" and isinstance(event.get("stats"), dict):
+            _persist_job_telemetry(task_id, event["stats"])
         _redis().publish(f"progress:{task_id}", json.dumps(event))
         if os.getenv("LOCAL_RUNTIME", "").strip().lower() in {"1", "true", "yes", "on"}:
             from shared.local_runtime import record_worker_event
@@ -224,6 +273,37 @@ def _is_cancelled(task_id: str) -> bool:
         return str(val) == '1'
     except Exception:
         return False
+
+
+def _persist_job_telemetry(task_id: str, telemetry: Dict) -> None:
+    """Persist telemetry in the existing Redis job record when available."""
+    updates = {
+        key: telemetry.get(key)
+        for key in _ENCODER_TELEMETRY_KEYS
+        if telemetry.get(key) is not None
+    }
+    if not updates:
+        return
+    try:
+        redis_client = _redis()
+        raw = redis_client.get(f"job:{task_id}")
+        if not raw:
+            return
+        job = json.loads(raw)
+        if not isinstance(job, dict):
+            return
+        job.update(updates)
+        redis_client.setex(f"job:{task_id}", 86400, json.dumps(job))
+    except Exception as exc:
+        # Celery metadata remains a second durable source; telemetry persistence
+        # must never turn a successful encode into a failed task.
+        logger.debug("job telemetry persistence failed for %s: %s", task_id[:8], exc)
+
+
+def _check_cancelled(task_id: str, phase: str) -> None:
+    """Raise the single cooperative cancellation signal used by a task."""
+    if task_id != "?" and _is_cancelled(task_id):
+        raise JobCancellationRequested(f"Job canceled during {phase}")
 
 
 def _history_filename(job_id: str, input_path: str) -> str:
@@ -278,28 +358,57 @@ def _cleanup_transient_input_after_task(func):
         if input_path is None and len(args) >= 3:
             input_path = args[2]  # bound self, job_id, input_path
         transient_input = bool(kwargs.get("transient_input", False))
+        task = args[0] if args else None
+        task_id = getattr(getattr(task, "request", None), "id", "?")
+        cancelled = lambda: task_id != "?" and _is_cancelled(task_id)
         gate = _encode_gate()
-        lease = gate.acquire()
-        logger.info(
-            "adaptive concurrency: acquired encode slot task_id=%s limit=%s",
-            getattr(getattr(args[0], "request", None), "id", "?"),
-            gate.current_limit(),
-        )
+        lease = None
         try:
+            _check_cancelled(task_id, "queued")
+            lease = gate.acquire(cancelled=cancelled)
+            _check_cancelled(task_id, "waiting_for_encode_slot")
+            logger.info(
+                "adaptive concurrency: acquired encode slot task_id=%s limit=%s",
+                task_id,
+                gate.current_limit(),
+            )
             return func(*args, **kwargs)
+        except JobCancellationRequested as exc:
+            message = str(exc) or "Job canceled by user"
+            _publish(task_id, {"type": "canceled", "message": message})
+            try:
+                task.update_state(
+                    # Use a normal custom Celery state for an executing task.
+                    # Celery treats REVOKED result payloads as exception data;
+                    # writing our plain cancellation metadata there makes the
+                    # Redis result impossible to decode and turns status into
+                    # HTTP 500. Queued tasks may still be reported as REVOKED
+                    # by Celery's control layer, but an acknowledged task has
+                    # one explicit CANCELED terminal state.
+                    state="CANCELED",
+                    meta={"state": "canceled", "phase": "canceled", "detail": message},
+                )
+            except Exception:
+                pass
+            # Ignore prevents Celery from converting a cooperative user
+            # cancellation into FAILURE after cleanup has completed.
+            from celery.exceptions import Ignore
+
+            raise Ignore() from exc
         finally:
-            gate.release(lease)
+            if lease is not None:
+                gate.release(lease)
             cleanup_transient_input(input_path, transient_input)
     return wrapper
 
 
 @celery_app.task(name="worker.worker.get_hardware_info")
-def get_hardware_info_task():
+def get_hardware_info_task(force_refresh: bool = False):
     """Return hardware acceleration info for the frontend."""
-    hw = get_hw_info() or {}
+    hw = get_hw_info(force_refresh=bool(force_refresh)) or {}
     # Include preferred codec suggestion using startup test cache if available
     try:
-        preferred = choose_best_codec(hw, encoder_test_cache=ENCODER_TEST_CACHE)
+        preferred = choose_best_codec(hw, encoder_test_cache=encoder_test_cache_snapshot())
         hw = dict(hw)  # copy
         hw["preferred"] = preferred
     except Exception:
@@ -315,13 +424,15 @@ def run_hardware_tests_task() -> dict:
     Returns a small summary with the number of cache entries updated.
     """
     try:
-        _hw_info = get_hw_info()
+        _hw_info = refresh_hw_info()
         cache = run_startup_tests(_hw_info)
-        try:
-            ENCODER_TEST_CACHE.update(cache)
-        except Exception:
-            pass
-        return {"status": "ok", "updated": len(cache)}
+        replace_encoder_test_cache(cache)
+        return {
+            "status": "ok",
+            "updated": len(cache),
+            "hw_info": _hw_info,
+            "probe_generation": _hw_info.get("probe_generation"),
+        }
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
@@ -337,11 +448,13 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                    target_video_bitrate_kbps: float | None = None,
                    max_output_fps: float | None = None,
                    transient_input: bool = False):
+    task_id = self.request.id
+    _check_cancelled(task_id, "queued")
     logger.info(
         "compress_video START task_id=%s job_id=%s codec=%s target_mb=%s preset=%s tune=%s "
         "audio=%s@%skbps container=%s audio_only=%s auto_res=%s max_wh=%s/%s "
         "target_res=%s fps_cap=%s force_hw_decode=%s fast_finalize=%s input=%s",
-        self.request.id, job_id, video_codec, target_size_mb, preset, tune,
+        task_id, job_id, video_codec, target_size_mb, preset, tune,
         audio_codec, audio_bitrate_kbps,
         Path(output_path).suffix.lstrip("."), audio_only, auto_resolution,
         max_width, max_height, target_resolution, max_output_fps,
@@ -356,8 +469,11 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             logger.warning("Could not remove canceled partial output: %s", output_path)
 
     # Detect hardware acceleration
-    _publish(self.request.id, {"type": "log", "message": "Initializing: detecting hardware…"})
+    _publish(task_id, {"type": "progress", "progress": 0.0, "phase": "probing"})
+    _publish(task_id, {"type": "log", "message": "Initializing: detecting hardware…"})
+    _check_cancelled(task_id, "detecting_hardware")
     hw_info = get_hw_info()
+    _check_cancelled(task_id, "detecting_hardware")
     available_cpu_encoders = set(hw_info.get("available_cpu_encoders") or [])
     logger.debug(
         "compress_video hw_info: type=%s device=%s encoders=%s",
@@ -367,8 +483,11 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     _publish(self.request.id, {"type": "log", "message": f"Hardware: {hw_info['type'].upper()} acceleration detected"})
     
     # Probe
-    _publish(self.request.id, {"type": "log", "message": "Initializing: probing input file…"})
+    _publish(task_id, {"type": "progress", "progress": 0.0, "phase": "probing"})
+    _publish(task_id, {"type": "log", "message": "Initializing: probing input file…"})
+    _check_cancelled(task_id, "probing_input")
     info = ffprobe_info(input_path, allow_audio_only=bool(audio_only))
+    _check_cancelled(task_id, "probing_input")
     duration = info.get("duration", 0.0)
     if start_time or end_time:
         try:
@@ -425,19 +544,90 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
 
     # Map requested codec to actual encoder and flags
     actual_encoder, v_flags, init_hw_flags = map_codec_to_hw(video_codec, hw_info)
+    requested_encoder = video_codec
+    resolved_encoder = actual_encoder
+    fallback_occurred = False
+    fallback_stage = "none"
+    fallback_reason = None
+    render_device = hw_info.get("vaapi_device") or hw_info.get("device")
+    decoder_info = {
+        "name": "software",
+        "hardware_used": False,
+        "hardware_type": None,
+        "device": None,
+    }
+    encoder_telemetry = {
+        "requested_encoder": requested_encoder,
+        "resolved_encoder": resolved_encoder,
+        "actual_encoder": None,
+        "hardware_used": None,
+        "hardware_type": hw_info.get("type"),
+        "hardware_device": render_device,
+        "render_device": render_device,
+        "fallback_occurred": False,
+        "fallback_stage": "none",
+        "fallback_reason": None,
+        "decoder": decoder_info,
+    }
+
+    def _telemetry_snapshot() -> dict:
+        return {
+            **encoder_telemetry,
+            "decoder": dict(decoder_info),
+        }
+
+    def _publish_telemetry() -> None:
+        _publish(task_id, {"type": "telemetry", "telemetry": _telemetry_snapshot()})
+
+    def _update_task_state(state: str, meta: dict | None = None) -> None:
+        state_meta = _telemetry_snapshot()
+        if meta:
+            state_meta.update(meta)
+        self.update_state(state=state, meta=state_meta)
+
+    # If hardware mapping already selected a CPU encoder, expose that as a
+    # resolved fallback immediately. The actual encoder is known because no
+    # hardware process will be attempted in this case.
+    if (
+        requested_encoder != resolved_encoder
+        and _is_hardware_encoder(requested_encoder)
+        and resolved_encoder in CPU_ENCODERS
+    ):
+        fallback_occurred = True
+        fallback_stage = "hardware_detection"
+        fallback_reason = "requested hardware encoder is unavailable on this worker"
+        encoder_telemetry.update({
+            "actual_encoder": resolved_encoder,
+            "hardware_used": False,
+            "fallback_occurred": True,
+            "fallback_stage": fallback_stage,
+            "fallback_reason": fallback_reason,
+        })
+    logger.info(
+        "encoder selection task_id=%s requested=%s resolved=%s render_device=%s hardware=%s",
+        task_id, requested_encoder, resolved_encoder, render_device,
+        _is_hardware_encoder(resolved_encoder),
+    )
+    _publish(task_id, {"type": "log", "message": (
+        f"Encoder request: {requested_encoder}; resolved: {resolved_encoder}; "
+        f"device: {render_device or 'none'}"
+    )})
     
     # Fallback to CPU only if startup tests explicitly marked encoder as unavailable.
     # If cache is empty (tests still running in background), attempt hardware and rely on runtime fallback below.
     original_encoder = actual_encoder
     if actual_encoder not in CPU_ENCODERS:
-        global ENCODER_TEST_CACHE
+        test_cache = encoder_test_cache_snapshot()
         cache_key = f"{actual_encoder}:{':'.join(init_hw_flags)}"
         logger.debug(
             "startup-test cache lookup: key=%s present=%s value=%s",
-            cache_key, cache_key in ENCODER_TEST_CACHE,
-            ENCODER_TEST_CACHE.get(cache_key),
+            cache_key, cache_key in test_cache,
+            test_cache.get(cache_key),
         )
-        if cache_key in ENCODER_TEST_CACHE and not ENCODER_TEST_CACHE[cache_key]:
+        if cache_key in test_cache and not test_cache[cache_key]:
+            fallback_occurred = True
+            fallback_stage = "startup_probe"
+            fallback_reason = "startup encoder probe failed"
             _publish(self.request.id, {"type": "log", "message": f"⚠️ {actual_encoder} marked unavailable by startup tests, falling back to CPU"})
             _publish(self.request.id, {"type": "log", "message": (
                 "Note: The selected hardware encoder failed initialization during startup tests. "
@@ -447,17 +637,38 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             )})
             actual_encoder, v_flags = _cpu_fallback_for(actual_encoder, available_cpu_encoders)
             init_hw_flags = []
+            fallback_occurred = True
+            fallback_stage = "startup_probe"
+            fallback_reason = "startup encoder probe failed"
+            encoder_telemetry.update({
+                "actual_encoder": actual_encoder,
+                "hardware_used": False,
+                "fallback_occurred": True,
+                "fallback_stage": fallback_stage,
+                "fallback_reason": fallback_reason,
+            })
             logger.info(
                 "CPU fallback selected (startup-test cache): %s -> %s",
                 original_encoder, actual_encoder,
             )
             _publish(self.request.id, {"type": "log", "message": f"Encoder: CPU ({actual_encoder})"})
     
-    _publish(self.request.id, {"type": "log", "message": f"Using encoder: {actual_encoder} (requested: {video_codec})"})
+    _publish(self.request.id, {"type": "log", "message": (
+        f"Using encoder: {actual_encoder} (requested: {video_codec})"
+        + (f"; fallback: {fallback_reason}" if fallback_occurred else "")
+    )})
+    if source_is_10bit(info) and original_encoder in QSV_ENCODERS | VAAPI_ENCODERS and actual_encoder in CPU_ENCODERS:
+        _publish(self.request.id, {"type": "log", "message": (
+            "10-bit source is using the CPU fallback's 8-bit compatibility path; "
+            "HDR color tags are retained, but source precision is not"
+        )})
     _publish(self.request.id, {"type": "log", "message": "Starting compression…"})
+    if actual_encoder in CPU_ENCODERS and encoder_telemetry.get("actual_encoder") is None:
+        encoder_telemetry.update({"actual_encoder": actual_encoder, "hardware_used": False})
+    _publish_telemetry()
     # Mark task as started so queue shows running immediately
     try:
-        self.update_state(state="STARTED", meta={"progress": 0.0, "phase": "encoding"})
+        _update_task_state("STARTED", {"progress": 0.0, "phase": "encoding"})
     except Exception:
         pass
     
@@ -529,6 +740,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             if sys.platform != "win32":
                 popen_kwargs["start_new_session"] = True
             popen_kwargs.update(hidden_process_kwargs())
+            _check_cancelled(task_id, "preparing")
             audio_proc = subprocess.Popen(cmd, **popen_kwargs)
             while audio_proc.poll() is None:
                 if _is_cancelled(self.request.id):
@@ -558,10 +770,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
 
         if was_cancelled:
             remove_cancelled_output()
-            _publish(self.request.id, {"type": "canceled"})
-            msg = "Job canceled by user"
-            _publish(self.request.id, {"type": "error", "message": msg})
-            raise RuntimeError(msg)
+            raise JobCancellationRequested("Job canceled during encoding")
         if rc != 0:
             msg = f"Audio extraction failed with code {rc}"
             _publish(self.request.id, {"type": "error", "message": msg})
@@ -587,6 +796,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             "duration_s": duration,
             "target_size_mb": target_size_mb,
             "final_size_mb": round(final_size / (1024*1024), 2),
+            **_telemetry_snapshot(),
         }
         try:
             if os.getenv("HISTORY_ENABLED", "true").lower() in ("true", "1", "yes"):
@@ -618,7 +828,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             _publish(self.request.id, {"type": "log", "message": f"Failed to save audio history: {exc}"})
         _publish(self.request.id, {"type": "progress", "progress": 100.0, "phase": "done"})
         try:
-            self.update_state(state="SUCCESS", meta={"output_path": output_path, "progress": 100.0, "detail": "done", **stats})
+            _update_task_state("SUCCESS", {"output_path": output_path, "progress": 100.0, "detail": "done", **stats})
         except Exception:
             pass
         _publish(self.request.id, {"type": "done", "stats": stats})
@@ -837,9 +1047,10 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         except Exception:
             return False
 
-    # Log force decode preference once
+    # Log force decode preference once. This is a request, not proof that the
+    # selected decoder will be usable for this source/device.
     if force_hw_decode:
-        _publish(self.request.id, {"type": "log", "message": "Force hardware decode: enabled"})
+        _publish(self.request.id, {"type": "log", "message": "Hardware decode requested"})
 
     # AV1 decode strategy (skip GPU decode when display rotation metadata is present — it is not applied like software)
     if in_codec == "av1":
@@ -852,16 +1063,29 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                 v_flags = [f for i, f in enumerate(v_flags) if not (f == "-pix_fmt" or (i > 0 and v_flags[i-1] == "-pix_fmt"))]
                 if vf_filters:
                     vf_filters = [f.replace("scale=", "scale_npp=") for f in vf_filters]
+                decoder_info.update({
+                    "name": "av1_cuvid",
+                    "hardware_used": True,
+                    "hardware_type": "nvidia",
+                    "device": render_device,
+                })
+                _publish_telemetry()
                 _publish(self.request.id, {"type": "log", "message": "Decoder: av1_cuvid (CUDA) probe passed; GPU decode + NVENC encode"})
             else:
                 input_opts += ["-c:v", "libdav1d"]
+                decoder_info.update({"name": "libdav1d", "hardware_used": False})
+                _publish_telemetry()
                 msg = "Decoder: libdav1d (software AV1 decode) — av1_cuvid missing or probe failed"
                 if force_hw_decode:
                     msg += " (hardware decode was preferred but is not usable for this file/GPU)"
                 _publish(self.request.id, {"type": "log", "message": msg})
         else:
             input_opts += ["-c:v", "libdav1d"]
-            _publish(self.request.id, {"type": "log", "message": "Decoder: using libdav1d (CPU encoder path)"})
+            decoder_info.update({"name": "libdav1d", "hardware_used": False})
+            _publish_telemetry()
+            _publish(self.request.id, {"type": "log", "message": (
+                f"Decoder: Software (libdav1d); encoder remains hardware ({actual_encoder})"
+            )})
     elif in_codec in ("h264", "hevc") and actual_encoder.endswith("_nvenc") and rot_deg % 360 == 0:
         # H.264/HEVC: NVDEC widely supported; prefer CUDA when using NVENC (software decode if rotation metadata must be honored)
         init_hw_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"] + init_hw_flags
@@ -870,10 +1094,18 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         # Switch scale filter to GPU variant if scaling is requested
         if vf_filters:
             vf_filters = [f.replace("scale=", "scale_npp=") for f in vf_filters]
+        decoder_info.update({
+            "name": "cuda",
+            "hardware_used": True,
+            "hardware_type": "nvidia",
+            "device": render_device,
+        })
+        _publish_telemetry()
         _publish(self.request.id, {"type": "log", "message": f"Decoder: using cuda ({in_codec})"})
 
     # Optional output frame-rate cap: only when we know source fps is above the cap (same as input otherwise).
     input_fps = info.get("video_fps")
+    qsv_frame_rate: float | None = None
     if max_output_fps is not None and float(max_output_fps) > 0:
         cap = float(max_output_fps)
         if input_fps is None:
@@ -885,6 +1117,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             pass  # already at or below cap — preserve input fps
         else:
             fps_filter = f"fps=fps={cap}"
+            qsv_frame_rate = cap
             has_npp = any("scale_npp=" in f for f in vf_filters)
             cuda_hw_frames = (
                 actual_encoder.endswith("_nvenc")
@@ -913,29 +1146,98 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             ip = f"{float(input_fps):.3g}"
             _publish(self.request.id, {"type": "log", "message": f"Frame rate: capping at {cap:g} fps (source ~{ip} fps)"})
 
-    # QSV and VAAPI encode hardware frames, but software decode and software
-    # scaling remain the most reliable path across Intel/AMD driver versions.
-    # Upload only after all software filters (scale/fps) have been applied.
+    # Keep the software filter chain for fallback.  Linux Intel QSV can use
+    # hardware decode and VPP for upright H.264/HEVC sources, but unsupported
+    # input/profile/driver combinations must return to this proven path.
+    software_vf_filters = list(vf_filters)
+
+    qsv_hardware_decode = qsv_hardware_decode_supported(
+        sys.platform,
+        in_codec,
+        actual_encoder,
+        rot_deg,
+    )
+
+    # Upload only after all software filters have been applied on the fallback
+    # path.  The optimized path keeps frames on QSV surfaces instead.
+    source_pixel_format = hardware_input_pixel_format(actual_encoder, info)
+    color_metadata_args = source_color_metadata_args(info)
     if actual_encoder in QSV_ENCODERS:
-        # Linux oneVPL requires a fixed pool; native Windows QSV performs its
-        # own upload because explicit D3D11 hwupload rejects some real-world
-        # rotated/vertical AV1 surfaces with E_INVALIDARG (0x80070057).
-        qsv_filter = qsv_input_filter(sys.platform)
-        vf_filters.append(qsv_filter)
+        if qsv_hardware_decode:
+            # The decoder emits QSV surfaces.  Use QSV VPP only when the job
+            # needs scaling, frame-rate capping, or a 10-bit -> 8-bit
+            # conversion for an H.264 output.  With no such work, passing the
+            # surfaces directly avoids both a download and an upload.
+            qsv_dims = qsv_scaled_dimensions(disp_w, disp_h, max_width, max_height)
+            qsv_needs_format = source_is_10bit(info) and source_pixel_format == "nv12"
+            if qsv_dims or qsv_frame_rate is not None or qsv_needs_format:
+                qsv_width = qsv_dims[0] if qsv_dims else None
+                qsv_height = qsv_dims[1] if qsv_dims else None
+                vf_filters = [qsv_vpp_filter(
+                    source_pixel_format,
+                    qsv_width,
+                    qsv_height,
+                    qsv_frame_rate,
+                )]
+            else:
+                vf_filters = []
+            input_opts += [
+                "-hwaccel", "qsv",
+                "-hwaccel_output_format", "qsv",
+                "-c:v", f"{in_codec}_qsv",
+            ]
+            decoder_info.update({
+                "name": f"{in_codec}_qsv",
+                "hardware_used": True,
+                "hardware_type": "intel_qsv",
+                "device": render_device,
+            })
+            _publish_telemetry()
+            _publish(self.request.id, {"type": "log", "message": (
+                f"Decoder: {in_codec}_qsv (Intel Quick Sync hardware)"
+                "; keeping frames on QSV surfaces"
+            )})
+        else:
+            # Linux oneVPL requires a fixed pool; native Windows QSV performs
+            # its own upload because explicit D3D11 hwupload rejects some
+            # real-world rotated/vertical AV1 surfaces.
+            qsv_filter = qsv_input_filter(sys.platform, source_pixel_format)
+            vf_filters.append(qsv_filter)
+        v_flags += hardware_profile_flags(actual_encoder, source_pixel_format)
+        if source_pixel_format == "p010le":
+            _publish(self.request.id, {"type": "log", "message": (
+                "Input is 10-bit; preserving P010 through the QSV upload path "
+                "with HEVC Main10 output"
+            )})
+        elif source_pixel_format == "nv12" and source_is_10bit(info):
+            _publish(self.request.id, {"type": "log", "message": (
+                "Input is 10-bit but this hardware encoder uses an 8-bit NV12 path"
+            )})
         _publish(self.request.id, {
             "type": "log",
             "message": (
-                f"Encoder: {actual_encoder} with software decode and "
-                + ("QSV internal upload" if sys.platform == "win32" else "QSV hardware upload")
+                f"Encoder: {_encoder_display_label(actual_encoder)} ({actual_encoder}) with "
+                + ("QSV hardware decode/VPP" if qsv_hardware_decode else "software decode and "
+                   + ("QSV internal upload" if sys.platform == "win32" else "QSV hardware upload"))
             ),
         })
     elif actual_encoder in VAAPI_ENCODERS:
         # Allow an already-uploaded VAAPI frame as well as software nv12.
         # This is the portable form used by FFmpeg's VAAPI filter graph.
-        vf_filters.append("format=nv12|vaapi,hwupload")
+        vf_filters.append(f"format={source_pixel_format}|vaapi,hwupload")
+        v_flags += hardware_profile_flags(actual_encoder, source_pixel_format)
+        if source_pixel_format == "p010le":
+            _publish(self.request.id, {"type": "log", "message": (
+                "Input is 10-bit; preserving P010 through the VAAPI upload path "
+                "with HEVC Main10 output"
+            )})
+        elif source_pixel_format == "nv12" and source_is_10bit(info):
+            _publish(self.request.id, {"type": "log", "message": (
+                "Input is 10-bit but this hardware encoder uses an 8-bit NV12 path"
+            )})
         _publish(self.request.id, {
             "type": "log",
-            "message": f"Encoder: {actual_encoder} with software decode and VAAPI hardware upload",
+            "message": f"Encoder: {_encoder_display_label(actual_encoder)} ({actual_encoder}) with software decode and VAAPI hardware upload",
         })
 
     # Note: We do not inject -extra_hw_frames here. Large values (e.g. 16) plus the
@@ -952,6 +1254,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         *duration_opts,  # -t or -to for duration/end
         "-c:v", actual_encoder,  # Use detected encoder
         *v_flags,
+        *color_metadata_args,
     ]
     
     if vf_filters:
@@ -993,6 +1296,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         if sys.platform != "win32":
             _popen_kw["start_new_session"] = True
         _popen_kw.update(hidden_process_kwargs())
+        _check_cancelled(task_id, "encoding")
         proc_i = subprocess.Popen(command, **_popen_kw)
         logger.debug("ffmpeg Popen pid=%s", proc_i.pid)
         local_stderr = []
@@ -1054,7 +1358,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                         last_progress = 0.001
                         _publish(self.request.id, {"type": "progress", "progress": 0.1, "phase": "encoding"})
                         try:
-                            self.update_state(state="PROGRESS", meta={"progress": 0.1, "phase": "encoding"})
+                            _update_task_state("PROGRESS", {"progress": 0.1, "phase": "encoding"})
                         except Exception:
                             pass
                 if "=" in line:
@@ -1192,7 +1496,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                                         meta = {"progress": prog, "phase": "encoding"}
                                         if "eta_seconds" in evt:
                                             meta["eta_seconds"] = evt["eta_seconds"]
-                                        self.update_state(state="PROGRESS", meta=meta)
+                                        _update_task_state("PROGRESS", meta)
                                     except Exception:
                                         pass
                         except Exception:
@@ -1217,37 +1521,78 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # Start process and optionally fall back to CPU on failure
     last_progress = 0.0
     stderr_lines: list[str] = []
+    _check_cancelled(task_id, "preparing")
     rc, was_cancelled = run_ffmpeg_and_stream(cmd)
     last_successful_cmd: list[str] | None = cmd.copy() if rc == 0 and not was_cancelled else None
 
     if was_cancelled:
         remove_cancelled_output()
-        _publish(self.request.id, {"type": "canceled"})
-        msg = "Job canceled by user"
-        _publish(self.request.id, {"type": "error", "message": msg})
-        raise RuntimeError(msg)
+        raise JobCancellationRequested("Job canceled during encoding")
 
-    # Decode-error retry: if the failure looks like a hardware decoder issue,
-    # retry the same encoder with software decode before falling back to CPU.
+    # Decode-error retry: if a hardware decoder path fails, retry the same
+    # encoder with software decode before falling back to CPU.  QSV decode is
+    # deliberately included here because decoder support can vary by source
+    # profile even when the encoder probe passed.
     decode_fail_hints = ["cuvid", "error while opening decoder", "hwaccel", "not supported"]
+
+    def strip_decode_options(options: list[str]) -> list[str]:
+        """Remove decoder selection flags while preserving trim/seek options."""
+        result: list[str] = []
+        skip_next = False
+        for option in options:
+            if skip_next:
+                skip_next = False
+                continue
+            if option in {"-c:v", "-hwaccel", "-hwaccel_output_format", "-hwaccel_device"}:
+                skip_next = True
+                continue
+            result.append(option)
+        return result
+
+    qsv_decode_hints = decode_fail_hints + [
+        "qsv", "onevpl", "mfx", "function not implemented", "device failed",
+    ]
+    qsv_decode_retry = (
+        qsv_hardware_decode
+        and rc != 0
+        and any(h in "\n".join(stderr_lines).lower() for h in qsv_decode_hints)
+    )
+    nvenc_decode_retry = (
+        actual_encoder.endswith("_nvenc")
+        and any(h in "\n".join(stderr_lines).lower() for h in decode_fail_hints)
+    )
     if (
         rc != 0
         and not was_cancelled
-        and actual_encoder.endswith("_nvenc")
-        and any(h in '\n'.join(stderr_lines).lower() for h in decode_fail_hints)
+        and (qsv_decode_retry or nvenc_decode_retry)
     ):
         _publish(self.request.id, {"type": "log", "message": "⚠️ Hardware decode failed. Retrying with software decoder..."})
-        sw_input_opts = [o for i, o in enumerate(input_opts)
-                         if not (o in ("-c:v",) or
-                                 (i > 0 and input_opts[i-1] == "-c:v"))]
+        sw_input_opts = strip_decode_options(input_opts)
         if in_codec == "av1":
             sw_input_opts += ["-c:v", "libdav1d"]
-        sw_vf = cpu_filter_chain(vf_filters)
+        retry_init_flags: list[str] = []
+        if qsv_decode_retry:
+            # Keep the QSV encoder device, but replace the decoder's QSV
+            # surfaces with the original software filters and the proven
+            # Linux QSV upload path.
+            retry_init_flags = list(init_hw_flags)
+            sw_vf = list(software_vf_filters)
+            sw_vf.append(qsv_input_filter(sys.platform, source_pixel_format))
+            decoder_info.update({
+                "name": "software",
+                "hardware_used": False,
+                "hardware_type": None,
+                "device": None,
+            })
+            _publish_telemetry()
+        else:
+            sw_vf = cpu_filter_chain(vf_filters)
         sw_v_flags = v_flags
         if "-pix_fmt" not in v_flags and actual_encoder.endswith("_nvenc"):
             sw_v_flags = ["-pix_fmt", "yuv420p"] + sw_v_flags
         retry_cmd = [
             "ffmpeg", "-hide_banner", "-y",
+            *retry_init_flags,
             *sw_input_opts,
             "-i", input_path,
             *duration_opts,
@@ -1259,6 +1604,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         retry_cmd += [
             *abr_rate_control_args(actual_encoder),
             *preset_flags, *tune_flags,
+            *color_metadata_args,
         ]
         if chosen_audio_codec is None:
             retry_cmd += ["-an"]
@@ -1268,27 +1614,35 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         _publish(self.request.id, {"type": "log", "message": f"FFmpeg retry: {' '.join(retry_cmd)}"})
         stderr_lines = []
         last_progress = 0.0
+        _check_cancelled(task_id, "retrying")
         rc, was_cancelled = run_ffmpeg_and_stream(retry_cmd)
         if rc == 0 and not was_cancelled:
             last_successful_cmd = retry_cmd.copy()
         if was_cancelled:
             remove_cancelled_output()
-            _publish(self.request.id, {"type": "canceled"})
-            msg = "Job canceled by user"
-            _publish(self.request.id, {"type": "error", "message": msg})
-            raise RuntimeError(msg)
+            raise JobCancellationRequested("Job canceled during decode retry")
 
     if rc != 0 and _is_hardware_encoder(actual_encoder):
+        failed_encoder = actual_encoder
         _publish(self.request.id, {"type": "log", "message": f"⚠️ Hardware encode ({original_encoder}) failed (rc={rc}). Retrying on CPU..."})
         _publish(self.request.id, {"type": "log", "message": (
             "Explanation: The hardware encoder failed at runtime. The worker will retry using a CPU encoder which is slower. "
             "This can happen if drivers, device nodes, or libraries are missing or if the encoder is unsupported by the current ffmpeg build. "
             "Run the encoder diagnostic tests from the UI or check logs to investigate."
         )})
+        fallback_occurred = True
+        fallback_stage = "runtime_encode"
+        fallback_reason = "hardware encoder initialization or encode failed"
+        if stderr_lines:
+            fallback_reason = " ".join(str(line).strip() for line in stderr_lines[-3:] if str(line).strip())[:1000]
+        _publish(task_id, {"type": "log", "message": (
+            f"Hardware fallback: requested={requested_encoder} attempted={failed_encoder}; "
+            f"reason={fallback_reason}"
+        )})
         try:
-            fb_encoder, fb_flags = _cpu_fallback_for(actual_encoder, available_cpu_encoders)
+            fb_encoder, fb_flags = _cpu_fallback_for(failed_encoder, available_cpu_encoders)
         except RuntimeError as exc:
-            logger.error("No approved CPU fallback for %s: %s", actual_encoder, exc)
+            logger.error("No approved CPU fallback for %s: %s", failed_encoder, exc)
             _publish(self.request.id, {"type": "error", "message": str(exc)})
             raise
         logger.info(
@@ -1297,17 +1651,31 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         )
         _publish(self.request.id, {"type": "log", "message": f"Encoder: CPU ({fb_encoder})"})
         actual_encoder = fb_encoder
+        encoder_telemetry.update({
+            "actual_encoder": actual_encoder,
+            "hardware_used": False,
+            "fallback_occurred": True,
+            "fallback_stage": fallback_stage,
+            "fallback_reason": fallback_reason,
+        })
+        _publish_telemetry()
 
         # Strip any hardware decode options; use software decode for CPU fallback
-        cpu_input_opts = [o for i, o in enumerate(input_opts)
-                          if not (o in ("-c:v",) or
-                                  (i > 0 and input_opts[i-1] == "-c:v"))]
+        cpu_input_opts = strip_decode_options(input_opts)
         # Use libdav1d for AV1 input, otherwise let FFmpeg auto-select
         if in_codec == "av1":
             cpu_input_opts += ["-c:v", "libdav1d"]
         # Strip all hardware-frame filters for the CPU path. This also handles
         # a joined chain such as ``scale=...,hwdownload,format=yuv420p``.
-        cpu_vf = cpu_filter_chain(vf_filters)
+        # A QSV hardware-decode job may have a vpp_qsv filter.  Use the
+        # original software chain for fallback rather than trying to translate
+        # a QSV VPP expression into a generic CPU scale expression.
+        cpu_source_filters = (
+            software_vf_filters
+            if failed_encoder in QSV_ENCODERS
+            else vf_filters
+        )
+        cpu_vf = cpu_filter_chain(cpu_source_filters)
 
         cmd2 = [
             "ffmpeg", "-hide_banner", "-y",
@@ -1320,6 +1688,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         if cpu_vf:
             cmd2 += ["-vf", ",".join(cpu_vf)]
         cmd2 += abr_rate_control_args(fb_encoder)
+        cmd2 += color_metadata_args
         if fb_encoder == "libx264":
             cmd2 += ["-preset","medium","-tune","film"]
         elif fb_encoder == "libx265":
@@ -1337,16 +1706,14 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             cmd2 += ["-c:a", chosen_audio_codec, "-b:a", a_bitrate_str]
         cmd2 += [*mp4_video_tag_args(output_path, fb_encoder), *mp4_flags, "-progress", "pipe:2", output_path]
 
+        _check_cancelled(task_id, "runtime_fallback")
         rc, was_cancelled = run_ffmpeg_and_stream(cmd2)
         if rc == 0 and not was_cancelled:
             last_successful_cmd = cmd2.copy()
 
     if was_cancelled:
         remove_cancelled_output()
-        _publish(self.request.id, {"type": "canceled"})
-        msg = "Job canceled by user"
-        _publish(self.request.id, {"type": "error", "message": msg})
-        raise RuntimeError(msg)
+        raise JobCancellationRequested("Job canceled during fallback encoding")
 
     if rc != 0:
         recent_stderr = '\n'.join(stderr_lines[-20:]) if stderr_lines else 'No stderr output'
@@ -1358,15 +1725,17 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     enc_done_pct = round(encoding_portion*100, 2)
     _publish(self.request.id, {"type": "progress", "progress": enc_done_pct, "phase": "finalizing"})
     try:
-        self.update_state(state="PROGRESS", meta={"progress": enc_done_pct, "phase": "finalizing"})
+        _update_task_state("PROGRESS", {"progress": enc_done_pct, "phase": "finalizing"})
     except Exception:
         pass
     _publish(self.request.id, {"type": "log", "message": "Encoding complete. Finalizing output..."})
+    _check_cancelled(task_id, "finalizing")
 
     # CRITICAL: Wait for file to be fully written and readable (especially on networked/slow filesystems)
     max_wait = 10  # seconds
     file_ready = False
     for attempt in range(max_wait * 5):  # Check every 200ms
+        _check_cancelled(task_id, "finalizing")
         try:
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 # Try to open the file to ensure it's not locked
@@ -1394,11 +1763,12 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     verify_pct = round((encoding_portion + finalize_portion*0.5)*100, 2)
     _publish(self.request.id, {"type": "progress", "progress": verify_pct, "phase": "finalizing"})
     try:
-        self.update_state(state="PROGRESS", meta={"progress": verify_pct, "phase": "finalizing"})
+        _update_task_state("PROGRESS", {"progress": verify_pct, "phase": "finalizing"})
     except Exception:
         pass
 
     # Checking file size and preparing for possible retry
+    _check_cancelled(task_id, "finalizing")
     final_size_mb = round(final_size / (1024*1024), 2) if final_size else 0
     
     # Check if file is too large (>2% over target) and retry with lower bitrate (size-target mode only)
@@ -1454,7 +1824,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             # Reset progress for retry
             _publish(self.request.id, {"type": "progress", "progress": 1.0, "phase": "encoding"})
             try:
-                self.update_state(state="PROGRESS", meta={"progress": 1.0, "phase": "encoding"})
+                _update_task_state("PROGRESS", {"progress": 1.0, "phase": "encoding"})
             except Exception:
                 pass
             
@@ -1472,6 +1842,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             # Run the retry encode
             last_progress = 0.0
             stderr_lines = []
+            _check_cancelled(task_id, "retrying")
             rc, was_cancelled = run_ffmpeg_and_stream(retry_cmd)
             
             if was_cancelled:
@@ -1487,10 +1858,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
                         os.replace(retry_backup_path, output_path)
                     except Exception:
                         logger.warning("Could not restore oversized output after canceled retry: %s", output_path)
-                _publish(self.request.id, {"type": "canceled"})
-                msg = "Job canceled during retry"
-                _publish(self.request.id, {"type": "error", "message": msg})
-                raise RuntimeError(msg)
+                raise JobCancellationRequested("Job canceled during retry")
 
             retry_output_path = retry_staging_path or output_path
             retry_output_valid = False
@@ -1554,12 +1922,31 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
         _publish(self.request.id, {"type": "log", "message": f"⚠️ File is {size_overage_percent:.1f}% over target after {max_retries} retries. Keeping best result."})
         _publish(self.request.id, {"type": "log", "message": f"📊 Final size: {final_size_mb:.2f} MB (target was {progress_target_mb:.2f} MB)"})
     
+    encoder_telemetry.update({
+        "actual_encoder": actual_encoder,
+        "hardware_used": _is_hardware_encoder(actual_encoder),
+        "fallback_occurred": fallback_occurred,
+        "fallback_stage": fallback_stage,
+        "fallback_reason": fallback_reason,
+    })
+    _publish_telemetry()
     stats = {
         "input_path": input_path,
         "output_path": output_path,
         # This is the encoder that produced the final output, which may be a
         # CPU encoder after a controlled hardware fallback.
         "encoder": actual_encoder,
+        "requested_encoder": requested_encoder,
+        "resolved_encoder": resolved_encoder,
+        "actual_encoder": actual_encoder,
+        "hardware_used": _is_hardware_encoder(actual_encoder),
+        "fallback_occurred": fallback_occurred,
+        "fallback_stage": fallback_stage,
+        "fallback_reason": fallback_reason,
+        "render_device": render_device,
+        "hardware_device": render_device,
+        "hardware_type": hw_info.get("type"),
+        "decoder": dict(decoder_info),
         "duration_s": duration,
         "target_size_mb": target_size_mb,
         "final_size_mb": final_size_mb,
@@ -1570,7 +1957,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     presave_pct = round((encoding_portion + finalize_portion*0.75)*100, 2)
     _publish(self.request.id, {"type": "progress", "progress": presave_pct, "phase": "finalizing"})
     try:
-        self.update_state(state="PROGRESS", meta={"progress": presave_pct, "phase": "finalizing"})
+        _update_task_state("PROGRESS", {"progress": presave_pct, "phase": "finalizing"})
     except Exception:
         pass
 
@@ -1631,7 +2018,7 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
     # 100% - Complete!
     _publish(self.request.id, {"type": "progress", "progress": 100.0, "phase": "done"})
     try:
-        self.update_state(state="SUCCESS", meta={"output_path": output_path, "progress": 100.0, "detail": "done", **stats})
+        _update_task_state("SUCCESS", {"output_path": output_path, "progress": 100.0, "detail": "done", **stats})
     except Exception:
         pass
     logger.info(

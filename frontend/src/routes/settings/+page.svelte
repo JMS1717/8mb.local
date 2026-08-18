@@ -62,7 +62,7 @@
   let targetMB = 19.7;
   let videoCodec = 'av1_nvenc';
   let audioCodec = 'libopus';
-  let preset = 'p6';
+  let preset = 'p4';
   let audioKbps = 128;
   let container = 'mp4';
   let tune = 'hq';
@@ -883,9 +883,9 @@
 		  <option value="p1">P1 (Fastest)</option>
 		  <option value="p2">P2</option>
 		  <option value="p3">P3</option>
-		  <option value="p4">P4 (Fast)</option>
+		  <option value="p4">P4 (Balanced)</option>
 		  <option value="p5">P5</option>
-		  <option value="p6">P6 (Balanced)</option>
+		  <option value="p6">P6 (High Quality)</option>
 		  <option value="p7">P7 (Best quality)</option>
 		</select>
 		<p class="label" style="margin-top:6px; font-size:12px; color:#9ca3af">How much effort the encoder spends per frame. Separate from NVENC tuning (NVIDIA only).</p>

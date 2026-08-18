@@ -22,6 +22,7 @@ from .tasks import (  # noqa: F401
     compress_video,
     get_hardware_info_task,
     run_hardware_tests_task,
+    replace_encoder_test_cache,
 )
 
 # ---------------------------------------------------------------------------
@@ -50,7 +51,7 @@ def _start_encoder_tests_async() -> None:
             sys.stdout.flush()
             _hw_info = get_hw_info()
             cache = run_startup_tests(_hw_info)
-            ENCODER_TEST_CACHE.update(cache)
+            replace_encoder_test_cache(cache)
             logger.info(f"✓ Encoder cache ready: {len(ENCODER_TEST_CACHE)} encoder(s) validated")
             logger.info("✓ Worker initialization complete")
             logger.info("*" * 70)

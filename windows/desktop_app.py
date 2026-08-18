@@ -19,7 +19,7 @@ import webbrowser
 from pathlib import Path
 
 # Generated from the root VERSION file by scripts/set-version.ps1.
-DESKTOP_VERSION = "141.0.0.0"
+DESKTOP_VERSION = "142.0.0.0"
 
 
 def _bundle_root() -> Path:

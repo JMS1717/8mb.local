@@ -51,6 +51,17 @@ export interface JobStatus {
 	state: string;
 	progress: number | null;
 	detail: string | null;
+	requested_encoder?: string | null;
+	resolved_encoder?: string | null;
+	actual_encoder?: string | null;
+	hardware_used?: boolean | null;
+	hardware_type?: string | null;
+	hardware_device?: string | null;
+	render_device?: string | null;
+	fallback_occurred?: boolean | null;
+	fallback_stage?: string | null;
+	fallback_reason?: string | null;
+	decoder?: Record<string, unknown> | null;
 }
 
 /** Response from GET /api/codecs/available. */
@@ -126,6 +137,18 @@ export interface CompressStats {
 	target_size_mb: number;
 	final_size_mb: number;
 	target_video_bitrate_kbps?: number | null;
+	encoder?: string | null;
+	requested_encoder?: string | null;
+	resolved_encoder?: string | null;
+	actual_encoder?: string | null;
+	hardware_used?: boolean | null;
+	hardware_device?: string | null;
+	render_device?: string | null;
+	fallback_occurred?: boolean | null;
+	fallback_stage?: string | null;
+	fallback_reason?: string | null;
+	hardware_type?: string | null;
+	decoder?: Record<string, unknown> | null;
 }
 
 /** Preset profile as returned by the settings API. */

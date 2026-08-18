@@ -6,12 +6,11 @@
   import { autoDownloadOnce, clearActiveJobId, downloadFile, getActiveJobId, setActiveJobId } from '$lib/activeJob';
   import { stagePendingBatchFiles } from '$lib/pendingBatch';
   import { FPS_CAP_VALUES, maxFpsFromProfile, parseStoredFpsCap, type FpsCap } from '$lib/fpsCap';
-  import { availableCodecOptions, codecColor, codecIcon, encoderDisplayName, type CodecOption } from '$lib/codecs';
+  import { availableCodecOptions, classifyEncoder, codecColor, codecIcon, encoderDisplayName, type CodecOption } from '$lib/codecs';
   import { APP_VERSION } from '$lib/generated-version';
 
   let file: File | null = null;
   let uploadInput: HTMLInputElement | null = null; // reference to clear file input
-  let uploadedFileName: string | null = null; // Track what file was uploaded
   let isAnalyzing: boolean = false; // Track analysis state for UI feedback
   let targetMB = 19.7;
   /** 'size' = target output file size (MB); 'bitrate' = fixed video bitrate (kbps). */
@@ -19,7 +18,7 @@
   let targetVideoKbps = 2500;
   let videoCodec: string = 'av1_nvenc';
   let audioCodec: 'libopus' | 'aac' | 'none' = 'libopus';
-  let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p6';
+  let preset: 'p1'|'p2'|'p3'|'p4'|'p5'|'p6'|'p7'|'extraquality' = 'p4';
   let audioKbps: 32|48|64|96|128|160|192|256 = 128;
   // Auto audio bitrate control: downshift audio for extreme compressions
   let autoAudioBitrate: boolean = true;
@@ -172,13 +171,23 @@
   // Changing target size or audio bitrate only updates client-side estimates.
 
   let jobInfo: any = null;
+  // A successful upload creates a temporary server-side input. Keep its
+  // validity explicit because the worker removes transient inputs after every
+  // terminal job state. The browser File remains reusable for a later upload.
+  let stagedFile: File | null = null;
+  let stagedInputToken: string | null = null;
+  let stagedInputValid = false;
   let taskId: string | null = null;
   let progress = 0;
   let displayedProgress = 0;
   let logLines: string[] = [];
   let doneStats: any = null;
+  let encoderTelemetry: any = null;
   let isCompressing = false;
   let esRef: EventSource | null = null;
+  // Incremented whenever a stream is closed or replaced. Late SSE callbacks
+  // from an older task must never update the current job's UI.
+  let streamGeneration = 0;
   let errorText: string | null = null;
   let isUploading = false;
   let uploadProgress = 0;
@@ -349,11 +358,33 @@
     // and reconnect when the user returns from Queue, Settings, or History.
     const trackedJob = getActiveJobId();
     if (trackedJob) {
-      taskId = trackedJob;
-      logLines = ['Reconnected to the active background job.', ...logLines];
-      reconnectStream();
+      await restoreTrackedJob(trackedJob);
     }
   });
+
+  async function restoreTrackedJob(candidate: string): Promise<void> {
+    try {
+      const status = await getJobStatus(candidate);
+      const state = String(status?.state || '').toUpperCase();
+      const activeStates = new Set(['PENDING', 'RECEIVED', 'STARTED', 'PROGRESS', 'RUNNING', 'QUEUED', 'WAITING']);
+      if (activeStates.has(state)) {
+        taskId = candidate;
+        applyJobStatus(status);
+        logLines = ['Reconnected to the active background job.', ...logLines];
+        reconnectStream();
+        return;
+      }
+    } catch {
+      // A missing task after a container/Redis restart is stale local state,
+      // not an active compression job.
+    }
+    clearActiveJobId(candidate);
+    taskId = null;
+    isCompressing = false;
+    isCancelling = false;
+    isFinalizing = false;
+    logLines = ['Previous job state was no longer available; ready for a new upload.', ...logLines];
+  }
 
   async function refreshRecentHistory(): Promise<void> {
     try {
@@ -540,26 +571,98 @@
         ? `${decoder[1]} (${decoder[2].toLowerCase()})`
         : decoder[1];
     } else {
+      const softwareDecoder = msg.match(/^Decoder:\s*Software\s*\(([^)]+)\)/i);
+      if (softwareDecoder) {
+        decodeMethod = `${softwareDecoder[1]} (software)`;
+      }
       const av1Software = msg.match(/^Decoder:\s*(libdav1d)\b.*\bAV1\b/i);
-      if (av1Software) {
+      if (!softwareDecoder && av1Software) {
         decodeMethod = `${av1Software[1]} (av1)`;
-      } else {
+      } else if (!softwareDecoder && !av1Software) {
         const fallbackDecoder = msg.match(/^Decoder:\s*([\w-]+)/i);
         if (fallbackDecoder) decodeMethod = fallbackDecoder[1];
       }
     }
 
-    const usingEncoder = msg.match(/Using\s+encoder:\s*([\w-]+)/i);
-    if (usingEncoder) encodeMethod = usingEncoder[1];
+    // Text logs are only a compatibility/display fallback. Once structured
+    // telemetry has resolved an encoder, a late log from the same or an old
+    // stream must not overwrite it.
+    const structuredEncoder = encoderTelemetry?.actual_encoder
+      || encoderTelemetry?.resolved_encoder
+      || encoderTelemetry?.requested_encoder;
+    if (!structuredEncoder) {
+      const usingEncoder = msg.match(/Using\s+encoder:\s*([\w-]+)/i);
+      if (usingEncoder) encodeMethod = usingEncoder[1];
 
-    const encoder = msg.match(/Encoder:\s*CPU\s*\(([^)]+)\)/i)
-      || msg.match(/Encoder:\s*([\w-]+)/i);
-    if (encoder) encodeMethod = encoder[1];
+      const encoder = msg.match(/Encoder:\s*[^()]+\(([^)]+)\)/i)
+        || msg.match(/Encoder:\s*CPU\s*\(([^)]+)\)/i)
+        || msg.match(/Encoder:\s*([\w-]+)/i);
+      if (encoder) encodeMethod = encoder[1];
+    }
+  }
+
+  /** Apply durable status/SSE telemetry; non-null fields merge monotonically. */
+  function applyStructuredTelemetry(source: any): void {
+    const incoming = source?.telemetry || source?.stats || source;
+    if (!incoming || typeof incoming !== 'object') return;
+    const fields = [
+      'requested_encoder', 'resolved_encoder', 'actual_encoder',
+      'hardware_used', 'hardware_type', 'hardware_device', 'render_device',
+      'fallback_occurred', 'fallback_stage', 'fallback_reason', 'decoder',
+    ];
+    if (!fields.some((key) => incoming[key] !== undefined && incoming[key] !== null)) return;
+    const merged = { ...(encoderTelemetry || {}) };
+    for (const key of fields) {
+      if (incoming[key] !== undefined && incoming[key] !== null) merged[key] = incoming[key];
+    }
+    encoderTelemetry = merged;
+    const displayedEncoder = merged.actual_encoder || merged.resolved_encoder || merged.requested_encoder;
+    if (displayedEncoder) encodeMethod = String(displayedEncoder);
+    const decoder = merged.decoder;
+    if (decoder && typeof decoder === 'object' && decoder.name) {
+      decodeMethod = `${decoder.name}${decoder.hardware_used ? ' (hardware)' : ' (software)'}`;
+    }
+  }
+
+  function applyJobStatus(status: any): void {
+    if (!status || typeof status !== 'object') return;
+    if (typeof status.progress === 'number') {
+      progress = status.progress;
+      displayedProgress = status.progress;
+    }
+    if (status.phase === 'finalizing') isFinalizing = true;
+    applyStructuredTelemetry(status);
   }
 
   function setPresetMB(mb:number){ targetMB = mb; }
   // "10MB (Discord)" option: pick slightly under to ensure final stays below 10MB
   function setPresetMBSafe10(){ targetMB = 9.7; }
+
+  function invalidateStagedInput(): void {
+    stagedInputValid = false;
+    stagedInputToken = null;
+  }
+
+  function closeProgressStream(): void {
+    streamGeneration += 1;
+    try { esRef?.close(); } catch {}
+    esRef = null;
+  }
+
+  function selectFile(next: File | null): void {
+    file = next;
+    fileSizeLabel = next ? formatSize(next.size) : null;
+    stagedFile = null;
+    invalidateStagedInput();
+    jobInfo = null;
+    errorText = null;
+    if (!next) warnText = null;
+  }
+
+  function isMissingStagedInputError(error: unknown): boolean {
+    const message = String((error as any)?.message ?? error ?? '');
+    return /input\s+not\s+found/i.test(message);
+  }
 
   async function onDrop(e: DragEvent){
     e.preventDefault();
@@ -572,8 +675,7 @@
     }
     const f = droppedFiles[0];
     if (f) {
-      file = f;
-      fileSizeLabel = formatSize(f.size);
+      selectFile(f);
       // Auto-analyze on drop
       setTimeout(() => doUpload(), 100);
     }
@@ -589,31 +691,53 @@
       return;
     }
     const picked = pickedFiles[0] || null;
-    file = picked;
-    fileSizeLabel = picked ? formatSize(picked.size) : null;
+    selectFile(picked);
     if (picked) setTimeout(() => doUpload(), 100);
   }
 
-  async function doUpload(){
-    if (!file) return;
-    if (isUploading || isAnalyzing) return;
-    // Skip re-upload when same file is already uploaded; recompute client-side estimates only
-    if (uploadedFileName === file.name && jobInfo?.filename) {
+  async function doUpload(force = false): Promise<boolean> {
+    const selectedFile = file;
+    if (!selectedFile) return false;
+    if (isUploading || isAnalyzing) return false;
+    // Reuse a staged input only when it is explicitly known to be valid and
+    // belongs to the exact browser File object currently selected. A filename
+    // alone is not proof that the server-side temporary input still exists.
+    if (!force && stagedInputValid && stagedFile === selectedFile && stagedInputToken && jobInfo?.job_id && jobInfo?.filename) {
       warnText = (estimated && estimated.video_kbps < 100) ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
-      return;
+      return true;
+    }
+    if (force && jobInfo) {
+      logLines = ['Re-uploading the selected file for a new compression…', ...logLines].slice(0, 500);
     }
     isAnalyzing = true;
     isUploading = true;
     uploadProgress = 0;
     errorText = null;
     try {
-      jobInfo = await uploadWithProgress(file, targetMB, audioKbps, { onProgress: (p:number)=>{ uploadProgress = p; } });
-      uploadedFileName = file.name; // Mark this file as uploaded
+      const uploaded = await uploadWithProgress(selectedFile, targetMB, audioKbps, {
+        onProgress: (p:number)=>{ uploadProgress = p; },
+        onUploadComplete: () => {
+          uploadProgress = 100;
+          logLines = ['Upload complete; analyzing on the server…', ...logLines].slice(0, 500);
+        },
+      });
+      // Do not let a late response from an old selection replace the current
+      // file's analysis or staged-input token.
+      if (file !== selectedFile) return false;
+      jobInfo = uploaded;
+      stagedFile = selectedFile;
+      stagedInputToken = uploaded?.job_id && uploaded?.filename
+        ? `${uploaded.job_id}:${uploaded.filename}`
+        : null;
+      stagedInputValid = Boolean(stagedInputToken);
       // Set warn based on current client-side estimate
       warnText = (estimated && estimated.video_kbps < 100) ? `Warning: Very low video bitrate (${Math.round(estimated.video_kbps)} kbps)` : null;
+      return stagedInputValid;
     } catch (err: any) {
       console.error('Analysis failed:', err);
       errorText = `Analysis failed: ${err.message || err}`;
+      invalidateStagedInput();
+      return false;
     } finally {
       isUploading = false;
       isAnalyzing = false;
@@ -621,13 +745,43 @@
   }
 
   async function doCompress(){
-    // Ensure we have analysis; if not, perform upload/analyze once
-    if (!jobInfo) {
-      if (!file) { errorText = 'Please select a file and analyze first.'; return; }
-      await doUpload();
-      if (!jobInfo) return; // if upload failed
-    }
     if (isCompressing) return; // prevent double submission
+    if (!file) { errorText = 'Please select a file first.'; return; }
+
+    // A new compression run gets a clean presentation state. Keep the
+    // browser File so a canceled/completed/failed transient upload can be
+    // re-staged on demand, but never carry its old logs or stream forward.
+    closeProgressStream();
+    logLines = [];
+    doneStats = null;
+    encoderTelemetry = null;
+    decodeMethod = null;
+    encodeMethod = null;
+    progress = 0;
+    displayedProgress = 0;
+    currentSpeedX = null;
+    etaSeconds = null;
+    etaLabel = null;
+    hasProgress = false;
+    isReady = false;
+    isFinalizing = false;
+    isRetrying = false;
+    retryMessage = '';
+    if (taskId) clearActiveJobId(taskId);
+    taskId = null;
+
+    // The worker deletes transient inputs after success, failure, and
+    // cancellation. Re-stage the retained browser File on demand instead of
+    // asking the user to click Re-analyze manually.
+    const hasValidStagedInput = stagedInputValid
+      && stagedFile === file
+      && Boolean(stagedInputToken)
+      && Boolean(jobInfo?.job_id && jobInfo?.filename);
+    if (!hasValidStagedInput) {
+      const uploaded = await doUpload(true);
+      if (!uploaded || !jobInfo || !stagedInputValid) return;
+    }
+
     errorText = null;
     try {
       isCompressing = true;
@@ -639,10 +793,9 @@
       etaSeconds = null;
       etaLabel = null;
       currentSpeedX = null;
-      // Do not carry the previous job's decoder/encoder into this job.
-      decodeMethod = null;
-      encodeMethod = null;
-      logLines = ['Starting compression…', ...logLines].slice(0, 500);
+      // Do not carry the previous job's decoder/encoder or FFmpeg logs into
+      // this job. The upload/analyze messages below now belong only to it.
+      logLines = ['Starting compression…'];
       const estMb =
         targetMode === 'bitrate' && effectiveDuration > 0
           ? ((targetVideoKbps + (audioCodec === 'none' ? 0 : audioKbps)) * effectiveDuration) / 8192.0
@@ -671,21 +824,49 @@
         start_time: startTime.trim() || undefined,
         end_time: endTime.trim() || undefined,
       };
-      const { task_id } = await startCompress(payload);
+      let startResponse: any;
+      let recoveryUsed = false;
+      try {
+        startResponse = await startCompress(payload);
+      } catch (startError: any) {
+        if (recoveryUsed || !file || !isMissingStagedInputError(startError)) throw startError;
+        recoveryUsed = true;
+        invalidateStagedInput();
+        logLines = ['Staged source expired; re-uploading and analyzing once…', ...logLines].slice(0, 500);
+        const recovered = await doUpload(true);
+        if (!recovered || !jobInfo || !stagedInputValid) {
+          throw new Error('Automatic re-upload failed; the selected file could not be analyzed.');
+        }
+        payload.job_id = jobInfo.job_id;
+        payload.filename = jobInfo.filename;
+        try {
+          startResponse = await startCompress(payload);
+        } catch (retryError: any) {
+          throw new Error(`Compression start failed after automatic re-upload: ${retryError?.message || retryError}`);
+        }
+      }
+      const { task_id } = startResponse;
       taskId = task_id;
       setActiveJobId(task_id);
       
       // Open SSE progress stream
       logLines = ['✓ Job started. Opening progress stream...', ...logLines].slice(0, 500);
       
+      const currentStreamGeneration = ++streamGeneration;
       const es = openProgressStream(task_id);
       esRef = es;
+      void getJobStatus(task_id).then((status) => {
+        if (streamGeneration !== currentStreamGeneration || taskId !== task_id) return;
+        applyJobStatus(status);
+      }).catch(() => {});
       
       es.onopen = () => {
+        if (streamGeneration !== currentStreamGeneration || taskId !== task_id) return;
         logLines = ['✅ Connected to progress stream', ...logLines].slice(0, 500);
       };
       
       es.onmessage = (ev) => {
+        if (streamGeneration !== currentStreamGeneration || taskId !== task_id) return;
         try {
           const data = JSON.parse(ev.data);
           
@@ -701,6 +882,7 @@
           
           // Handle progress updates
           if (data.type === 'progress') {
+            applyStructuredTelemetry(data);
             progress = data.progress;
             
             // ETA from server if present; otherwise hide (no client-side guess)
@@ -743,6 +925,10 @@
               isFinalizing = false;
             }
           }
+
+          if (data.type === 'telemetry') {
+            applyStructuredTelemetry(data);
+          }
           
           // Handle log messages
           if (data.type === 'log' && data.message) {
@@ -762,6 +948,8 @@
           // Handle completion
           if (data.type === 'done') {
             doneStats = data.stats;
+            applyStructuredTelemetry(data.stats || {});
+            invalidateStagedInput();
             progress = 100;
             displayedProgress = 100;
             isCompressing = false;
@@ -774,7 +962,7 @@
             
             logLines = ['✅ Compression complete!', ...logLines].slice(0, 500);
             
-            try { esRef?.close(); esRef = null; } catch {}
+            closeProgressStream();
             clearActiveJobId(task_id);
             setTimeout(() => refreshRecentHistory(), 100);
             
@@ -798,11 +986,12 @@
           if (data.type === 'error') {
             logLines = [`❌ Error: ${data.message}`, ...logLines];
             errorText = data.message;
+            invalidateStagedInput();
             isCompressing = false;
             isFinalizing = false;
             isCancelling = false;
             clearActiveJobId(task_id);
-            try { esRef?.close(); } catch {}
+            closeProgressStream();
           }
           
           // Handle retry
@@ -845,11 +1034,12 @@
           // Handle cancellation
           if (data.type === 'canceled') {
             logLines = ['🚫 Job canceled', ...logLines];
+            invalidateStagedInput();
             isCompressing = false;
             isFinalizing = false;
             isCancelling = false;
             clearActiveJobId(task_id);
-            try { esRef?.close(); } catch {}
+            closeProgressStream();
           }
           
         } catch (e) {
@@ -858,6 +1048,7 @@
       };
       
       es.onerror = (err) => {
+        if (streamGeneration !== currentStreamGeneration || taskId !== task_id) return;
         console.error('SSE error:', err);
 
         // Keep the EventSource open. Native EventSource reconnects
@@ -913,7 +1104,7 @@
             clearInterval(finalizePoller);
             finalizePoller = null;
             reconnectStream();
-          } else if (state === 'FAILURE' || state === 'REVOKED') {
+          } else if (state === 'FAILURE' || state === 'REVOKED' || state === 'CANCELED') {
             clearInterval(finalizePoller);
             finalizePoller = null;
             reconnectStream();
@@ -931,16 +1122,26 @@
     if (!taskId) return;
     const reconnectTaskId = taskId;
     errorText = null;
-    try { esRef?.close(); } catch {}
+    closeProgressStream();
+    const reconnectGeneration = ++streamGeneration;
     const es = openProgressStream(reconnectTaskId);
     esRef = es;
     isCompressing = true;
+    void getJobStatus(reconnectTaskId).then((status) => {
+      if (streamGeneration !== reconnectGeneration || taskId !== reconnectTaskId) return;
+      applyJobStatus(status);
+    }).catch(() => {});
     es.onmessage = (ev) => {
+      if (streamGeneration !== reconnectGeneration || taskId !== reconnectTaskId) return;
       try { const data = JSON.parse(ev.data);
         if (data.type === 'progress') {
+          applyStructuredTelemetry(data);
           progress = Number(data.progress || 0);
           displayedProgress = progress;
           isFinalizing = data.phase === 'finalizing';
+        }
+        if (data.type === 'telemetry') {
+          applyStructuredTelemetry(data);
         }
         if (data.type === 'log' && data.message) {
           logLines = [data.message, ...logLines].slice(0, 500);
@@ -948,6 +1149,8 @@
         }
         if (data.type === 'done') {
           doneStats = data.stats;
+          applyStructuredTelemetry(data.stats || {});
+          invalidateStagedInput();
           progress = 100;
           displayedProgress = 100;
           isCompressing = false;
@@ -955,30 +1158,33 @@
           isCancelling = false;
           isReady = true;
           clearActiveJobId(reconnectTaskId);
-          try { esRef?.close(); } catch {}
+          closeProgressStream();
           setTimeout(() => refreshRecentHistory(), 100);
           if (autoDownload) setTimeout(() => { void autoDownloadOnce(reconnectTaskId, downloadUrl(reconnectTaskId)); }, 500);
         }
         if (data.type === 'error') {
           errorText = String(data.message || 'Compression failed');
           logLines = [`Error: ${errorText}`, ...logLines];
+          invalidateStagedInput();
           isCompressing = false;
           isFinalizing = false;
           isCancelling = false;
           clearActiveJobId(reconnectTaskId);
-          try { esRef?.close(); } catch {}
+          closeProgressStream();
         }
         if (data.type === 'canceled') {
           logLines = ['Job canceled', ...logLines];
+          invalidateStagedInput();
           isCompressing = false;
           isFinalizing = false;
           isCancelling = false;
           clearActiveJobId(reconnectTaskId);
-          try { esRef?.close(); } catch {}
+          closeProgressStream();
         }
       } catch {}
     }
     es.onerror = () => {
+      if (streamGeneration !== reconnectGeneration || taskId !== reconnectTaskId) return;
       logLines = ['Progress connection interrupted; reconnecting automatically...', ...logLines].slice(0, 500);
     }
   }
@@ -987,13 +1193,15 @@
   
   function reset(){
     // Clear all job-related state but keep the selected file loaded so it can be reused
-    uploadedFileName = null;
+    stagedFile = null;
+    invalidateStagedInput();
     jobInfo = null;
     taskId = null;
     progress = 0;
     displayedProgress = 0;
     logLines = [];
     doneStats = null;
+    encoderTelemetry = null;
     warnText = null;
     errorText = null;
     isUploading = false;
@@ -1006,7 +1214,7 @@
     showTryDownload = false;
     if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
     if (finalizePoller) { clearInterval(finalizePoller); finalizePoller = null; }
-    try { esRef?.close(); } catch {}
+    closeProgressStream();
     // Note: we intentionally do NOT clear `file` or `fileSizeLabel` here
   }
 
@@ -1014,7 +1222,8 @@
     // Clear the chosen file and related analysis state
     file = null;
     fileSizeLabel = null;
-    uploadedFileName = null;
+    stagedFile = null;
+    invalidateStagedInput();
     jobInfo = null;
     warnText = null;
     errorText = null;
@@ -1038,7 +1247,7 @@
 
   onDestroy(() => {
     stopActiveBatchPolling();
-    try { esRef?.close(); } catch {}
+    closeProgressStream();
     esRef = null;
     if (finalizePoller) { clearInterval(finalizePoller); finalizePoller = null; }
     if (readyTimer) { clearTimeout(readyTimer); readyTimer = null; }
@@ -1581,15 +1790,19 @@
     </div>
   {/if}
 
+  {#if file && jobInfo && !stagedInputValid && !isUploading && !isAnalyzing}
+    <p class="text-xs text-gray-400">The previous server copy was released. Compress will re-upload this selected file automatically.</p>
+  {/if}
+
   <div class="flex gap-2">
-    <button class="btn" on:click={doUpload} disabled={!file || isUploading || isAnalyzing}>
+    <button class="btn" on:click={() => doUpload()} disabled={!file || isUploading || isAnalyzing}>
       {#if jobInfo}
         Re-analyze
       {:else}
         Analyze
       {/if}
     </button>
-  <button class="btn" on:click={doCompress} disabled={!jobInfo || isCompressing}>
+  <button class="btn" on:click={doCompress} disabled={!file || isCompressing || isUploading || isAnalyzing}>
       {#if isCompressing}
         {#if hasProgress}
           Compressing… {progress}%{#if etaLabel} — ~{etaLabel} left{/if}
@@ -1637,16 +1850,27 @@
           </div>
         {/if}
         {#if encodeMethod}
-          {#if /_nvenc$/.test(encodeMethod)}
-            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: NVIDIA NVENC</span>
+          {@const displayedEncoder = encoderTelemetry?.actual_encoder || encoderTelemetry?.resolved_encoder || encoderTelemetry?.requested_encoder || encodeMethod}
+          {@const requestedOnly = !!encoderTelemetry?.requested_encoder && !encoderTelemetry?.resolved_encoder && !encoderTelemetry?.actual_encoder}
+          {@const encoderInfo = classifyEncoder(encodeMethod)}
+          {#if requestedOnly}
+            <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-600/40">Encoder requested: {displayedEncoder}</span>
+          {:else if encoderInfo.hardware}
+            <span class="text-xs px-2 py-1 rounded bg-green-900/40 text-green-300 border border-green-700/40">Encoder: {encoderInfo.label} ({displayedEncoder})</span>
           {:else}
-            <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-200 border border-slate-600/40">Encoder: CPU ({encodeMethod})</span>
+            <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-200 border border-slate-600/40">Encoder: CPU/software ({displayedEncoder})</span>
+          {/if}
+          {#if encoderTelemetry?.fallback_occurred}
+            <div class="text-xs text-amber-300 mt-1">
+              Requested: {encoderTelemetry.requested_encoder || videoCodec} → CPU fallback: {encoderTelemetry.actual_encoder || displayedEncoder}
+              {#if encoderTelemetry.fallback_reason}<span class="text-gray-400"> ({encoderTelemetry.fallback_reason})</span>{/if}
+            </div>
           {/if}
         {:else}
           <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-600/40">Encoder: detecting…</span>
         {/if}
       </div>
-      {#if encodeMethod && encodeMethod.startsWith('lib') && hardwareType !== 'cpu'}
+      {#if encoderTelemetry?.fallback_occurred}
         <div class="text-xs text-amber-300 mt-1">Hardware encoder unavailable for this job — using CPU fallback.</div>
       {/if}
       

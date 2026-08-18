@@ -14,6 +14,9 @@ import logging
 import os
 import re
 import subprocess
+import threading
+import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from shared.subprocess_utils import hidden_process_kwargs
@@ -42,6 +45,46 @@ from .constants import (
 logger = logging.getLogger(__name__)
 
 _HW_CACHE: Optional[Dict[str, Any]] = None
+_HW_CACHE_LOCK = threading.RLock()
+
+
+def _reset_hw_cache_lock_after_fork() -> None:
+    """Do not let Celery children inherit a mutex held by startup probing.
+
+    The worker starts encoder detection in a background thread while Celery is
+    starting.  If Celery forks a pool child during that probe, a normal
+    ``threading.RLock`` can be inherited in its locked state even though the
+    owning thread does not exist in the child.  Any task calling
+    ``get_hw_info`` would then wait forever.  The cache itself is safe to
+    inherit; only the process-local lock must be recreated.
+    """
+    global _HW_CACHE_LOCK
+    _HW_CACHE_LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_hw_cache_lock_after_fork)
+
+
+def _append_vaapi_driver_paths(env: dict[str, str]) -> None:
+    """Keep Intel, AMD, and other installed VAAPI drivers discoverable.
+
+    A container may carry a source-built Intel iHD driver while Mesa provides
+    AMD (radeonsi) and other VAAPI drivers in the distro directory.  A single
+    Intel-only path makes the latter invisible.  Preserve an operator's
+    explicit path, but append the standard runtime directories that exist.
+    """
+    configured = env.get("LIBVA_DRIVERS_PATH", "")
+    parts = [part for part in configured.split(os.pathsep) if part]
+    for path in (
+        "/usr/local/lib/dri",
+        "/usr/lib/x86_64-linux-gnu/dri",
+        "/usr/lib/dri",
+    ):
+        if os.path.isdir(path) and path not in parts:
+            parts.append(path)
+    if parts:
+        env["LIBVA_DRIVERS_PATH"] = os.pathsep.join(parts)
 
 
 def get_gpu_env() -> dict[str, str]:
@@ -71,6 +114,7 @@ def get_gpu_env() -> dict[str, str]:
         env["LD_LIBRARY_PATH"] = ":".join(
             part for part in [existing, *additions] if part
         )
+    _append_vaapi_driver_paths(env)
     return env
 
 
@@ -374,6 +418,8 @@ def detect_hw_accel() -> Dict[str, Any]:
         "vaapi_device": None,
         "decode_method": None,
         "upload_method": None,
+        "probe_generation": uuid.uuid4().hex,
+        "probe_timestamp": int(time.time()),
     }
 
     devices = [
@@ -587,18 +633,48 @@ def map_codec_to_hw(
 # Cached accessor and preferred codec
 # ---------------------------------------------------------------------------
 
-def get_hw_info() -> Dict[str, Any]:
-    """Get cached hardware info (computed once per worker process)."""
+def get_hw_info(force_refresh: bool = False) -> Dict[str, Any]:
+    """Get the worker hardware snapshot, optionally rediscovering devices.
+
+    Normal jobs use the process snapshot.  An explicit Settings rerun must
+    bypass it so driver/device changes and newly available render nodes cannot
+    leave the worker using stale QSV/VAAPI results.
+    """
     global _HW_CACHE
-    if _HW_CACHE is None:
-        _HW_CACHE = detect_hw_accel()
-        logger.info(
-            "Hardware detection: type=%s vaapi_device=%s encoders=%s",
-            _HW_CACHE.get("type"),
-            _HW_CACHE.get("vaapi_device"),
-            _HW_CACHE.get("available_encoders"),
-        )
-    return _HW_CACHE
+    # Keep the lock out of the slow subprocess probe.  Apart from reducing
+    # contention, this prevents a Celery fork from inheriting a lock held by
+    # the startup-detection thread.  The lock protects only the short cache
+    # read/write operations.
+    with _HW_CACHE_LOCK:
+        cached = _HW_CACHE
+    if cached is not None and not force_refresh:
+        return cached
+
+    detected = detect_hw_accel()
+    with _HW_CACHE_LOCK:
+        if force_refresh or _HW_CACHE is None:
+            _HW_CACHE = detected
+            logger.info(
+                "Hardware detection: generation=%s type=%s vaapi_device=%s encoders=%s",
+                _HW_CACHE.get("probe_generation"),
+                _HW_CACHE.get("type"),
+                _HW_CACHE.get("vaapi_device"),
+                _HW_CACHE.get("available_encoders"),
+            )
+        return _HW_CACHE
+
+
+def invalidate_hw_cache() -> None:
+    """Invalidate the worker snapshot before a manual hardware rerun."""
+    global _HW_CACHE
+    with _HW_CACHE_LOCK:
+        _HW_CACHE = None
+
+
+def refresh_hw_info() -> Dict[str, Any]:
+    """Rediscover hardware and return the new authoritative snapshot."""
+    invalidate_hw_cache()
+    return get_hw_info(force_refresh=True)
 
 
 def choose_best_codec(

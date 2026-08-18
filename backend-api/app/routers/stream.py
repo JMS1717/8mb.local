@@ -19,6 +19,20 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["stream"])
 
+_TELEMETRY_KEYS = (
+    "requested_encoder", "resolved_encoder", "actual_encoder",
+    "hardware_used", "hardware_type", "hardware_device", "render_device",
+    "fallback_occurred", "fallback_stage", "fallback_reason", "decoder",
+)
+
+
+def _telemetry_from_info(info: dict) -> dict:
+    return {
+        key: info[key]
+        for key in _TELEMETRY_KEYS
+        if info.get(key) is not None
+    }
+
 
 def _terminal_or_progress_event(task_id: str) -> dict | None:
     """Replay durable task state so reconnects cannot miss the terminal event."""
@@ -27,12 +41,16 @@ def _terminal_or_progress_event(task_id: str) -> dict | None:
     info = result.info if isinstance(result.info, dict) else {}
 
     if state in {"STARTED", "PROGRESS"}:
-        return {
+        event = {
             "type": "progress",
             "task_id": task_id,
             "progress": info.get("progress", 0.0),
             "phase": info.get("phase") or "encoding",
         }
+        telemetry = _telemetry_from_info(info)
+        if telemetry:
+            event["telemetry"] = telemetry
+        return event
     if state == "SUCCESS":
         stats = info.get("stats") if isinstance(info.get("stats"), dict) else {}
         if not stats and isinstance(result.result, dict):
@@ -46,7 +64,7 @@ def _terminal_or_progress_event(task_id: str) -> dict | None:
             except Exception:
                 detail = "Compression failed"
         return {"type": "error", "task_id": task_id, "message": str(detail)}
-    if state == "REVOKED":
+    if state in {"REVOKED", "CANCELED"}:
         return {"type": "canceled", "task_id": task_id, "message": "Job canceled by user"}
     return None
 
@@ -67,6 +85,20 @@ async def _sse_event_generator(task_id: str) -> AsyncGenerator[bytes, None]:
         replay = await asyncio.to_thread(_terminal_or_progress_event, task_id)
         if replay is not None:
             await queue.put(orjson.dumps(replay).decode())
+        # Also replay the durable queue snapshot. This covers deployments
+        # where the Celery result backend has not yet refreshed, while keeping
+        # Redis Pub/Sub as a live transport rather than the source of truth.
+        durable_raw = await redis.get(f"job:{task_id}")
+        if durable_raw:
+            durable = orjson.loads(durable_raw)
+            if isinstance(durable, dict):
+                telemetry = _telemetry_from_info(durable)
+                if telemetry:
+                    await queue.put(orjson.dumps({
+                        "type": "telemetry",
+                        "task_id": task_id,
+                        "telemetry": telemetry,
+                    }).decode())
     except Exception as exc:
         logger.debug("[SSE %s] status replay unavailable: %s", task_id[:8], exc)
 

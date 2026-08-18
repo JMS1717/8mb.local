@@ -14,7 +14,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        BUILD_VERSION: "${APP_VERSION:-141.0.0.0}"
+        BUILD_VERSION: "${APP_VERSION:-142.0.0.0}"
     image: jms1717/8mblocal:vaapi
     container_name: 8mblocal
     ports:

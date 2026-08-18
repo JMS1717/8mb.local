@@ -47,10 +47,14 @@ RUN git clone --depth 1 --branch ${INTEL_MEDIA_DRIVER_VERSION} \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
       -DINSTALL_DRIVER_SYSCONF=OFF && \
     cmake --build media-driver/build -j"$(nproc)" && \
-    cmake --install media-driver/build && rm -rf media-driver
+    cmake --install media-driver/build && \
+    # The release driver contains a large unstripped symbol table.  Keep the
+    # runtime code, but do not carry build/debug symbols into the final image.
+    strip --strip-unneeded /usr/local/lib/dri/iHD_drv_video.so && \
+    rm -rf media-driver
 
 # Intel oneVPL dispatcher. Ubuntu 22.04's package is older than the oneVPL
-# 2.6 minimum required by FFmpeg 6.1, so pin the latest upstream release.
+# 2.6 minimum required by FFmpeg 6.1, so pin the upstream dispatcher release.
 ARG LIBVPL_VERSION=v2023.4.0
 RUN git clone --depth 1 --branch ${LIBVPL_VERSION} https://github.com/intel/libvpl.git && \
     cmake -S libvpl -B libvpl/build \
@@ -109,12 +113,15 @@ RUN npm run build && \
     find build -name "*.ts" -delete
 
 # Stage 3: Runtime with all services
-# Use CUDA 12.2 runtime: minimum driver 535; supports RTX 50-series and older (535+) systems
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+# Use plain Ubuntu for the application runtime.  NVIDIA Container Toolkit
+# injects the host driver libraries/devices at runtime; only the NPP shared
+# libraries directly required by FFmpeg's scale_npp path are copied below.
+# This avoids shipping the full CUDA toolkit/runtime library tree.
+FROM ubuntu:22.04
 
 # Build metadata. scripts/set-version.ps1 keeps the default synchronized with
 # the root VERSION file; release builders override these values explicitly.
-ARG BUILD_VERSION=141.0.0.0
+ARG BUILD_VERSION=142.0.0.0
 ENV APP_VERSION=${BUILD_VERSION}
 ARG BUILD_COMMIT=unknown
 ENV BUILD_COMMIT=${BUILD_COMMIT}
@@ -141,6 +148,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Copy FFmpeg from build stage (only what we need)
 COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg-build /usr/local/bin/ffprobe /usr/local/bin/ffprobe
+# FFmpeg links these NPP components for the existing NVIDIA scale_npp path.
+# CUDA driver libraries and NVENC/NVDEC implementations are supplied by the
+# NVIDIA Container Toolkit from the host at runtime.
+COPY --from=ffmpeg-build /usr/local/cuda-12.2/targets/x86_64-linux/lib/libnppc.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/cuda-12.2/targets/x86_64-linux/lib/libnppig.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/cuda-12.2/targets/x86_64-linux/lib/libnppicc.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/cuda-12.2/targets/x86_64-linux/lib/libnppidei.so* /usr/local/lib/
+COPY --from=ffmpeg-build /usr/local/cuda-12.2/targets/x86_64-linux/lib/libnppif.so* /usr/local/lib/
 # SVT-AV1 is built from source in ffmpeg-build (not Ubuntu packages)
 COPY --from=ffmpeg-build /usr/local/lib/libSvtAv1Enc.so* /usr/local/lib/
 # Intel oneVPL dispatcher built above (the GPU implementation is supplied by
@@ -196,10 +211,13 @@ RUN mkdir -p /app/uploads /app/outputs /var/log/supervisor /var/lib/redis /var/l
 # Set NVIDIA driver capabilities for NVENC/NVDEC support
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 ENV NVIDIA_VISIBLE_DEVICES=all
-ENV LIBVA_DRIVERS_PATH=/usr/local/lib/dri
+# Keep the source-built Intel iHD driver first while retaining Mesa's AMD and
+# other VAAPI drivers from the distro directory. A single /usr/local-only path
+# makes radeonsi invisible and breaks AMD VAAPI.
+ENV LIBVA_DRIVERS_PATH=/usr/local/lib/dri:/usr/lib/x86_64-linux-gnu/dri:/usr/lib/dri
 # Keep the source-built Intel stack ahead of Jammy's older VA/Gmm libraries.
-# Worker probes append system paths for GPU discovery, so relying only on
-# ldconfig would allow an incompatible system libigdgmm to win.
+# This is intentional: only the matching source-built Intel artifacts are
+# loaded from /usr/local; AMD continues to use the distro Mesa driver.
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
 
 # Configure supervisord

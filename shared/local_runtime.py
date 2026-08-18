@@ -167,7 +167,7 @@ class _LocalStore:
             if error is not None:
                 record.error = error
                 record.info.setdefault("detail", error)
-            if record.state in {"SUCCESS", "FAILURE", "REVOKED"}:
+            if record.state in {"SUCCESS", "FAILURE", "REVOKED", "CANCELED"}:
                 record.finished_at = record.finished_at or time.time()
             return record
 
@@ -327,7 +327,7 @@ def cancel_task(task_id: str) -> None:
     """Record a cancellation request without racing the worker's cleanup.
 
     An active worker owns the terminal transition: it must stop FFmpeg and
-    remove any partial output before the task becomes REVOKED.  The local
+    remove any partial output before the task becomes CANCELED.  The local
     Celery control path marks a task revoked immediately only when its future
     was still queued and could be canceled without running.
     """
@@ -336,13 +336,18 @@ def cancel_task(task_id: str) -> None:
 
 def record_worker_event(task_id: str, event: dict[str, Any]) -> None:
     """Mirror worker progress into local result and queue metadata."""
+    telemetry_keys = (
+        "requested_encoder", "resolved_encoder", "actual_encoder",
+        "hardware_used", "hardware_type", "hardware_device", "render_device",
+        "fallback_occurred", "fallback_stage", "fallback_reason", "decoder",
+    )
     kind = str(event.get("type") or "log")
     task_state = {
         "progress": "PROGRESS",
         "log": "STARTED",
         "done": "SUCCESS",
         "error": "FAILURE",
-        "canceled": "REVOKED",
+        "canceled": "CANCELED",
     }.get(kind)
     info = dict(event)
     if kind == "done":
@@ -351,11 +356,21 @@ def record_worker_event(task_id: str, event: dict[str, Any]) -> None:
         # ``done.stats`` because that is the Docker/SSE contract; flattening
         # here makes the desktop runtime behave the same way.
         stats = event.get("stats") if isinstance(event.get("stats"), dict) else {}
-        for key in ("output_path", "final_size_mb", "duration_s", "target_size_mb", "encoder"):
+        for key in (
+            "output_path", "final_size_mb", "duration_s", "target_size_mb", "encoder",
+            "requested_encoder", "resolved_encoder", "actual_encoder", "hardware_used",
+            "hardware_device", "render_device", "fallback_occurred", "fallback_stage",
+            "fallback_reason", "hardware_type", "decoder",
+        ):
             if stats.get(key) is not None:
                 info[key] = stats[key]
         info.setdefault("progress", 100.0)
         info.setdefault("detail", "done")
+    elif kind == "telemetry":
+        telemetry = event.get("telemetry") if isinstance(event.get("telemetry"), dict) else {}
+        for key in telemetry_keys:
+            if telemetry.get(key) is not None:
+                info[key] = telemetry[key]
     if kind == "error":
         update_task(task_id, state=task_state, info=info, error=str(event.get("message") or "Compression failed"))
     elif kind == "done":
@@ -371,13 +386,19 @@ def record_worker_event(task_id: str, event: dict[str, Any]) -> None:
     except (TypeError, ValueError):
         return
     now = time.time()
-    if kind in {"log", "progress", "retry"}:
+    if kind in {"log", "progress", "retry", "telemetry"}:
         job["state"] = "running"
         job.setdefault("started_at", now)
         if kind == "progress":
             job["progress"] = max(0.0, min(100.0, float(event.get("progress") or 0.0)))
             job["phase"] = event.get("phase") or job.get("phase") or "encoding"
-    elif kind == "done":
+    telemetry = event.get("telemetry") if isinstance(event.get("telemetry"), dict) else {}
+    if kind == "done" and isinstance(event.get("stats"), dict):
+        telemetry = event["stats"]
+    for key in telemetry_keys:
+        if telemetry.get(key) is not None:
+            job[key] = telemetry[key]
+    if kind == "done":
         job.update({"state": "completed", "phase": "done", "progress": 100.0, "completed_at": now})
         stats = event.get("stats") if isinstance(event.get("stats"), dict) else {}
         if stats.get("output_path"):
@@ -385,7 +406,7 @@ def record_worker_event(task_id: str, event: dict[str, Any]) -> None:
         if stats.get("final_size_mb") is not None:
             job["final_size_mb"] = stats["final_size_mb"]
     elif kind == "canceled":
-        job.update({"state": "canceled", "phase": "done", "progress": 100.0, "completed_at": now})
+        job.update({"state": "canceled", "phase": "canceled", "progress": 100.0, "completed_at": now})
     elif kind == "error":
         job.update({
             "state": "failed", "phase": "done", "progress": 100.0,

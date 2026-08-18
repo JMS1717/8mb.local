@@ -83,13 +83,71 @@ def _write_batch_zip(files_to_zip: list[Path], temporary_zip_path: Path, zip_pat
 @router.get("/api/jobs/{task_id}/status", response_model=StatusResponse, dependencies=[Depends(basic_auth)])
 async def job_status(task_id: str):
     res = celery_app.AsyncResult(task_id)
-    state = res.state
-    meta = res.info if isinstance(res.info, dict) else {}
+    try:
+        state = res.state
+        meta = res.info if isinstance(res.info, dict) else {}
+    except (KeyError, TypeError, ValueError) as exc:
+        # Older/corrupted Celery result records can contain a plain dict in a
+        # REVOKED/FAILURE result slot where Celery expects exception metadata.
+        # A cancellation flag plus the durable job record is enough to expose
+        # a safe terminal cancellation instead of returning HTTP 500 forever.
+        cancel_requested = False
+        try:
+            cancel_requested = str(await redis.get(f"cancel:{task_id}")) == "1"
+        except Exception:
+            pass
+        if not cancel_requested:
+            raise
+        logger.warning("Using durable canceled state for undecodable Celery result %s: %s", task_id, exc)
+        state = "CANCELED"
+        meta = {}
+    # The worker mirrors encoder telemetry into the existing durable queue
+    # record. Prefer that snapshot over an older Celery result metadata value
+    # so a runtime fallback cannot be hidden by stale progress state.
+    telemetry_keys = (
+        "requested_encoder", "resolved_encoder", "actual_encoder",
+        "hardware_used", "hardware_type", "hardware_device", "render_device",
+        "fallback_occurred", "fallback_stage", "fallback_reason", "decoder",
+    )
+    try:
+        durable_raw = await redis.get(f"job:{task_id}")
+        durable = orjson.loads(durable_raw) if durable_raw else {}
+        if isinstance(durable, dict):
+            meta = dict(meta)
+            for key in telemetry_keys:
+                if durable.get(key) is not None:
+                    meta[key] = durable[key]
+    except Exception as exc:
+        logger.debug("Could not merge durable telemetry for %s: %s", task_id[:8], exc)
+    # Celery reports unknown task IDs as PENDING. Check the durable queue
+    # record so a browser restored after a Redis/container reset does not treat
+    # a random stale localStorage ID as an active job forever.
+    if state == "PENDING":
+        try:
+            if not await redis.exists(f"job:{task_id}"):
+                raise HTTPException(status_code=404, detail="Job no longer exists")
+        except HTTPException:
+            raise
+        except Exception:
+            # A temporary Redis outage is not proof that the task is stale.
+            pass
     return StatusResponse(
         state=state,
         progress=meta.get("progress"),
         detail=meta.get("detail"),
         encoder=meta.get("encoder"),
+        phase=meta.get("phase"),
+        requested_encoder=meta.get("requested_encoder"),
+        resolved_encoder=meta.get("resolved_encoder"),
+        actual_encoder=meta.get("actual_encoder"),
+        hardware_used=meta.get("hardware_used"),
+        fallback_occurred=meta.get("fallback_occurred"),
+        fallback_stage=meta.get("fallback_stage"),
+        fallback_reason=meta.get("fallback_reason"),
+        hardware_type=meta.get("hardware_type"),
+        render_device=meta.get("render_device"),
+        hardware_device=meta.get("hardware_device", meta.get("render_device")),
+        decoder=meta.get("decoder"),
     )
 
 
