@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import ntpath
 import os
+import re
 import socket
 import sys
 import threading
@@ -16,6 +18,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from typing import Any
 from pathlib import Path
 
 # Generated from the root VERSION file by scripts/set-version.ps1.
@@ -66,6 +69,80 @@ def _load_persisted_environment(data_dir: Path) -> None:
         if not separator or key not in allowed or key in os.environ:
             continue
         os.environ[key] = value.strip().strip('"').strip("'")
+
+
+def _windows_downloads_dir() -> Path:
+    """Return the current user's Downloads directory without prompting."""
+    fallback = Path(os.environ.get("USERPROFILE") or Path.home()) / "Downloads"
+    if sys.platform != "win32":
+        return fallback
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
+        ) as windows_key:
+            configured = winreg.QueryValueEx(
+                windows_key, "{374DE290-123F-4565-9164-39C4925E467B}"
+            )[0]
+            if configured:
+                return Path(configured)
+    except (OSError, ImportError):
+        pass
+    return fallback
+
+
+def _download_target_path(suggested_path: str, downloads_dir: Path | None = None) -> Path:
+    """Choose a safe, non-overwriting path in the user's Downloads folder."""
+    target_dir = (downloads_dir or _windows_downloads_dir()).expanduser()
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # WebView2 supplies a full temporary path. Keep only its filename and
+    # remove characters Windows cannot use in a filename.
+    name = ntpath.basename(str(suggested_path).replace("/", "\\"))
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .") or "download"
+    candidate = target_dir / name
+    if not candidate.exists():
+        return candidate
+
+    stem = candidate.stem or "download"
+    suffix = candidate.suffix
+    for index in range(2, 10000):
+        candidate = target_dir / f"{stem} ({index}){suffix}"
+        if not candidate.exists():
+            return candidate
+    raise OSError("Could not choose a unique Downloads filename")
+
+
+def _configure_webview_downloads(webview_module: Any) -> None:
+    """Enable automatic native downloads and route them to Downloads.
+
+    pywebview's Edge WebView2 backend otherwise opens a SaveFileDialog for
+    every download. Replacing only that backend callback keeps the server URL
+    and Content-Disposition filename intact while avoiding a modal prompt.
+    """
+    webview_module.settings["ALLOW_DOWNLOADS"] = True
+    if sys.platform != "win32":
+        return
+
+    try:
+        from webview.platforms import edgechromium
+    except Exception as exc:
+        logging.getLogger(__name__).debug("WebView2 download hook unavailable: %s", exc)
+        return
+
+    def on_download_starting(self, _sender, args) -> None:
+        if not webview_module.settings["ALLOW_DOWNLOADS"]:
+            args.Cancel = True
+            return
+        try:
+            args.ResultFilePath = str(_download_target_path(str(args.ResultFilePath)))
+        except (OSError, TypeError, ValueError):
+            logging.getLogger(__name__).exception("Could not choose a Downloads path")
+            args.Cancel = True
+
+    edgechromium.EdgeChrome.on_download_starting = on_download_starting
 
 
 def _configure_environment(data_dir: Path, bundle_root: Path, port: int) -> None:
@@ -223,12 +300,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         import webview
 
-        # pywebview disables WebView2 downloads by default.  The native
-        # WebView2 DownloadStarting handler below provides the normal Windows
-        # Save dialog, so explicitly enable the feature before creating the
-        # window; otherwise every download is canceled before the dialog can
-        # appear.
-        webview.settings['ALLOW_DOWNLOADS'] = True
+        _configure_webview_downloads(webview)
         webview.create_window(
             "8mb.local",
             url,

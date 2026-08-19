@@ -22,6 +22,16 @@ def test_large_gpu_gets_more_parallelism_than_small_gpu():
     assert large > small
 
 
+def test_gpu_inventory_hides_windows_console_process():
+    with patch.object(concurrency, "hidden_process_kwargs", return_value={"creationflags": 0x08000000}), \
+         patch.object(concurrency.subprocess, "run") as run:
+        run.return_value.returncode = 0
+        run.return_value.stdout = _gpu("RTX 4070 Ti SUPER", 16384, 14000)
+        concurrency._nvidia_inventory()
+
+    assert run.call_args.kwargs["creationflags"] == 0x08000000
+
+
 def test_cpu_only_mode_is_conservative():
     with patch.object(concurrency.psutil, "cpu_count", side_effect=lambda logical=True: 8 if logical else 4), \
          patch.object(concurrency.psutil, "virtual_memory", return_value=type("M", (), {"available": 8 * 1024**3})()), \

@@ -17,6 +17,8 @@ from typing import Any, Callable
 
 import psutil
 
+from shared.subprocess_utils import hidden_process_kwargs
+
 # Benchmark evidence on the RTX 4070 Ti SUPER showed 12 jobs were faster than
 # 16 for the supplied 1080p clips, while 16 added contention. The live gate
 # still reduces this when current resources are lower.
@@ -44,6 +46,7 @@ def _nvidia_inventory() -> list[dict[str, Any]]:
             text=True,
             timeout=3,
             check=False,
+            **hidden_process_kwargs(),
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return []
