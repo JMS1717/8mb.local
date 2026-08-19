@@ -223,6 +223,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         import webview
 
+        # pywebview disables WebView2 downloads by default.  The native
+        # WebView2 DownloadStarting handler below provides the normal Windows
+        # Save dialog, so explicitly enable the feature before creating the
+        # window; otherwise every download is canceled before the dialog can
+        # appear.
+        webview.settings['ALLOW_DOWNLOADS'] = True
         webview.create_window(
             "8mb.local",
             url,
