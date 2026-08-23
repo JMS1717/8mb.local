@@ -25,6 +25,8 @@ import androidx.media3.common.util.UnstableApi
 import androidx.core.content.ContextCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.jms1717.eightmblocal.codec.CodecPriority
+import com.jms1717.eightmblocal.codec.HardwareCodecSelector
 import com.jms1717.eightmblocal.compression.CompressionService
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -54,6 +56,11 @@ class PhysicalHardwareCompressionTest {
         val iconResource = context.resources.getResourceName(context.applicationInfo.icon)
         assertTrue("Installed app is not using the 8mb.local launcher icon: $iconResource", iconResource.endsWith(":mipmap/ic_launcher"))
         assumeTrue("Camera-roll workflow test requires Android 10+", Build.VERSION.SDK_INT >= 29)
+        val workingCandidates = CodecPriority.qualityOrder.associateWith(HardwareCodecSelector::candidates)
+        val workingMimes = workingCandidates.filterValues { it.isNotEmpty() }.keys
+        val workingHardwareMimes = workingCandidates.filterValues { candidates -> candidates.any { it.hardware } }.keys
+        assumeTrue("Physical workflow requires a working hardware video encoder", workingHardwareMimes.isNotEmpty())
+        val automaticMime = CodecPriority.bestHardware(workingHardwareMimes, workingMimes)
         val input = File(context.cacheDir, "physical-hardware-input.mp4")
         input.delete()
         createSyntheticH264(input)
@@ -109,7 +116,7 @@ class PhysicalHardwareCompressionTest {
                     .putExtra(CompressionService.EXTRA_MEDIASTORE_OUTPUT, true)
                     .putExtra(CompressionService.EXTRA_TARGET_MB, 1.0)
                     .putExtra(CompressionService.EXTRA_VIDEO_KBPS, 0)
-                    .putExtra(CompressionService.EXTRA_VIDEO_MIME, MimeTypes.VIDEO_H264)
+                    .putExtra(CompressionService.EXTRA_VIDEO_MIME, automaticMime)
                     .putExtra(CompressionService.EXTRA_MAX_HEIGHT, 240)
                     .putExtra(CompressionService.EXTRA_AUTO_RESOLUTION, false)
                     .putExtra(CompressionService.EXTRA_MIN_AUTO_HEIGHT, 240)
@@ -147,6 +154,10 @@ class PhysicalHardwareCompressionTest {
         }
         val report = JSONObject(File(context.filesDir, "last-codec-report.json").readText())
         assertTrue("Software encoder was used: ${report.optString("actual_encoder")}", report.getBoolean("hardware_used"))
+        assertTrue(
+            "Compression did not use the automatically selected codec: $automaticMime",
+            report.getString("requested_mime") == automaticMime,
+        )
 
         composeRule.waitUntil(10_000) {
             composeRule.onAllNodesWithText("Preview & share").fetchSemanticsNodes().isNotEmpty()

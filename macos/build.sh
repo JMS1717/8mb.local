@@ -82,7 +82,18 @@ cp -R "$app_path" "$dmg_stage/8mblocal.app"
 ln -s /Applications "$dmg_stage/Applications"
 dmg_path="$repo_root/dist/8mblocal_${version}_macos_arm64.dmg"
 rm -f "$dmg_path"
-hdiutil create -volname '8mb.local' -srcfolder "$dmg_stage" -ov -format UDZO "$dmg_path"
+for attempt in 1 2 3; do
+  if hdiutil create -volname '8mb.local' -srcfolder "$dmg_stage" -ov -format UDZO "$dmg_path"; then
+    break
+  fi
+  if [[ "$attempt" == "3" ]]; then
+    echo 'Unable to create the macOS DMG after three attempts.' >&2
+    exit 1
+  fi
+  echo "hdiutil create failed on attempt $attempt; retrying..." >&2
+  rm -f "$dmg_path"
+  sleep 3
+done
 
 if [[ -n "${APPLE_NOTARY_PROFILE:-}" ]]; then
   if [[ "$signing_identity" == "-" ]]; then

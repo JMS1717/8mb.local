@@ -9,6 +9,7 @@ $package = 'com.jms1717.eightmblocal'
 $runner = "$package.test/androidx.test.runner.AndroidJUnitRunner"
 $testClass = "$package.PhysicalHardwareCompressionTest"
 $audioTestClass = "$package.PhysicalAudioExtractionTest"
+$inventoryTestClass = "$package.PhysicalCodecInventoryTest"
 
 $adbCommand = Get-Command adb -ErrorAction SilentlyContinue
 if ($null -eq $adbCommand) {
@@ -68,7 +69,7 @@ if ($sdk -ge 33) {
 & $adbPath -s $Serial shell am force-stop $package | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not reset the app before the physical smoke test.' }
 
-foreach ($class in @($audioTestClass, $testClass)) {
+foreach ($class in @($inventoryTestClass, $audioTestClass, $testClass)) {
     $instrumentation = & $adbPath -s $Serial shell am instrument -w -r -e class $class $runner 2>&1 | Out-String
     $instrumentation | Write-Host
     if ($LASTEXITCODE -ne 0 -or $instrumentation -notmatch 'OK \(1 test\)') {
@@ -80,15 +81,22 @@ $report = & $adbPath -s $Serial exec-out run-as $package cat files/last-codec-re
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($report | Out-String))) {
     throw 'The automated test completed without a codec telemetry report.'
 }
+$inventory = & $adbPath -s $Serial exec-out run-as $package cat files/physical-codec-inventory.json
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($inventory | Out-String))) {
+    throw 'The automated test completed without a working codec inventory.'
+}
+$json = ($report | Out-String) | ConvertFrom-Json
+$inventoryJson = ($inventory | Out-String) | ConvertFrom-Json
+$json | Add-Member -NotePropertyName codec_inventory -NotePropertyValue $inventoryJson
 [IO.File]::WriteAllText(
     [IO.Path]::GetFullPath($ReportPath),
-    ($report | Out-String),
+    ($json | ConvertTo-Json -Depth 12),
     [Text.UTF8Encoding]::new($false)
 )
-$json = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
 if (-not $json.actual_encoder -or $json.hardware_used -ne $true) {
     throw "Hardware use was not proven. actual_encoder=$($json.actual_encoder), hardware=$($json.hardware_used), fallback=$($json.fallback_occurred)"
 }
 Write-Host "PASS ARM64 Android foreground-service compression to camera roll: $($json.actual_encoder)"
 Write-Host 'PASS Android desktop-default Opus audio extraction'
+Write-Host "PASS working H.264/HEVC/AV1 inventory and automatic choice: $($inventoryJson.automatic_mime)"
 Write-Host "Report: $([IO.Path]::GetFullPath($ReportPath))"
