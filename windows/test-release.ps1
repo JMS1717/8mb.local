@@ -738,15 +738,16 @@ public static class NativeWindowClose {
     }
     if ($Executable) {
         # PyInstaller one-file mode can leave an extracted child after the
-        # launcher Process object exits. Stop every new process using this
-        # exact executable path, while preserving any instance that existed
-        # before this isolated smoke run.
+        # launcher Process object exits. Stop every 8mblocal process created
+        # during this isolated smoke run, while preserving any instance that
+        # existed before it. Do not compare ExecutablePath here: Windows CIM
+        # can return the long form of a path even when CI launched the app
+        # through an equivalent 8.3 short path (for example RUNNER~1).
         $resolvedExecutable = [System.IO.Path]::GetFullPath($Executable)
         for ($attempt = 0; $attempt -lt 40; $attempt++) {
             $ownedProcesses = @(
                 Get-CimInstance Win32_Process -Filter "Name='8mblocal.exe'" -ErrorAction SilentlyContinue |
                     Where-Object {
-                        $_.ExecutablePath -eq $resolvedExecutable -and
                         [int]$_.ProcessId -notin $preexistingExecutablePids
                     }
             )
@@ -760,7 +761,6 @@ public static class NativeWindowClose {
         $remainingOwned = @(
             Get-CimInstance Win32_Process -Filter "Name='8mblocal.exe'" -ErrorAction SilentlyContinue |
                 Where-Object {
-                    $_.ExecutablePath -eq $resolvedExecutable -and
                     [int]$_.ProcessId -notin $preexistingExecutablePids
                 }
         )

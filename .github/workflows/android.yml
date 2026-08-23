@@ -57,6 +57,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
+      - name: Enable KVM acceleration
+        run: |
+          sudo chmod 666 /dev/kvm
+          test -r /dev/kvm -a -w /dev/kvm
       - name: Run API 35 instrumentation tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
