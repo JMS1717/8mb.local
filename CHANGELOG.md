@@ -14,6 +14,12 @@
   bitrate, resolution/FPS controls, desktop auto-resolution and auto-audio
   planners, trim, mute, Opus/AAC, audio-only M4A, automatic MediaStore save,
   Save As, cancel, history, and share.
+- Fixed Android 15/16 foreground-service startup so real Photo Picker exports
+  reach the encoder, automatically rank working hardware codecs, distinguish
+  hardware encode from decode, and save finished videos to `DCIM/8mb.local` in
+  the camera roll by default.
+- Matched the Android launcher/notification artwork to the blue 8mb.local icon
+  and added an in-app Media3 preview with playback controls before Share.
 - Added native Linux ARM64 Docker builds, Compose configuration, CI artifacts,
   and a guarded multi-architecture manifest publishing workflow.
 
@@ -26,8 +32,10 @@
   codecs are tried first and the encoder actually used is recorded.
 - Added physical-device smoke scripts that assert the actual encoder and
   hardware-use telemetry for Windows ARM64 and Android.
-- Android's no-touch smoke now synthesizes its own media, proves a hardware-only
-  H.264 encode, and validates desktop-default Opus audio extraction.
+- Android's no-touch smoke now synthesizes its own media, runs it through the
+  real foreground service using MediaStore content URIs, proves a hardware-only
+  H.264 encode into the camera roll, and validates desktop-default Opus audio
+  extraction.
 
 ### Release safeguards
 

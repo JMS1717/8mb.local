@@ -41,6 +41,17 @@ object HardwareCodecSelector {
         }
     }
 
+    /** Hardware decoder components exposed by the OEM's MediaCodec stack. */
+    fun hardwareDecoderNames(mimeType: String): List<String> =
+        MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
+            .asSequence()
+            .filter { !it.isEncoder && isHardware(it) }
+            .filter { it.supportedTypes.any { type -> type.equals(mimeType, true) } }
+            .map { it.name }
+            .distinct()
+            .sorted()
+            .toList()
+
     fun isHardwareName(name: String): Boolean {
         val info = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.firstOrNull { it.name == name }
         return info?.let(::isHardware) ?: false

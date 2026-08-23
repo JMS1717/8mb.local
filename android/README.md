@@ -16,9 +16,9 @@ embed Python, Docker, a WebView, or a bundled FFmpeg executable.
   auto-resolution heuristic and minimum height, and frame-rate caps through
   120 fps
 - Automatic audio-bitrate downshift, start/end trim, audio-only M4A extraction,
-  cancel, progress, recent history, and share
-- Automatic output to `Movies/8mb.local` or `Music/8mb.local`, with an optional
-  Android Save As picker
+  cancel, progress, recent history, in-app output preview, and share
+- Automatic output to the camera roll at `DCIM/8mb.local` or to
+  `Music/8mb.local`, with an optional Android Save As picker
 
 Android uses vendor MediaCodec controls in place of backend-specific flags.
 NVENC-only tune names, FFmpeg P1-P7 command-line switches, MKV muxing, folder
@@ -30,10 +30,12 @@ native MP4 muxer replaces the desktop fast-finalize switch.
 
 Codec inventory alone is not trusted. Each video encoder candidate is
 configured and started before it is offered. An export pins one encoder, tries
-working hardware codecs first, and only then tries software codecs when that
-fallback is enabled. Completion telemetry records the encoder Media3 actually
-used. Size-mode outputs over target by more than 2 percent receive one
-bitrate-adjusted retry.
+working hardware codecs in AV1, HEVC, then H.264 quality order, and only then
+tries software codecs when that fallback is enabled. The best working hardware
+encoder is selected automatically when the scan completes. Encode and decode
+capabilities are shown separately. Completion telemetry records the encoder
+Media3 actually used. Size-mode outputs over target by more than 2 percent
+receive one bitrate-adjusted retry.
 
 ## Automated tests
 
@@ -51,7 +53,10 @@ With an ARM64 Android device connected through ADB, run:
 ```
 
 The script builds and installs both APKs, synthesizes its own WAV and H.264
-inputs, proves a playable desktop-default Opus audio export, forces a
-hardware-only H.264 compression, and verifies the output duration and actual
-encoder telemetry. It requires no taps and never reads personal media. The
-generated `physical-codec-report.json` is local and ignored by Git.
+inputs, proves a playable desktop-default Opus audio export, and sends a
+MediaStore content URI through the real foreground service for a hardware-only
+H.264 compression. It verifies playback, camera-roll publication, and actual
+encoder telemetry, then opens the app's preview UI before Share. It also checks
+the installed launcher-icon resource. It requires no taps and never reads
+personal media. The generated `physical-codec-report.json` is local and ignored
+by Git.

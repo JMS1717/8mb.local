@@ -12,7 +12,6 @@ import android.os.Build
 import android.os.IBinder
 import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
-import androidx.core.app.ServiceCompat
 import androidx.media3.common.util.UnstableApi
 import com.jms1717.eightmblocal.MainActivity
 import com.jms1717.eightmblocal.history.CompressionHistory
@@ -66,12 +65,22 @@ class CompressionService : Service(), CompressionListener {
             trimEndMs = intent.getLongExtra(EXTRA_TRIM_END_MS, -1L).takeIf { it >= 0 },
         )
         mediaStoreOutput = intent.getBooleanExtra(EXTRA_MEDIASTORE_OUTPUT, false)
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            notification(0, "Detecting hardware codecs…"),
-            if (Build.VERSION.SDK_INT >= 35) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING else 0,
-        )
+        val foregroundType = if (Build.VERSION.SDK_INT >= 35) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
+        } else {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        }
+        if (Build.VERSION.SDK_INT >= 29) {
+            // ServiceCompat currently masks the API 35 media-processing bit to
+            // "none", which Android 16 rejects. Call the platform API directly.
+            startForeground(
+                NOTIFICATION_ID,
+                notification(0, "Detecting hardware codecs…"),
+                foregroundType,
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification(0, "Detecting hardware codecs…"))
+        }
         engine = CompressionEngine(this, this)
         android.os.Handler(mainLooper).post { engine?.start(request) }
         return START_NOT_STICKY
@@ -151,7 +160,7 @@ class CompressionService : Service(), CompressionListener {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun notification(progress: Int, message: String) = NotificationCompat.Builder(this, CHANNEL_ID)
-        .setSmallIcon(android.R.drawable.stat_sys_upload)
+        .setSmallIcon(com.jms1717.eightmblocal.R.drawable.ic_notification)
         .setContentTitle("8mb.local")
         .setContentText(message)
         .setProgress(100, progress, progress == 0)

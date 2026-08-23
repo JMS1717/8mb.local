@@ -23,6 +23,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -64,18 +65,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.annotation.RequiresApi
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import com.jms1717.eightmblocal.codec.HardwareCodecSelector
+import com.jms1717.eightmblocal.codec.CodecPriority
 import com.jms1717.eightmblocal.compression.CompressionService
 import com.jms1717.eightmblocal.compression.AndroidDefaults
 import com.jms1717.eightmblocal.history.CompressionHistory
@@ -108,6 +116,7 @@ private data class CodecChoice(
     val label: String,
     val mime: String,
     val hardwareNames: List<String>,
+    val hardwareDecoderNames: List<String>,
     val hasSoftwareFallback: Boolean,
 )
 
@@ -148,6 +157,7 @@ private fun EightMbLocalApp() {
     var running by remember { mutableStateOf(false) }
     var lastOutput by remember { mutableStateOf<Uri?>(null) }
     var lastOutputAudio by remember { mutableStateOf(false) }
+    var previewOutput by remember { mutableStateOf<Pair<Uri, Boolean>?>(null) }
     var history by remember { mutableStateOf<List<CompressionHistory>>(emptyList()) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -168,16 +178,16 @@ private fun EightMbLocalApp() {
                     label = label,
                     mime = mime,
                     hardwareNames = candidates.filter { it.hardware }.map { it.name },
+                    hardwareDecoderNames = HardwareCodecSelector.hardwareDecoderNames(mime),
                     hasSoftwareFallback = candidates.any { !it.hardware },
                 )
             }
         }
         codecScanRunning = false
-        selectedMime = availableCodecs.firstOrNull {
-            it.mime == MimeTypes.VIDEO_AV1 && it.hardwareNames.isNotEmpty()
-        }?.mime ?: availableCodecs.firstOrNull { it.hardwareNames.isNotEmpty() }?.mime
-            ?: availableCodecs.firstOrNull()?.mime
-            ?: MimeTypes.VIDEO_H264
+        selectedMime = CodecPriority.bestHardware(
+            availableCodecs.filter { it.hardwareNames.isNotEmpty() }.map { it.mime }.toSet(),
+            availableCodecs.map { it.mime }.toSet(),
+        )
         history = withContext(Dispatchers.IO) { HistoryDatabase.get(context).history().recent() }
     }
 
@@ -403,7 +413,7 @@ private fun EightMbLocalApp() {
                 }
 
                 SectionCard {
-                    SectionTitle("Video codec", "Hardware encoders are probed before they appear")
+                    SectionTitle("Video codec", "Best working hardware codec is selected automatically")
                     ToggleRow("Extract audio only (.m4a)", audioOnly, !running) {
                         audioOnly = it
                         if (it) keepAudio = true
@@ -522,7 +532,7 @@ private fun EightMbLocalApp() {
                         ToggleRow("Ask where to save", askWhereToSave, !running && batchQueue.isEmpty()) { askWhereToSave = it }
                         Text(
                             if (askWhereToSave) "Android will open a Save As dialog for every output."
-                            else "Outputs save automatically to Movies/8mb.local or Music/8mb.local.",
+                            else "Videos save to the camera roll; audio saves to Music/8mb.local.",
                             color = TextMuted,
                             fontSize = 12.sp,
                         )
@@ -588,19 +598,9 @@ private fun EightMbLocalApp() {
                     Text(status, color = if (status.contains("error", true)) Amber else TextMuted, fontSize = 13.sp)
                     lastOutput?.let { uri ->
                         OutlinedButton(
-                            onClick = {
-                                context.startActivity(
-                                    Intent.createChooser(
-                                        Intent(Intent.ACTION_SEND)
-                                            .setType(if (lastOutputAudio) "audio/mp4" else "video/mp4")
-                                            .putExtra(Intent.EXTRA_STREAM, uri)
-                                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-                                        "Share compressed video",
-                                    ),
-                                )
-                            },
+                            onClick = { previewOutput = uri to lastOutputAudio },
                             modifier = Modifier.fillMaxWidth(),
-                        ) { Text("Share last output") }
+                        ) { Text("Preview & share") }
                     }
                 }
 
@@ -611,7 +611,83 @@ private fun EightMbLocalApp() {
                 Spacer(Modifier.height(12.dp))
             }
         }
+        previewOutput?.let { (uri, audioOnly) ->
+            MediaPreviewDialog(
+                uri = uri,
+                audioOnly = audioOnly,
+                onDismiss = { previewOutput = null },
+                onShare = { shareOutput(context, uri, audioOnly) },
+            )
+        }
     }
+}
+
+@Composable
+private fun MediaPreviewDialog(
+    uri: Uri,
+    audioOnly: Boolean,
+    onDismiss: () -> Unit,
+    onShare: () -> Unit,
+) {
+    val context = LocalContext.current
+    val player = remember(uri) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(uri))
+            prepare()
+            playWhenReady = true
+        }
+    }
+    DisposableEffect(player) { onDispose { player.release() } }
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            color = CardColor,
+            shape = RoundedCornerShape(20.dp),
+            border = BorderStroke(1.dp, CardBorder),
+        ) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    if (audioOnly) "Preview compressed audio" else "Preview compressed video",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                AndroidView(
+                    factory = { viewContext ->
+                        PlayerView(viewContext).apply {
+                            this.player = player
+                            useController = true
+                        }
+                    },
+                    update = { it.player = player },
+                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+                )
+                Text(
+                    if (audioOnly) "Saved in Music/8mb.local" else "Saved in your camera roll",
+                    color = TextMuted,
+                    fontSize = 12.sp,
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("Close") }
+                    Button(
+                        onClick = onShare,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Indigo),
+                    ) { Text("Share") }
+                }
+            }
+        }
+    }
+}
+
+private fun shareOutput(context: Context, uri: Uri, audioOnly: Boolean) {
+    context.startActivity(
+        Intent.createChooser(
+            Intent(Intent.ACTION_SEND)
+                .setType(if (audioOnly) "audio/mp4" else "video/mp4")
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+            "Share compressed ${if (audioOnly) "audio" else "video"}",
+        ),
+    )
 }
 
 @Composable
@@ -705,9 +781,10 @@ private fun CodecOption(codec: CodecChoice, selected: Boolean, enabled: Boolean,
         Row(Modifier.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(codec.label, fontWeight = FontWeight.SemiBold)
-                if (hardware) {
+                val visibleComponents = if (hardware) codec.hardwareNames else codec.hardwareDecoderNames
+                if (visibleComponents.isNotEmpty()) {
                     Text(
-                        codec.hardwareNames.map(::hardwareVendor).distinct().joinToString(" • "),
+                        visibleComponents.map(::hardwareVendor).distinct().joinToString(" • "),
                         color = TextMuted,
                         fontSize = 10.sp,
                         maxLines = 1,
@@ -716,8 +793,10 @@ private fun CodecOption(codec: CodecChoice, selected: Boolean, enabled: Boolean,
             }
             Text(
                 when {
-                    hardware -> "⚡ ${codec.hardwareNames.size} hardware"
-                    codec.hasSoftwareFallback -> "software"
+                    hardware && codec.hardwareDecoderNames.isNotEmpty() -> "⚡ HW encode + decode"
+                    hardware -> "⚡ HW encode"
+                    codec.hasSoftwareFallback && codec.hardwareDecoderNames.isNotEmpty() -> "HW decode • SW encode"
+                    codec.hasSoftwareFallback -> "software encode"
                     else -> "unavailable"
                 },
                 color = if (hardware) Emerald else TextMuted,
@@ -802,7 +881,7 @@ private fun createMediaStoreOutput(context: Context, requestedName: String, audi
         put(MediaStore.MediaColumns.MIME_TYPE, if (audioOnly) "audio/mp4" else "video/mp4")
         put(
             MediaStore.MediaColumns.RELATIVE_PATH,
-            "${if (audioOnly) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_MOVIES}/8mb.local",
+            "${if (audioOnly) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_DCIM}/8mb.local",
         )
         put(MediaStore.MediaColumns.IS_PENDING, 1)
     }

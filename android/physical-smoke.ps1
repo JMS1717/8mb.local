@@ -34,6 +34,8 @@ if (-not $Serial) {
 if ($LASTEXITCODE -ne 0) { throw "ADB device '$Serial' is unavailable." }
 $abi = (& $adbPath -s $Serial shell getprop ro.product.cpu.abi | Out-String).Trim()
 if ($abi -notmatch 'arm64|aarch64') { throw "Run this proof on a physical ARM64 Android device; found '$abi'." }
+$sdk = [int]((& $adbPath -s $Serial shell getprop ro.build.version.sdk | Out-String).Trim())
+if ($sdk -lt 29) { throw "The automatic camera-roll proof requires Android 10/API 29+; found API $sdk." }
 
 if (-not $SkipBuild) {
     Push-Location $PSScriptRoot
@@ -74,6 +76,6 @@ $json = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
 if (-not $json.actual_encoder -or $json.hardware_used -ne $true) {
     throw "Hardware use was not proven. actual_encoder=$($json.actual_encoder), hardware=$($json.hardware_used), fallback=$($json.fallback_occurred)"
 }
-Write-Host "PASS ARM64 Android hardware compression: $($json.actual_encoder)"
+Write-Host "PASS ARM64 Android foreground-service compression to camera roll: $($json.actual_encoder)"
 Write-Host 'PASS Android desktop-default Opus audio extraction'
 Write-Host "Report: $([IO.Path]::GetFullPath($ReportPath))"

@@ -1,23 +1,37 @@
 package com.jms1717.eightmblocal
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.ContentValues
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
-import android.net.Uri
+import android.graphics.Bitmap
+import android.os.Environment
+import android.os.Build
+import android.provider.MediaStore
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
+import androidx.core.content.ContextCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.jms1717.eightmblocal.compression.CompressionEngine
-import com.jms1717.eightmblocal.compression.CompressionListener
-import com.jms1717.eightmblocal.compression.CompressionRequest
-import com.jms1717.eightmblocal.compression.CompressionResult
-import org.junit.Assert.assertNotNull
+import com.jms1717.eightmblocal.compression.CompressionService
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.json.JSONObject
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
@@ -27,77 +41,131 @@ import java.util.concurrent.TimeUnit
 @RunWith(AndroidJUnit4::class)
 @UnstableApi
 class PhysicalHardwareCompressionTest {
+    @get:Rule val composeRule = createAndroidComposeRule<MainActivity>()
+
     @Test
     fun syntheticVideoUsesHardwareMediaCodecAndProducesPlayableMp4() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
+        val iconResource = context.resources.getResourceName(context.applicationInfo.icon)
+        assertTrue("Installed app is not using the 8mb.local launcher icon: $iconResource", iconResource.endsWith(":mipmap/ic_launcher"))
+        assumeTrue("Camera-roll workflow test requires Android 10+", Build.VERSION.SDK_INT >= 29)
         val input = File(context.cacheDir, "physical-hardware-input.mp4")
-        val output = File(context.cacheDir, "physical-hardware-output.mp4")
         input.delete()
-        output.delete()
         createSyntheticH264(input)
         assertTrue("Synthetic input was not created", input.length() > 1_000)
+        val inputUri = context.contentResolver.insert(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "8mblocal-picker-input.mp4")
+                put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/8mb.local-test")
+            },
+        ) ?: error("Could not create picker-style input")
+        context.contentResolver.openOutputStream(inputUri, "w")!!.use { output ->
+            input.inputStream().use { it.copyTo(output) }
+        }
+        val outputUri = context.contentResolver.insert(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "8mblocal-camera-roll-output.mp4")
+                put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/8mb.local")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            },
+        ) ?: error("Could not create camera-roll output")
 
         val done = CountDownLatch(1)
-        var completed: CompressionResult? = null
+        var completed = false
         var failure: String? = null
-        val listener = object : CompressionListener {
-            override fun onProgress(percent: Int, encoder: String, hardware: Boolean) = Unit
-            override fun onComplete(result: CompressionResult) {
-                completed = result
-                done.countDown()
-            }
-            override fun onError(message: String) {
-                failure = message
-                done.countDown()
-            }
-            override fun onCancelled() {
-                failure = "Compression was cancelled"
-                done.countDown()
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != CompressionService.ACTION_STATUS) return
+                when (intent.getStringExtra(CompressionService.EXTRA_STATE)) {
+                    "completed" -> { completed = true; done.countDown() }
+                    "error", "cancelled" -> {
+                        failure = intent.getStringExtra(CompressionService.EXTRA_MESSAGE)
+                        done.countDown()
+                    }
+                }
             }
         }
-
-        instrumentation.runOnMainSync {
-            CompressionEngine(context, listener).start(
-                CompressionRequest(
-                    inputUri = Uri.fromFile(input),
-                    outputUri = Uri.fromFile(output),
-                    targetMb = 1.0,
-                    videoBitrateOverride = null,
-                    videoMime = MimeTypes.VIDEO_H264,
-                    maxHeight = 240,
-                    autoResolution = false,
-                    minAutoHeight = 240,
-                    maxFps = 30,
-                    audioBitrate = 0,
-                    autoAudioBitrate = false,
-                    audioMime = MimeTypes.AUDIO_AAC,
-                    keepAudio = false,
-                    audioOnly = false,
-                    allowSoftwareFallback = false,
-                    trimStartMs = 0,
-                    trimEndMs = null,
-                ),
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            IntentFilter(CompressionService.ACTION_STATUS),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        composeRule.activity.let { activity ->
+            ContextCompat.startForegroundService(
+                activity,
+                Intent(activity, CompressionService::class.java)
+                    .putExtra(CompressionService.EXTRA_INPUT, inputUri.toString())
+                    .putExtra(CompressionService.EXTRA_OUTPUT, outputUri.toString())
+                    .putExtra(CompressionService.EXTRA_MEDIASTORE_OUTPUT, true)
+                    .putExtra(CompressionService.EXTRA_TARGET_MB, 1.0)
+                    .putExtra(CompressionService.EXTRA_VIDEO_KBPS, 0)
+                    .putExtra(CompressionService.EXTRA_VIDEO_MIME, MimeTypes.VIDEO_H264)
+                    .putExtra(CompressionService.EXTRA_MAX_HEIGHT, 240)
+                    .putExtra(CompressionService.EXTRA_AUTO_RESOLUTION, false)
+                    .putExtra(CompressionService.EXTRA_MIN_AUTO_HEIGHT, 240)
+                    .putExtra(CompressionService.EXTRA_MAX_FPS, 30)
+                    .putExtra(CompressionService.EXTRA_AUDIO_KBPS, 64)
+                    .putExtra(CompressionService.EXTRA_AUTO_AUDIO_BITRATE, false)
+                    .putExtra(CompressionService.EXTRA_AUDIO_MIME, MimeTypes.AUDIO_AAC)
+                    .putExtra(CompressionService.EXTRA_KEEP_AUDIO, false)
+                    .putExtra(CompressionService.EXTRA_AUDIO_ONLY, false)
+                    .putExtra(CompressionService.EXTRA_ALLOW_SOFTWARE_FALLBACK, false)
+                    .putExtra(CompressionService.EXTRA_TRIM_START_MS, 0L)
+                    .putExtra(CompressionService.EXTRA_TRIM_END_MS, -1L),
             )
         }
 
-        assertTrue("Timed out waiting for Media3 export", done.await(90, TimeUnit.SECONDS))
-        assertTrue("Hardware compression failed: $failure", failure == null)
-        val result = completed
-        assertNotNull("Compression did not return telemetry", result)
-        assertTrue("Software encoder was used: ${result?.actualEncoder}", result?.hardwareUsed == true)
-        assertTrue("Output MP4 is empty", output.length() > 1_000)
+        assertTrue("Timed out waiting for foreground-service export", done.await(90, TimeUnit.SECONDS))
+        context.unregisterReceiver(receiver)
+        assertTrue("Foreground-service compression failed: $failure", failure == null)
+        assertTrue("Foreground-service export never completed", completed)
+        val outputBytes = context.contentResolver.openFileDescriptor(outputUri, "r")?.use { it.statSize } ?: 0
+        assertTrue("Camera-roll output MP4 is empty", outputBytes > 1_000)
+        context.contentResolver.query(
+            outputUri,
+            arrayOf(MediaStore.MediaColumns.RELATIVE_PATH, MediaStore.MediaColumns.IS_PENDING),
+            null,
+            null,
+            null,
+        )!!.use { cursor ->
+            assertTrue("Camera-roll output is missing", cursor.moveToFirst())
+            assertTrue(
+                "Output was not saved under DCIM/8mb.local",
+                cursor.getString(0).startsWith("${Environment.DIRECTORY_DCIM}/8mb.local"),
+            )
+            assertTrue("Camera-roll output remained pending", cursor.getInt(1) == 0)
+        }
+        val report = JSONObject(File(context.filesDir, "last-codec-report.json").readText())
+        assertTrue("Software encoder was used: ${report.optString("actual_encoder")}", report.getBoolean("hardware_used"))
+
+        composeRule.waitUntil(10_000) {
+            composeRule.onAllNodesWithText("Preview & share").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithText("Preview & share").performScrollTo().assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("Preview compressed video").assertIsDisplayed()
+        composeRule.onNodeWithText("Share").assertIsDisplayed()
+        File(context.cacheDir, "physical-preview.png").outputStream().use { output ->
+            instrumentation.uiAutomation.takeScreenshot().compress(Bitmap.CompressFormat.PNG, 100, output)
+        }
+        composeRule.onNodeWithText("Close").performClick()
 
         val retriever = MediaMetadataRetriever()
         try {
-            retriever.setDataSource(output.absolutePath)
+            retriever.setDataSource(context, outputUri)
             val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull() ?: 0L
             assertTrue("Output MP4 has no playable duration", duration > 0)
         } finally {
             retriever.release()
             input.delete()
-            output.delete()
+            context.contentResolver.delete(inputUri, null, null)
+            context.contentResolver.delete(outputUri, null, null)
         }
     }
 
