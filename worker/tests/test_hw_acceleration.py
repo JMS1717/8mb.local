@@ -132,6 +132,8 @@ class TestHardwareMapping(unittest.TestCase):
         self.assertEqual(info["available_encoders"]["h264"], "h264_vaapi")
         self.assertFalse(any(call.args[0].endswith("_qsv") for call in probe.call_args_list))
 
+    @patch.object(hw_detect.os, "name", "posix")
+    @patch.object(hw_detect.sys, "platform", "linux")
     @patch("worker.app.hw_detect._check_nvidia", return_value=True)
     @patch(
         "worker.app.hw_detect.get_vaapi_devices",
