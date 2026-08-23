@@ -60,3 +60,7 @@ encoder telemetry, then opens the app's preview UI before Share. It also checks
 the installed launcher-icon resource. It requires no taps and never reads
 personal media. The generated `physical-codec-report.json` is local and ignored
 by Git.
+
+Launcher PNGs are produced by the same renderer as the Windows ICO. Regenerate
+them after a brand change with `./generate-launcher-icons.ps1`; the script adds
+transparent Android safe-area padding without changing the desktop artwork.

@@ -18,8 +18,10 @@
   reach the encoder, automatically rank working hardware codecs, distinguish
   hardware encode from decode, and save finished videos to `DCIM/8mb.local` in
   the camera roll by default.
-- Matched the Android launcher/notification artwork to the blue 8mb.local icon
-  and added an in-app Media3 preview with playback controls before Share.
+- Matched the Android launcher artwork pixel-for-pixel to the installed desktop
+  icon, with transparent safe-area padding that preserves its rounded-square
+  silhouette under OEM launcher masks, and added an in-app Media3 preview with
+  playback controls before Share.
 - Added native Linux ARM64 Docker builds, Compose configuration, CI artifacts,
   and a guarded multi-architecture manifest publishing workflow.
 
