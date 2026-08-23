@@ -47,6 +47,10 @@ class PhysicalHardwareCompressionTest {
     fun syntheticVideoUsesHardwareMediaCodecAndProducesPlayableMp4() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
+        composeRule.activity.apply {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
         val iconResource = context.resources.getResourceName(context.applicationInfo.icon)
         assertTrue("Installed app is not using the 8mb.local launcher icon: $iconResource", iconResource.endsWith(":mipmap/ic_launcher"))
         assumeTrue("Camera-roll workflow test requires Android 10+", Build.VERSION.SDK_INT >= 29)

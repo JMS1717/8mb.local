@@ -55,6 +55,19 @@ foreach ($apk in @($appApk, $testApk)) {
     if ($LASTEXITCODE -ne 0) { throw "APK installation failed: $apk" }
 }
 
+# A fresh install can place Android's notification-permission activity over
+# MainActivity before Compose attaches. The shell grant keeps this fully
+# unattended and also ensures the foreground-service notification is visible.
+if ($sdk -ge 33) {
+    & $adbPath -s $Serial shell pm grant $package android.permission.POST_NOTIFICATIONS
+    if ($LASTEXITCODE -ne 0) { throw 'Could not grant notification permission for the physical smoke test.' }
+}
+& $adbPath -s $Serial shell input keyevent KEYCODE_WAKEUP | Out-Null
+& $adbPath -s $Serial shell wm dismiss-keyguard | Out-Null
+& $adbPath -s $Serial shell input keyevent KEYCODE_HOME | Out-Null
+& $adbPath -s $Serial shell am force-stop $package | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Could not reset the app before the physical smoke test.' }
+
 foreach ($class in @($audioTestClass, $testClass)) {
     $instrumentation = & $adbPath -s $Serial shell am instrument -w -r -e class $class $runner 2>&1 | Out-String
     $instrumentation | Write-Host
