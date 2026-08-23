@@ -16,9 +16,15 @@ if [[ "$encoder_inventory" != *h264_videotoolbox* ]] || [[ "$encoder_inventory" 
   echo "FFmpeg must expose H.264 and HEVC VideoToolbox encoders." >&2
   exit 1
 fi
-"$ffmpeg_path" -y -hide_banner -loglevel error \
+if ! "$ffmpeg_path" -y -hide_banner -loglevel error \
   -f lavfi -i color=black:s=256x256:d=0.1:r=1 \
-  -c:v h264_videotoolbox -allow_sw 0 -frames:v 1 -f null -
+  -c:v h264_videotoolbox -allow_sw 0 -frames:v 1 -f null -; then
+  if [[ "${MACOS_REQUIRE_HARDWARE_PROBE:-1}" == "1" ]]; then
+    echo 'VideoToolbox hardware initialization failed.' >&2
+    exit 1
+  fi
+  echo '::warning::Hosted runner did not expose a VideoToolbox compression session; package validation continues without claiming a hardware encode.' >&2
+fi
 
 pushd "$repo_root/frontend" >/dev/null
 npm ci --no-audit --no-fund

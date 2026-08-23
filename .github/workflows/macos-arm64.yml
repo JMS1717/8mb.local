@@ -98,6 +98,10 @@ jobs:
           MACOS_SIGNING_IDENTITY: ${{ steps.release_signing.outputs.identity || '-' }}
           APPLE_NOTARY_PROFILE: ${{ steps.release_signing.outputs.profile }}
           APPLE_NOTARY_KEYCHAIN: ${{ steps.release_signing.outputs.keychain }}
+          # GitHub's hosted Apple Silicon VMs can reject real VideoToolbox
+          # sessions even when the native encoders are present. Real/local
+          # builds retain the strict default in macos/build.sh.
+          MACOS_REQUIRE_HARDWARE_PROBE: '0'
         run: bash macos/build.sh
 
       - name: Smoke bundled executable and version

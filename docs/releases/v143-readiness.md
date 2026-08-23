@@ -6,6 +6,9 @@ or creating a GitHub release.
 ## Required validation
 
 - [ ] Pull request checks pass: shared tests, frontend, Android, and macOS ARM64.
+- [ ] Before advertising verified macOS hardware acceleration, run the default
+      strict `macos/build.sh` probe on a real Apple Silicon Mac; hosted CI does
+      not claim a VideoToolbox compression session.
 - [ ] Windows x64 and native ARM64 release workflow passes install and runtime smoke.
 - [ ] Docker amd64 and native arm64 end-to-end workflow passes.
 - [ ] Android physical smoke records a hardware encoder and publishes a playable
