@@ -10,7 +10,10 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
+import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
 import android.os.Environment
 import android.os.Build
 import android.provider.MediaStore
@@ -55,6 +58,7 @@ class PhysicalHardwareCompressionTest {
         }
         val iconResource = context.resources.getResourceName(context.applicationInfo.icon)
         assertTrue("Installed app is not using the 8mb.local launcher icon: $iconResource", iconResource.endsWith(":mipmap/ic_launcher"))
+        verifyInstalledAdaptiveIcon(context)
         assumeTrue("Camera-roll workflow test requires Android 10+", Build.VERSION.SDK_INT >= 29)
         val workingCandidates = CodecPriority.qualityOrder.associateWith(HardwareCodecSelector::candidates)
         val workingMimes = workingCandidates.filterValues { it.isNotEmpty() }.keys
@@ -182,6 +186,28 @@ class PhysicalHardwareCompressionTest {
             context.contentResolver.delete(inputUri, null, null)
             context.contentResolver.delete(outputUri, null, null)
         }
+    }
+
+    private fun verifyInstalledAdaptiveIcon(context: Context) {
+        val icon = context.packageManager.getApplicationIcon(context.packageName)
+        assertTrue("Android 8+ must load the adaptive 8mb.local launcher icon", icon is AdaptiveIconDrawable)
+        val bitmap = Bitmap.createBitmap(512, 512, Bitmap.Config.ARGB_8888)
+        icon.setBounds(0, 0, bitmap.width, bitmap.height)
+        icon.draw(Canvas(bitmap))
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        val bluePixels = pixels.count {
+            Color.alpha(it) > 240 && Color.blue(it) > Color.red(it) + 60 && Color.blue(it) > Color.green(it)
+        }
+        val whitePixels = pixels.count {
+            Color.alpha(it) > 240 && Color.red(it) > 235 && Color.green(it) > 235 && Color.blue(it) > 235
+        }
+        assertTrue("Adaptive icon background is transparent or not the desktop blue gradient", bluePixels > pixels.size / 3)
+        assertTrue("Adaptive icon is missing the desktop white 8 glyph", whitePixels > pixels.size / 200)
+        File(context.filesDir, "installed-launcher-icon.png").outputStream().use { output ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+        }
+        bitmap.recycle()
     }
 
     private fun createSyntheticH264(output: File) {
