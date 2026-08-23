@@ -1,0 +1,63 @@
+name: Build native Apple Silicon app
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'backend-api/**'
+      - 'frontend/**'
+      - 'shared/**'
+      - 'worker/**'
+      - 'windows/desktop_app.py'
+      - 'macos/**'
+      - 'VERSION'
+      - '.github/workflows/macos-arm64.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install FFmpeg
+        run: brew install ffmpeg
+
+      - name: Run Python tests
+        run: |
+          python -m pip install -r requirements.txt pytest
+          python -m pytest worker/tests -q
+          python -m pytest shared/tests -q
+          PYTHONPATH="$PWD:$PWD/backend-api" python -m pytest backend-api/tests -q
+          python -m pytest tests -q
+
+      - name: Build and probe the Apple Silicon app
+        env:
+          MACOS_SIGNING_IDENTITY: '-'
+        run: bash macos/build.sh
+
+      - name: Smoke bundled executable and version
+        run: |
+          dist/8mblocal.app/Contents/MacOS/8mblocal --version
+          file dist/8mblocal.app/Contents/MacOS/8mblocal | grep arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 8mblocal-macos-arm64
+          path: |
+            dist/8mblocal.app
+            dist/8mblocal_*_macos_arm64.dmg
+            dist/8mblocal_*_macos_arm64.dmg.sha256
+          if-no-files-found: error

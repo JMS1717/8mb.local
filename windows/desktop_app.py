@@ -1,4 +1,4 @@
-"""Launch the full 8mb.local web application as a local Windows desktop app.
+"""Launch the full 8mb.local web application as a native desktop app.
 
 The browser UI, FastAPI routes, worker task functions, and FFmpeg command
 construction are shared with Docker.  Only Redis/Celery are replaced by the
@@ -22,7 +22,7 @@ from typing import Any
 from pathlib import Path
 
 # Generated from the root VERSION file by scripts/set-version.ps1.
-DESKTOP_VERSION = "142.0.0.0"
+DESKTOP_VERSION = "143.0.0.0"
 
 
 def _bundle_root() -> Path:
@@ -32,6 +32,8 @@ def _bundle_root() -> Path:
 
 
 def _default_data_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "8mb.local"
     base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
     if base:
         return Path(base) / "8mb.local"
@@ -232,9 +234,18 @@ def _wait_and_open_browser(url: str, timeout: float = 30.0) -> None:
 def _show_native_error(message: str) -> None:
     """Surface startup failures from the windowed executable."""
     try:
-        import ctypes
+        if sys.platform == "darwin":
+            import subprocess
 
-        ctypes.windll.user32.MessageBoxW(0, message, "8mb.local", 0x10)
+            escaped = message.replace("\\", "\\\\").replace('"', '\\"')
+            subprocess.run(
+                ["osascript", "-e", f'display alert "8mb.local" message "{escaped}" as critical'],
+                check=False,
+            )
+        else:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(0, message, "8mb.local", 0x10)
     except Exception:
         logging.getLogger(__name__).error(message)
 
@@ -287,9 +298,8 @@ def main(argv: list[str] | None = None) -> int:
             server.should_exit = True
         return 0
 
-    # The Windows release uses the installed Edge WebView2 runtime to provide
-    # a normal application window. The API and frontend remain the same code
-    # served by Docker; this is intentionally only a thin desktop shell.
+    # Windows uses Edge WebView2; macOS uses the system Cocoa/WebKit backend.
+    # The API and frontend remain the same code served by Docker.
     server_thread = threading.Thread(target=server.run, name="8mblocal-server", daemon=True)
     server_thread.start()
     if not _wait_until_ready(url):
@@ -309,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
             min_size=(760, 600),
             text_select=True,
         )
-        webview.start(gui="edgechromium", debug=False)
+        webview.start(gui="cocoa" if sys.platform == "darwin" else "edgechromium", debug=False)
     except (ImportError, RuntimeError, OSError) as exc:
         # Do not leave an invisible server running indefinitely after an
         # automatic browser fallback. Users who intentionally want browser
@@ -317,8 +327,8 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger(__name__).error("Native window unavailable: %s", exc)
         _show_native_error(
             "8mb.local could not open its native window. The local server "
-            "has been stopped. Reinstall Microsoft Edge WebView2, or launch "
-            "8mblocal.exe --browser from a terminal."
+            "has been stopped. Reinstall the system web runtime, or launch "
+            "the app with --browser from a terminal."
         )
     except KeyboardInterrupt:
         pass

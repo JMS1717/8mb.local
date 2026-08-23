@@ -8,10 +8,33 @@ permissions:
 
 jobs:
   build-windows-exe:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-latest
+            installer: 8mblocal-Setup.exe
+          - architecture: arm64
+            runner: windows-11-arm
+            installer: 8mblocal-Setup-arm64.exe
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Set up native Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: ${{ matrix.architecture }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Read and verify shared version
         id: version
@@ -30,7 +53,7 @@ jobs:
 
       - name: Build, install, and exercise the release
         shell: pwsh
-        run: .\windows\test-release.ps1 -Build -Install -ExpectedVersion '${{ steps.version.outputs.full }}'
+        run: .\windows\test-release.ps1 -Build -Install -Architecture '${{ matrix.architecture }}' -ExpectedVersion '${{ steps.version.outputs.full }}'
 
       - name: Build Microsoft Store MSIX
         shell: pwsh
@@ -40,20 +63,21 @@ jobs:
             -PackageIdentityName 'jms1717.8mb.local' `
             -Publisher 'CN=AAE66F20-996E-4A3C-B08E-182952BAD9F7' `
             -PublisherDisplayName 'jms1717' `
+            -Architecture '${{ matrix.architecture }}' `
             -StoreSubmission
 
       - name: Upload desktop installer and executable
         uses: actions/upload-artifact@v4
         with:
-          name: 8mblocal-windows
+          name: 8mblocal-windows-${{ matrix.architecture }}
           path: |
             dist/8mblocal.exe
-            dist/8mblocal-Setup.exe
+            dist/${{ matrix.installer }}
           if-no-files-found: error
 
       - name: Upload unsigned Store-submission MSIX separately
         uses: actions/upload-artifact@v4
         with:
-          name: 8mblocal-msix-store-submission
-          path: dist/8mblocal_${{ steps.version.outputs.full }}_x64.msix
+          name: 8mblocal-msix-store-submission-${{ matrix.architecture }}
+          path: dist/8mblocal_${{ steps.version.outputs.full }}_${{ matrix.architecture }}.msix
           if-no-files-found: error

@@ -65,12 +65,16 @@ if ($configText -and $configText -notmatch 'APP_VERSION:\s*str\s*=\s*Field\(defa
 $systemText = Require-Text (Join-RepoPath @('backend-api', 'app', 'routers', 'system.py')) 'return\s+\{"version":\s*settings\.APP_VERSION\}' 'Backend version endpoint'
 $pageText = Require-Text (Join-RepoPath @('frontend', 'src', 'routes', '+page.svelte')) 'generated-version' 'Frontend UI version import'
 
-$dockerfilePath = Join-RepoPath @('Dockerfile')
-$dockerText = Require-Text $dockerfilePath 'ARG\s+BUILD_VERSION' 'Docker build version argument'
-if ($dockerText -and $dockerText -notmatch ('(?m)^\s*ARG\s+BUILD_VERSION\s*=\s*' + [regex]::Escape($FullVersion) + '\s*\r?$')) {
-    Fail 'Dockerfile BUILD_VERSION default is not synchronized with VERSION.'
+foreach ($dockerName in @('Dockerfile', 'Dockerfile.arm64')) {
+    $dockerfilePath = Join-RepoPath @($dockerName)
+    if (Test-Path -LiteralPath $dockerfilePath) {
+        $dockerText = Require-Text $dockerfilePath 'ARG\s+BUILD_VERSION' "$dockerName build version argument"
+        if ($dockerText -and $dockerText -notmatch ('(?m)^\s*ARG\s+BUILD_VERSION\s*=\s*' + [regex]::Escape($FullVersion) + '\s*\r?$')) {
+            Fail "$dockerName BUILD_VERSION default is not synchronized with VERSION."
+        }
+    }
 }
-foreach ($composeName in @('docker-compose.yml', 'docker-compose.cpu.yml', 'docker-compose.vaapi.yml')) {
+foreach ($composeName in @('docker-compose.yml', 'docker-compose.cpu.yml', 'docker-compose.vaapi.yml', 'docker-compose.arm64.yml')) {
     $composePath = Join-RepoPath @($composeName)
     if (Test-Path -LiteralPath $composePath) {
         $composeText = [IO.File]::ReadAllText($composePath)
@@ -79,6 +83,20 @@ foreach ($composeName in @('docker-compose.yml', 'docker-compose.cpu.yml', 'dock
             Fail ($composeName + ' BUILD_VERSION fallback is not synchronized with VERSION.')
         }
     }
+}
+
+$androidGradle = Join-RepoPath @('android', 'app', 'build.gradle.kts')
+if (Test-Path -LiteralPath $androidGradle) {
+    $androidText = [IO.File]::ReadAllText($androidGradle)
+    $expectedAndroidCode = ([int64]$Parts[0] * 1000000) + ([int64]$Parts[1] * 10000) + ([int64]$Parts[2] * 100) + [int64]$Parts[3]
+    if ($androidText -notmatch ('(?m)^\s*versionCode\s*=\s*' + $expectedAndroidCode + '\s*$')) {
+        Fail "Android versionCode does not match VERSION: expected $expectedAndroidCode."
+    }
+    if ($androidText -notmatch ('(?m)^\s*versionName\s*=\s*"' + [regex]::Escape($DisplayVersion) + '"\s*$')) {
+        Fail "Android versionName does not match VERSION: expected $DisplayVersion."
+    }
+    $androidEngine = Join-RepoPath @('android', 'app', 'src', 'main', 'java', 'com', 'jms1717', 'eightmblocal', 'compression', 'CompressionEngine.kt')
+    $engineText = Require-Text $androidEngine ('\.put\("version",\s*"' + [regex]::Escape($DisplayVersion) + '"\)') 'Android diagnostic version'
 }
 
 $workflowRoot = Join-RepoPath @('.github', 'workflows')

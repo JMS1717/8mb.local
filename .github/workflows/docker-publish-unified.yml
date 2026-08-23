@@ -8,7 +8,19 @@ on:
 
 jobs:
   build-and-verify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-latest
+            dockerfile: ./Dockerfile
+            platform: linux/amd64
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+            dockerfile: ./Dockerfile.arm64
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,15 +72,23 @@ jobs:
       # This is deliberately a non-publishing compatibility gate. Publishing
       # must be performed by a future release workflow only after required
       # Windows artifacts and Store-package validation have passed.
-      - name: Build unified container (no push)
+      - name: Build native container (no push)
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
+          file: ${{ matrix.dockerfile }}
           push: false
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           tags: ${{ steps.taglist.outputs.tags }}
+          outputs: type=oci,dest=/tmp/8mblocal-${{ matrix.architecture }}.tar
           build-args: |
             BUILD_VERSION=${{ steps.vars.outputs.app_version }}
             BUILD_COMMIT=${{ github.sha }}
             BUILD_TIMESTAMP=${{ steps.vars.outputs.build_timestamp }}
+
+      - name: Upload native OCI image
+        uses: actions/upload-artifact@v4
+        with:
+          name: 8mblocal-container-${{ matrix.architecture }}
+          path: /tmp/8mblocal-${{ matrix.architecture }}.tar
+          if-no-files-found: error

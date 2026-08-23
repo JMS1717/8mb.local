@@ -45,6 +45,8 @@ _VALID_VIDEO_CODECS = frozenset({
     "av1_qsv", "hevc_qsv", "h264_qsv",
     "av1_vaapi", "hevc_vaapi", "h264_vaapi",
     "av1_amf", "hevc_amf", "h264_amf",
+    "av1_mf", "hevc_mf", "h264_mf",
+    "hevc_videotoolbox", "h264_videotoolbox",
     "libx264", "libx265", "libsvtav1", "libaom-av1",
 })
 _VALID_AUDIO_CODECS = frozenset({"libopus", "aac", "none"})

@@ -5,8 +5,8 @@ patterns live here so that they can be imported consistently from any module
 without circular dependencies.
 
 Supported hardware acceleration: NVIDIA NVENC, Intel QSV (via VAAPI), Linux
-VAAPI (Intel/AMD), and Windows AMD AMF. Systems without a working hardware
-encoder fall back to CPU software encoders.
+VAAPI (Intel/AMD), Windows Media Foundation/AMD AMF, and macOS VideoToolbox.
+Systems without a working hardware encoder fall back to CPU software encoders.
 """
 from __future__ import annotations
 
@@ -33,6 +33,19 @@ H264_AMF = "h264_amf"
 HEVC_AMF = "hevc_amf"
 AV1_AMF = "av1_amf"
 
+# Windows Media Foundation. These encoders are available in current FFmpeg
+# builds on both x64 and ARM64 and must be forced into hardware mode: without
+# ``-hw_encoding 1`` FFmpeg is allowed to silently choose a software MFT.
+H264_MF = "h264_mf"
+HEVC_MF = "hevc_mf"
+AV1_MF = "av1_mf"
+
+# macOS VideoToolbox (native on Apple Silicon and Intel Macs). FFmpeg's
+# ``allow_sw`` option is disabled by the command mapper so a successful probe
+# means a real hardware session was created.
+H264_VIDEOTOOLBOX = "h264_videotoolbox"
+HEVC_VIDEOTOOLBOX = "hevc_videotoolbox"
+
 # CPU / software encoders
 LIBX264 = "libx264"
 LIBX265 = "libx265"
@@ -46,12 +59,18 @@ LIBAOM_AV1 = "libaom-av1"
 # ---------------------------------------------------------------------------
 # Encoder priority order per codec family (NVENC → QSV → VAAPI → CPU)
 # ---------------------------------------------------------------------------
-H264_PRIORITY: list[str] = [H264_NVENC, H264_QSV, H264_AMF, H264_VAAPI, LIBX264]
-HEVC_PRIORITY: list[str] = [HEVC_NVENC, HEVC_QSV, HEVC_AMF, HEVC_VAAPI, LIBX265]
+H264_PRIORITY: list[str] = [
+    H264_NVENC, H264_QSV, H264_AMF, H264_MF, H264_VIDEOTOOLBOX,
+    H264_VAAPI, LIBX264,
+]
+HEVC_PRIORITY: list[str] = [
+    HEVC_NVENC, HEVC_QSV, HEVC_AMF, HEVC_MF, HEVC_VIDEOTOOLBOX,
+    HEVC_VAAPI, LIBX265,
+]
 # SVT-AV1 is the only automatic software AV1 path.  libaom-av1 remains a
 # legacy constant solely so old saved/API values can be diagnosed safely; it
 # must never be selected by hardware detection or an automatic fallback.
-AV1_PRIORITY: list[str] = [AV1_NVENC, AV1_QSV, AV1_AMF, AV1_VAAPI, SVT_AV1]
+AV1_PRIORITY: list[str] = [AV1_NVENC, AV1_QSV, AV1_AMF, AV1_MF, AV1_VAAPI, SVT_AV1]
 
 CODEC_PRIORITY: dict[str, list[str]] = {
     "h264": H264_PRIORITY,
@@ -75,6 +94,11 @@ CPU_FALLBACK: dict[str, str] = {
     H264_AMF: LIBX264,
     HEVC_AMF: LIBX265,
     AV1_AMF: SVT_AV1,
+    H264_MF: LIBX264,
+    HEVC_MF: LIBX265,
+    AV1_MF: SVT_AV1,
+    H264_VIDEOTOOLBOX: LIBX264,
+    HEVC_VIDEOTOOLBOX: LIBX265,
 }
 
 # All known hardware encoder names (for quick membership checks)
@@ -91,6 +115,10 @@ CPU_ENCODERS: frozenset[str] = frozenset({LIBX264, LIBX265, SVT_AV1})
 QSV_ENCODERS: frozenset[str] = frozenset({H264_QSV, HEVC_QSV, AV1_QSV})
 VAAPI_ENCODERS: frozenset[str] = frozenset({H264_VAAPI, HEVC_VAAPI, AV1_VAAPI})
 AMF_ENCODERS: frozenset[str] = frozenset({H264_AMF, HEVC_AMF, AV1_AMF})
+MF_ENCODERS: frozenset[str] = frozenset({H264_MF, HEVC_MF, AV1_MF})
+VIDEOTOOLBOX_ENCODERS: frozenset[str] = frozenset(
+    {H264_VIDEOTOOLBOX, HEVC_VIDEOTOOLBOX}
+)
 
 # ---------------------------------------------------------------------------
 # Preset mapping

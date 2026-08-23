@@ -1,12 +1,19 @@
 [CmdletBinding()]
 param(
     [string]$Version,
-    [string]$OutputDir
+    [string]$OutputDir,
+    [ValidateSet('x64', 'arm64')]
+    [string]$Architecture
 )
 
 $ErrorActionPreference = 'Stop'
 $RepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $VersionPath = Join-Path $RepoRoot 'VERSION'
+
+if (-not $PSBoundParameters.ContainsKey('Architecture')) {
+    $nativeArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    $Architecture = if ($nativeArchitecture -eq 'arm64') { 'arm64' } else { 'x64' }
+}
 
 if (-not $PSBoundParameters.ContainsKey('Version')) {
     if (-not (Test-Path -LiteralPath $VersionPath -PathType Leaf)) {
@@ -28,28 +35,46 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 function Resolve-Python {
+    $candidates = @()
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -ne $python) {
+        $candidates += [pscustomobject]@{ Path = $python.Source; Args = @() }
+    }
     $launcher = Get-Command py -ErrorAction SilentlyContinue
     if ($null -ne $launcher) {
         foreach ($candidate in @('3.13', '3.12', '3.11')) {
-            & $launcher.Source "-$candidate" '-c' 'import sys' 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                return [pscustomobject]@{ Path = $launcher.Source; Args = @("-$candidate") }
-            }
+            $candidates += [pscustomobject]@{ Path = $launcher.Source; Args = @("-$candidate") }
         }
     }
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($null -eq $python) {
-        throw 'A supported Python 3.11, 3.12, or 3.13 interpreter is required.'
+
+    foreach ($candidate in $candidates) {
+        $probeArgs = @($candidate.Args + @(
+            '-c',
+            'import platform,sys; print(f"{sys.version_info.major}.{sys.version_info.minor}|{platform.machine().lower()}")'
+        ))
+        $details = (& $candidate.Path @probeArgs 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or $details -notmatch '^(3\.11|3\.12|3\.13)\|(.+)$') {
+            continue
+        }
+        $machine = $Matches[2]
+        $matchesTarget = if ($Architecture -eq 'arm64') {
+            $machine -in @('arm64', 'aarch64')
+        } else {
+            $machine -in @('amd64', 'x86_64')
+        }
+        if ($matchesTarget) {
+            return $candidate
+        }
     }
-    $majorMinor = (& $python.Source -c 'import sys; print(str(sys.version_info.major) + chr(46) + str(sys.version_info.minor))' | Out-String).Trim()
-    if ($majorMinor -notin @('3.11', '3.12', '3.13')) {
-        throw "Unsupported Python interpreter $majorMinor. Use Python 3.11, 3.12, or 3.13."
-    }
-    return [pscustomobject]@{ Path = $python.Source; Args = @() }
+    throw "A native $Architecture Python 3.11, 3.12, or 3.13 interpreter is required."
 }
 
 $Python = Resolve-Python
 Write-Host "Using Python: $($Python.Path) $($Python.Args -join ' ')"
+$pythonArchitecture = (& $Python.Path @($Python.Args + @('-c', 'import platform; print(platform.machine().lower())')) | Out-String).Trim()
+if ($Architecture -eq 'arm64' -and $pythonArchitecture -notin @('arm64', 'aarch64')) {
+    throw "A native ARM64 Python is required for an ARM64 PyInstaller build; found '$pythonArchitecture'."
+}
 
 function Invoke-Python {
     param([string[]]$Arguments)
@@ -59,19 +84,14 @@ function Invoke-Python {
     }
 }
 
-function Resolve-SevenZip {
-    $command = Get-Command 7z.exe -ErrorAction SilentlyContinue
-    if ($null -ne $command) { return $command.Source }
-    $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
-    @(
-        (Join-Path $env:ProgramFiles '7-Zip\7z.exe')
-        (Join-Path $programFilesX86 '7-Zip\7z.exe')
-        (Join-Path $env:LOCALAPPDATA 'Programs\7-Zip\7z.exe')
-    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
-}
-
 function Ensure-FfmpegBundle {
-    $binDir = Join-Path $PSScriptRoot 'ffmpeg\bin'
+    param([ValidateSet('x64', 'arm64')][string]$TargetArchitecture)
+
+    $binDir = if ($TargetArchitecture -eq 'arm64') {
+        Join-Path $PSScriptRoot 'ffmpeg\arm64\bin'
+    } else {
+        Join-Path $PSScriptRoot 'ffmpeg\bin'
+    }
     $ffmpegPath = Join-Path $binDir 'ffmpeg.exe'
     $ffprobePath = Join-Path $binDir 'ffprobe.exe'
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
@@ -80,32 +100,64 @@ function Ensure-FfmpegBundle {
         -not (Test-Path -LiteralPath $ffprobePath -PathType Leaf)
     if (-not $needsDownload) {
         $encoders = (& $ffmpegPath -hide_banner -encoders 2>&1 | Out-String)
-        $needsDownload = $encoders -notmatch '\blibsvtav1\b'
+        $needsDownload = $encoders -notmatch '\blibsvtav1\b' -or
+            $encoders -notmatch '\bh264_mf\b'
     }
     if (-not $needsDownload) {
         return [pscustomobject]@{ Ffmpeg = $ffmpegPath; Ffprobe = $ffprobePath }
     }
 
-    $sevenZip = Resolve-SevenZip
-    if (-not $sevenZip) {
-        throw '7-Zip is required to obtain the bundled FFmpeg build with libsvtav1. Install 7-Zip or place tested ffmpeg.exe and ffprobe.exe in windows\ffmpeg\bin.'
+    if ($TargetArchitecture -eq 'arm64') {
+        # Immutable BtbN native Windows ARM64 build. The digest is the value
+        # published with this exact GitHub release asset.
+        $archive = Join-Path $env:TEMP '8mblocal-ffmpeg-winarm64.zip'
+        $extractDir = Join-Path $env:TEMP ('8mblocal-ffmpeg-arm64-' + [guid]::NewGuid().ToString('N'))
+        $uri = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-22-12-58/ffmpeg-n8.1.2-44-g7c533d0f86-winarm64-gpl-8.1.zip'
+        $expectedSha256 = 'f45017b076f601f3705258ebd246648a2a35ea2c77919b3b469122676ea0d7af'
+        try {
+            Write-Host 'Downloading the pinned native Windows ARM64 FFmpeg build...'
+            Invoke-WebRequest -Uri $uri -OutFile $archive
+            $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+            if ($actualSha256 -ne $expectedSha256) {
+                throw "Downloaded ARM64 FFmpeg SHA-256 '$actualSha256' does not match the pinned build hash."
+            }
+            Expand-Archive -LiteralPath $archive -DestinationPath $extractDir -Force
+            $sourceFfmpeg = Get-ChildItem -LiteralPath $extractDir -Filter 'ffmpeg.exe' -Recurse | Select-Object -First 1
+            $sourceFfprobe = Get-ChildItem -LiteralPath $extractDir -Filter 'ffprobe.exe' -Recurse | Select-Object -First 1
+            if ($null -eq $sourceFfmpeg -or $null -eq $sourceFfprobe) {
+                throw 'The ARM64 FFmpeg archive did not contain ffmpeg.exe and ffprobe.exe.'
+            }
+            $encoders = (& $sourceFfmpeg.FullName -hide_banner -encoders 2>&1 | Out-String)
+            if ($encoders -notmatch '\blibsvtav1\b') {
+                throw 'The ARM64 FFmpeg archive does not contain libsvtav1.'
+            }
+            if ($encoders -notmatch '\bh264_mf\b') {
+                throw 'The ARM64 FFmpeg archive does not contain Media Foundation encoders.'
+            }
+            Copy-Item -LiteralPath $sourceFfmpeg.FullName -Destination $ffmpegPath -Force
+            Copy-Item -LiteralPath $sourceFfprobe.FullName -Destination $ffprobePath -Force
+        }
+        finally {
+            Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+        }
+        return [pscustomobject]@{ Ffmpeg = $ffmpegPath; Ffprobe = $ffprobePath }
     }
 
-    $archive = Join-Path $env:TEMP '8mblocal-ffmpeg-release-full.7z'
+    # Use the x64 artifact from the same immutable BtbN release as ARM64. This
+    # avoids a mutable "latest" URL and makes clean CI/local builds reproducible.
+    $archive = Join-Path $env:TEMP '8mblocal-ffmpeg-win64.zip'
     $extractDir = Join-Path $env:TEMP ('8mblocal-ffmpeg-' + [guid]::NewGuid().ToString('N'))
     try {
-        Write-Host 'Downloading the FFmpeg full build with SVT-AV1...'
-        Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z' -OutFile $archive
-        $expectedFfmpegSha256 = '4b9c814cb07a1f90d05b768ef4eb2abbf89af94bbb924df5b7dbd6e64e1e2b96'
+        Write-Host 'Downloading the pinned native Windows x64 FFmpeg build...'
+        $uri = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-22-12-58/ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip'
+        Invoke-WebRequest -Uri $uri -OutFile $archive
+        $expectedFfmpegSha256 = '1531179f3e90f1011cdb278ec34a17ed682e93a2fadda43be76163e6e70f1311'
         $actualFfmpegSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
         if ($actualFfmpegSha256 -ne $expectedFfmpegSha256) {
             throw "Downloaded FFmpeg archive SHA-256 '$actualFfmpegSha256' does not match the pinned build hash."
         }
-        New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-        & $sevenZip x $archive "-o$extractDir" -y | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            throw "7-Zip failed to extract FFmpeg (exit code $LASTEXITCODE)."
-        }
+        Expand-Archive -LiteralPath $archive -DestinationPath $extractDir -Force
         $sourceFfmpeg = Get-ChildItem -LiteralPath $extractDir -Filter 'ffmpeg.exe' -Recurse | Select-Object -First 1
         $sourceFfprobe = Get-ChildItem -LiteralPath $extractDir -Filter 'ffprobe.exe' -Recurse | Select-Object -First 1
         if ($null -eq $sourceFfmpeg -or $null -eq $sourceFfprobe) {
@@ -114,6 +166,9 @@ function Ensure-FfmpegBundle {
         $encoders = (& $sourceFfmpeg.FullName -hide_banner -encoders 2>&1 | Out-String)
         if ($encoders -notmatch '\blibsvtav1\b') {
             throw 'The FFmpeg archive does not contain libsvtav1; refusing to build without a CPU AV1 fallback.'
+        }
+        if ($encoders -notmatch '\bh264_mf\b') {
+            throw 'The FFmpeg archive does not contain Media Foundation encoders.'
         }
         Copy-Item -LiteralPath $sourceFfmpeg.FullName -Destination $ffmpegPath -Force
         Copy-Item -LiteralPath $sourceFfprobe.FullName -Destination $ffprobePath -Force
@@ -130,7 +185,7 @@ $BrandAssetsScript = Join-Path $PSScriptRoot 'brand-assets.ps1'
 $BrandDir = Join-Path $RepoRoot 'build\brand'
 $BrandIcon = Join-Path $BrandDir '8mblocal.ico'
 Write-8mbLocalBrandIco -Path $BrandIcon
-$Ffmpeg = Ensure-FfmpegBundle
+$Ffmpeg = Ensure-FfmpegBundle -TargetArchitecture $Architecture
 
 $DistDir = Join-Path $RepoRoot 'dist'
 $BuildRoot = Join-Path $env:TEMP ('8mblocal-windows-build-' + [guid]::NewGuid().ToString('N'))
@@ -228,11 +283,12 @@ try {
     }
 
     Write-Host 'Building the Inno Setup installer...'
-    & $installerPath (Join-Path $PSScriptRoot 'installer.iss')
+    $installerBaseName = if ($Architecture -eq 'arm64') { '8mblocal-Setup-arm64' } else { '8mblocal-Setup' }
+    & $installerPath "/DMyAppArchitecture=$Architecture" "/DMyAppOutputBaseFilename=$installerBaseName" (Join-Path $PSScriptRoot 'installer.iss')
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup failed with exit code $LASTEXITCODE."
     }
-    $builtInstaller = Join-Path $DistDir '8mblocal-Setup.exe'
+    $builtInstaller = Join-Path $DistDir ($installerBaseName + '.exe')
     if (-not (Test-Path -LiteralPath $builtInstaller -PathType Leaf)) {
         throw "Inno Setup did not create $builtInstaller."
     }
@@ -241,7 +297,7 @@ try {
         $resolvedOutput = [IO.Path]::GetFullPath($OutputDir)
         New-Item -ItemType Directory -Force -Path $resolvedOutput | Out-Null
         Copy-Item -LiteralPath $builtExecutable -Destination (Join-Path $resolvedOutput '8mblocal.exe') -Force
-        Copy-Item -LiteralPath $builtInstaller -Destination (Join-Path $resolvedOutput '8mblocal-Setup.exe') -Force
+        Copy-Item -LiteralPath $builtInstaller -Destination (Join-Path $resolvedOutput ($installerBaseName + '.exe')) -Force
     }
 
     Write-Host "Built $builtExecutable"

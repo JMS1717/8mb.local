@@ -9,6 +9,10 @@ param(
     [string]$ExePath = '',
     [string]$InstallerPath = '',
     [string]$ExpectedVersion = '',
+    [ValidateSet('x64', 'arm64')]
+    [string]$Architecture = 'x64',
+    [string]$SmokeVideoCodec = 'libx264',
+    [string]$CodecReportPath = '',
     [ValidateSet('all-users', 'current-user')]
     [string]$InstallMode = 'all-users',
     [switch]$UseDefaultInstallDir,
@@ -23,7 +27,8 @@ Add-Type -AssemblyName System.Net.Http
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $DistDir = Join-Path $RepoRoot 'dist'
 $DefaultExe = Join-Path $DistDir '8mblocal.exe'
-$DefaultInstaller = Join-Path $DistDir '8mblocal-Setup.exe'
+$DefaultInstallerName = if ($Architecture -eq 'arm64') { '8mblocal-Setup-arm64.exe' } else { '8mblocal-Setup.exe' }
+$DefaultInstaller = Join-Path $DistDir $DefaultInstallerName
 $VersionFile = Join-Path $RepoRoot 'VERSION'
 if ([string]::IsNullOrWhiteSpace($ExpectedVersion)) {
     if (-not (Test-Path -LiteralPath $VersionFile -PathType Leaf)) {
@@ -35,7 +40,7 @@ if ($ExpectedVersion -notmatch '^\d+\.\d+\.\d+\.\d+$') {
     throw "ExpectedVersion must be a full four-part version: $ExpectedVersion"
 }
 if ($Build) {
-    & (Join-Path $PSScriptRoot 'build.ps1')
+    & (Join-Path $PSScriptRoot 'build.ps1') -Architecture $Architecture
     if ($LASTEXITCODE -ne 0) {
         throw "windows/build.ps1 failed with exit code $LASTEXITCODE"
     }
@@ -430,8 +435,9 @@ try {
         throw "Executable not found: $Executable (run with -Build or provide -ExePath)"
     }
 
-    $Ffmpeg = Join-Path $RepoRoot 'windows\ffmpeg\bin\ffmpeg.exe'
-    $Ffprobe = Join-Path $RepoRoot 'windows\ffmpeg\bin\ffprobe.exe'
+    $FfmpegBin = if ($Architecture -eq 'arm64') { 'windows\ffmpeg\arm64\bin' } else { 'windows\ffmpeg\bin' }
+    $Ffmpeg = Join-Path $RepoRoot (Join-Path $FfmpegBin 'ffmpeg.exe')
+    $Ffprobe = Join-Path $RepoRoot (Join-Path $FfmpegBin 'ffprobe.exe')
     if (-not $SkipTranscode -and (-not (Test-Path -LiteralPath $Ffmpeg) -or -not (Test-Path -LiteralPath $Ffprobe))) {
         throw 'Bundled FFmpeg is missing; run windows\build.ps1 first or use -SkipTranscode'
     }
@@ -562,7 +568,7 @@ try {
             filename = [string]$upload.filename
             target_size_mb = 0.5
             target_video_bitrate_kbps = 300
-            video_codec = 'libx264'
+            video_codec = $SmokeVideoCodec
             audio_codec = 'aac'
             audio_bitrate_kbps = 64
             preset = 'p1'
@@ -588,6 +594,16 @@ try {
         }
         if (-not $jobDone) {
             throw "Timed out waiting for smoke-test job ${taskId}: $($lastStatus | ConvertTo-Json -Compress)"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($CodecReportPath)) {
+            $resolvedReport = [IO.Path]::GetFullPath($CodecReportPath)
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $resolvedReport) | Out-Null
+            [IO.File]::WriteAllText(
+                $resolvedReport,
+                ($lastStatus | ConvertTo-Json -Depth 8),
+                [Text.UTF8Encoding]::new($false)
+            )
+            Write-Host "Wrote codec telemetry report: $resolvedReport"
         }
 
         $OutputFile = Join-Path $MediaDir 'release-smoke-output.mp4'

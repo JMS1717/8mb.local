@@ -51,6 +51,25 @@ class TestCodecAvailability(unittest.TestCase):
 
         self.assertIn("h264_amf", response.enabled_codecs)
 
+    def test_native_platform_encoders_are_exposed_only_after_probe(self):
+        with patch.object(
+            system,
+            "get_hw_info_cached_async",
+            new=AsyncMock(return_value={
+                "type": "media_foundation",
+                "available_encoders": {"h264": "h264_mf", "hevc": "hevc_videotoolbox"},
+                "tested_encoders": {"h264_mf": True, "hevc_videotoolbox": False},
+            }),
+        ), patch.object(
+            system.settings_manager,
+            "get_codec_visibility_settings",
+            return_value={"h264_mf": True, "hevc_videotoolbox": True},
+        ):
+            response = asyncio.run(system.get_available_codecs())
+
+        self.assertIn("h264_mf", response.enabled_codecs)
+        self.assertNotIn("hevc_videotoolbox", response.enabled_codecs)
+
     def test_cpu_options_follow_the_worker_ffmpeg_listing(self):
         with patch.object(
             system,

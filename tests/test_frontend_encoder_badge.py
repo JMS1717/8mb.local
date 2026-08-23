@@ -14,6 +14,7 @@ class FrontendEncoderBadgeTests(unittest.TestCase):
             ("_qsv", "Intel Quick Sync"),
             ("_vaapi", "VAAPI hardware"),
             ("_amf", "AMD AMF"),
+            ("_mf", "Windows Media Foundation"),
             ("videotoolbox", "Apple VideoToolbox"),
         ):
             self.assertIn(token, CODECS)

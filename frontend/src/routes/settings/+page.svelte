@@ -26,6 +26,11 @@
 	h264_amf: boolean;
 	hevc_amf: boolean;
 	av1_amf: boolean;
+	h264_mf: boolean;
+	hevc_mf: boolean;
+	av1_mf: boolean;
+	h264_videotoolbox: boolean;
+	hevc_videotoolbox: boolean;
 	libx264: boolean;
 	libx265: boolean;
 	libsvtav1: boolean;
@@ -83,6 +88,11 @@
 	h264_amf: true,
 	hevc_amf: true,
 	av1_amf: true,
+	h264_mf: true,
+	hevc_mf: true,
+	av1_mf: true,
+	h264_videotoolbox: true,
+	hevc_videotoolbox: true,
 	libx264: true,
 	libx265: true,
 	libsvtav1: true,
@@ -146,6 +156,11 @@
 			h264_amf: c.h264_amf !== undefined ? !!c.h264_amf : true,
 			hevc_amf: c.hevc_amf !== undefined ? !!c.hevc_amf : true,
 			av1_amf: c.av1_amf !== undefined ? !!c.av1_amf : true,
+			h264_mf: c.h264_mf !== undefined ? !!c.h264_mf : true,
+			hevc_mf: c.hevc_mf !== undefined ? !!c.hevc_mf : true,
+			av1_mf: c.av1_mf !== undefined ? !!c.av1_mf : true,
+			h264_videotoolbox: c.h264_videotoolbox !== undefined ? !!c.h264_videotoolbox : true,
+			hevc_videotoolbox: c.hevc_videotoolbox !== undefined ? !!c.hevc_videotoolbox : true,
 			libx264: !!c.libx264,
 			libx265: !!c.libx265,
 			libsvtav1: c.libsvtav1 !== undefined ? !!c.libsvtav1 : true,
@@ -592,6 +607,23 @@
 
 	<!-- CPU Section -->
 	<div style="margin-bottom:20px">
+	  <h3 style="color:#38bdf8; font-weight:600; font-size:15px; margin-bottom:8px">Windows Media Foundation</h3>
+	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
+		<div class="switch"><input id="av1_mf" type="checkbox" bind:checked={codecSettings.av1_mf} /><label class="label" for="av1_mf" style="margin:0">AV1 (hardware MFT)</label></div>
+		<div class="switch"><input id="hevc_mf" type="checkbox" bind:checked={codecSettings.hevc_mf} /><label class="label" for="hevc_mf" style="margin:0">HEVC (hardware MFT)</label></div>
+		<div class="switch"><input id="h264_mf" type="checkbox" bind:checked={codecSettings.h264_mf} /><label class="label" for="h264_mf" style="margin:0">H.264 (hardware MFT)</label></div>
+	  </div>
+	</div>
+
+	<div style="margin-bottom:20px">
+	  <h3 style="color:#d1d5db; font-weight:600; font-size:15px; margin-bottom:8px">Apple VideoToolbox</h3>
+	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
+		<div class="switch"><input id="hevc_videotoolbox" type="checkbox" bind:checked={codecSettings.hevc_videotoolbox} /><label class="label" for="hevc_videotoolbox" style="margin:0">HEVC (VideoToolbox)</label></div>
+		<div class="switch"><input id="h264_videotoolbox" type="checkbox" bind:checked={codecSettings.h264_videotoolbox} /><label class="label" for="h264_videotoolbox" style="margin:0">H.264 (VideoToolbox)</label></div>
+	  </div>
+	</div>
+
+	<div style="margin-bottom:20px">
 	  <h3 style="color:#9ca3af; font-weight:600; font-size:15px; margin-bottom:8px">CPU (Software Encoding)</h3>
 	  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px">
 		<div class="switch">
@@ -858,6 +890,15 @@
 			<option value="av1_amf">AV1 (AMD AMF)</option>
 			<option value="hevc_amf">HEVC / H.265 (AMD AMF)</option>
 			<option value="h264_amf">H.264 (AMD AMF)</option>
+		  </optgroup>
+		  <optgroup label="Windows Media Foundation (Hardware)">
+			<option value="av1_mf">AV1 (Media Foundation)</option>
+			<option value="hevc_mf">HEVC / H.265 (Media Foundation)</option>
+			<option value="h264_mf">H.264 (Media Foundation)</option>
+		  </optgroup>
+		  <optgroup label="Apple VideoToolbox (Hardware)">
+			<option value="hevc_videotoolbox">HEVC / H.265 (VideoToolbox)</option>
+			<option value="h264_videotoolbox">H.264 (VideoToolbox)</option>
 		  </optgroup>
 		  <optgroup label="CPU (Software)">
 			<option value="libsvtav1">AV1 (SVT-AV1, fast CPU fallback)</option>

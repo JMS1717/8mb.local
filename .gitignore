@@ -8,6 +8,9 @@ Thumbs.db
 __pycache__/
 *.pyc
 .venv/
+.gradle/
+android/.gradle/
+android/local.properties
 
 # Node
 node_modules/

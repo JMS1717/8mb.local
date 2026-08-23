@@ -1,7 +1,7 @@
 /** Codec labels and groups shared by the single-file and batch screens. */
-export type CodecGroup = 'nvidia' | 'intel' | 'amd' | 'vaapi' | 'cpu';
+export type CodecGroup = 'nvidia' | 'intel' | 'amd' | 'windows' | 'apple' | 'vaapi' | 'cpu';
 
-export type EncoderKind = 'nvenc' | 'qsv' | 'vaapi' | 'amf' | 'videotoolbox' | 'cpu' | 'unknown';
+export type EncoderKind = 'nvenc' | 'qsv' | 'vaapi' | 'amf' | 'mf' | 'videotoolbox' | 'cpu' | 'unknown';
 
 export type EncoderClassification = {
   kind: EncoderKind;
@@ -25,6 +25,11 @@ export const CODEC_DEFINITIONS: CodecOption[] = [
   { value: 'av1_amf', label: 'AV1 (AMD AMF)', group: 'amd' },
   { value: 'hevc_amf', label: 'HEVC (H.265, AMD AMF)', group: 'amd' },
   { value: 'h264_amf', label: 'H.264 (AMD AMF)', group: 'amd' },
+  { value: 'av1_mf', label: 'AV1 (Windows Media Foundation)', group: 'windows' },
+  { value: 'hevc_mf', label: 'HEVC (Windows Media Foundation)', group: 'windows' },
+  { value: 'h264_mf', label: 'H.264 (Windows Media Foundation)', group: 'windows' },
+  { value: 'hevc_videotoolbox', label: 'HEVC (Apple VideoToolbox)', group: 'apple' },
+  { value: 'h264_videotoolbox', label: 'H.264 (Apple VideoToolbox)', group: 'apple' },
   { value: 'av1_vaapi', label: 'AV1 (VAAPI)', group: 'vaapi' },
   { value: 'hevc_vaapi', label: 'HEVC (H.265, VAAPI)', group: 'vaapi' },
   { value: 'h264_vaapi', label: 'H.264 (VAAPI)', group: 'vaapi' },
@@ -55,6 +60,7 @@ export function classifyEncoder(value: unknown): EncoderClassification {
   if (encoder.endsWith('_qsv')) return { kind: 'qsv', hardware: true, label: 'Intel Quick Sync' };
   if (encoder.endsWith('_vaapi')) return { kind: 'vaapi', hardware: true, label: 'VAAPI hardware' };
   if (encoder.endsWith('_amf')) return { kind: 'amf', hardware: true, label: 'AMD AMF' };
+  if (encoder.endsWith('_mf')) return { kind: 'mf', hardware: true, label: 'Windows Media Foundation' };
   if (encoder.includes('videotoolbox')) return { kind: 'videotoolbox', hardware: true, label: 'Apple VideoToolbox' };
   if (encoder.startsWith('lib') || encoder.includes('cpu')) return { kind: 'cpu', hardware: false, label: 'CPU/software' };
   return { kind: 'unknown', hardware: false, label: 'software' };
@@ -65,6 +71,8 @@ export function codecIcon(group: CodecGroup): string {
   if (group === 'intel') return '🔵';
   if (group === 'amd') return '🔴';
   if (group === 'vaapi') return '🟣';
+  if (group === 'windows') return '🪟';
+  if (group === 'apple') return '🍎';
   return '⚪';
 }
 
@@ -73,5 +81,7 @@ export function codecColor(group: string): string {
   if (group === 'intel') return '#60a5fa';
   if (group === 'amd') return '#f87171';
   if (group === 'vaapi') return '#c084fc';
+  if (group === 'windows') return '#38bdf8';
+  if (group === 'apple') return '#d1d5db';
   return '#9ca3af';
 }
