@@ -28,7 +28,7 @@ class MainActivityTest {
         composeRule.onNodeWithText("Choose video", substring = true).assertIsDisplayed()
         composeRule.onNodeWithText("Choose multiple videos", substring = true).assertIsDisplayed()
         composeRule.onNodeWithText("Target").assertIsDisplayed()
-        composeRule.onNodeWithText("Video codec").assertIsDisplayed()
+        composeRule.onNodeWithText("Video codec").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Show advanced options", substring = true).performScrollTo().performClick()
         composeRule.onNodeWithText("Frame-rate cap").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Auto audio bitrate").performScrollTo().assertIsDisplayed()
