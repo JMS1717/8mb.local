@@ -10,6 +10,12 @@ class SizePlannerTest {
         assertEquals(990_481, SizePlanner.videoBitrate(8.0, 60_000))
     }
 
+    @Test fun customAudioBitrateChangesVideoBudget() {
+        val muted = SizePlanner.videoBitrate(8.0, 60_000, audioBitrate = 0)
+        val highQualityAudio = SizePlanner.videoBitrate(8.0, 60_000, audioBitrate = 192_000)
+        assertEquals(192_000, muted - highQualityAudio)
+    }
+
     @Test fun overageToleranceIsStrictlyTwoPercent() {
         assertFalse(SizePlanner.exceedsTolerance(10_200, 10_000))
         assertTrue(SizePlanner.exceedsTolerance(10_201, 10_000))

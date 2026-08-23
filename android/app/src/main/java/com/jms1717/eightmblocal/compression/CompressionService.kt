@@ -4,11 +4,13 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.media3.common.util.UnstableApi
@@ -25,6 +27,7 @@ class CompressionService : Service(), CompressionListener {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engine: CompressionEngine? = null
     private lateinit var request: CompressionRequest
+    private var mediaStoreOutput = false
 
     override fun onCreate() {
         super.onCreate()
@@ -46,12 +49,23 @@ class CompressionService : Service(), CompressionListener {
         request = CompressionRequest(
             inputUri = input,
             outputUri = output,
-            targetMb = intent.getDoubleExtra(EXTRA_TARGET_MB, 8.0),
+            targetMb = intent.getDoubleExtra(EXTRA_TARGET_MB, AndroidDefaults.TARGET_MB),
+            videoBitrateOverride = intent.getIntExtra(EXTRA_VIDEO_KBPS, 0).takeIf { it > 0 }?.times(1000),
             videoMime = intent.getStringExtra(EXTRA_VIDEO_MIME) ?: "video/avc",
             maxHeight = intent.getIntExtra(EXTRA_MAX_HEIGHT, 0).takeIf { it > 0 },
+            autoResolution = intent.getBooleanExtra(EXTRA_AUTO_RESOLUTION, AndroidDefaults.AUTO_RESOLUTION),
+            minAutoHeight = intent.getIntExtra(EXTRA_MIN_AUTO_HEIGHT, AndroidDefaults.MIN_AUTO_HEIGHT),
+            maxFps = intent.getIntExtra(EXTRA_MAX_FPS, 0).takeIf { it > 0 },
+            audioBitrate = intent.getIntExtra(EXTRA_AUDIO_KBPS, AndroidDefaults.AUDIO_KBPS).coerceIn(32, 320) * 1000,
+            autoAudioBitrate = intent.getBooleanExtra(EXTRA_AUTO_AUDIO_BITRATE, AndroidDefaults.AUTO_AUDIO_BITRATE),
+            audioMime = intent.getStringExtra(EXTRA_AUDIO_MIME) ?: AndroidDefaults.AUDIO_MIME,
+            keepAudio = intent.getBooleanExtra(EXTRA_KEEP_AUDIO, true),
+            audioOnly = intent.getBooleanExtra(EXTRA_AUDIO_ONLY, false),
+            allowSoftwareFallback = intent.getBooleanExtra(EXTRA_ALLOW_SOFTWARE_FALLBACK, true),
             trimStartMs = intent.getLongExtra(EXTRA_TRIM_START_MS, 0L),
             trimEndMs = intent.getLongExtra(EXTRA_TRIM_END_MS, -1L).takeIf { it >= 0 },
         )
+        mediaStoreOutput = intent.getBooleanExtra(EXTRA_MEDIASTORE_OUTPUT, false)
         ServiceCompat.startForeground(
             this,
             NOTIFICATION_ID,
@@ -64,13 +78,25 @@ class CompressionService : Service(), CompressionListener {
     }
 
     override fun onProgress(percent: Int, encoder: String, hardware: Boolean) {
-        val label = if (hardware) "Hardware: $encoder" else "Software fallback: $encoder"
+        val label = when {
+            request.audioOnly -> "Audio: $encoder"
+            hardware -> "Hardware: $encoder"
+            else -> "Software fallback: $encoder"
+        }
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, notification(percent, label))
         broadcast("running", percent, label)
     }
 
     override fun onComplete(result: CompressionResult) {
+        if (mediaStoreOutput && Build.VERSION.SDK_INT >= 29) {
+            contentResolver.update(
+                result.outputUri,
+                ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) },
+                null,
+                null,
+            )
+        }
         scope.launch {
             HistoryDatabase.get(this@CompressionService).history().insert(
                 CompressionHistory(
@@ -89,7 +115,8 @@ class CompressionService : Service(), CompressionListener {
         broadcast(
             "completed",
             100,
-            "${if (result.hardwareUsed) "Hardware" else "Software"}: ${result.actualEncoder}",
+            if (request.audioOnly) "Saved audio • ${result.actualEncoder}"
+            else "Saved • ${if (result.hardwareUsed) "Hardware" else "Software"}: ${result.actualEncoder}",
             result.outputUri,
         )
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -97,12 +124,14 @@ class CompressionService : Service(), CompressionListener {
     }
 
     override fun onError(message: String) {
+        deletePendingOutput()
         broadcast("error", 0, message)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onCancelled() {
+        deletePendingOutput()
         broadcast("cancelled", 0, "Compression cancelled")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -111,6 +140,12 @@ class CompressionService : Service(), CompressionListener {
     override fun onDestroy() {
         engine = null
         super.onDestroy()
+    }
+
+    private fun deletePendingOutput() {
+        if (mediaStoreOutput && ::request.isInitialized) {
+            runCatching { contentResolver.delete(request.outputUri, null, null) }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -157,9 +192,20 @@ class CompressionService : Service(), CompressionListener {
         const val ACTION_CANCEL = "com.jms1717.eightmblocal.CANCEL"
         const val EXTRA_INPUT = "input_uri"
         const val EXTRA_OUTPUT = "output_uri"
+        const val EXTRA_MEDIASTORE_OUTPUT = "mediastore_output"
         const val EXTRA_TARGET_MB = "target_mb"
+        const val EXTRA_VIDEO_KBPS = "video_kbps"
         const val EXTRA_VIDEO_MIME = "video_mime"
         const val EXTRA_MAX_HEIGHT = "max_height"
+        const val EXTRA_AUTO_RESOLUTION = "auto_resolution"
+        const val EXTRA_MIN_AUTO_HEIGHT = "min_auto_height"
+        const val EXTRA_MAX_FPS = "max_fps"
+        const val EXTRA_AUDIO_KBPS = "audio_kbps"
+        const val EXTRA_AUTO_AUDIO_BITRATE = "auto_audio_bitrate"
+        const val EXTRA_AUDIO_MIME = "audio_mime"
+        const val EXTRA_KEEP_AUDIO = "keep_audio"
+        const val EXTRA_AUDIO_ONLY = "audio_only"
+        const val EXTRA_ALLOW_SOFTWARE_FALLBACK = "allow_software_fallback"
         const val EXTRA_TRIM_START_MS = "trim_start_ms"
         const val EXTRA_TRIM_END_MS = "trim_end_ms"
         const val EXTRA_STATE = "state"

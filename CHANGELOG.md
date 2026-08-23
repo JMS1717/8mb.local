@@ -9,6 +9,11 @@
   VideoToolbox acceleration.
 - Added a standalone Android 8+ Kotlin/Jetpack Compose app using Media3,
   MediaCodec, Room history, Storage Access Framework output, and Android share.
+- Expanded Android with a web-matched dark UI, native single/multiple Photo
+  Picker, automatic batch queue, desktop defaults and size presets, direct
+  bitrate, resolution/FPS controls, desktop auto-resolution and auto-audio
+  planners, trim, mute, Opus/AAC, audio-only M4A, automatic MediaStore save,
+  Save As, cancel, history, and share.
 - Added native Linux ARM64 Docker builds, Compose configuration, CI artifacts,
   and a guarded multi-architecture manifest publishing workflow.
 
@@ -21,6 +26,8 @@
   codecs are tried first and the encoder actually used is recorded.
 - Added physical-device smoke scripts that assert the actual encoder and
   hardware-use telemetry for Windows ARM64 and Android.
+- Android's no-touch smoke now synthesizes its own media, proves a hardware-only
+  H.264 encode, and validates desktop-default Opus audio extraction.
 
 ### Release safeguards
 
