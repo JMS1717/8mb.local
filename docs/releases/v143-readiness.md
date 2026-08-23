@@ -11,9 +11,9 @@ or creating a GitHub release.
       not claim a VideoToolbox compression session.
 - [ ] Windows x64 and native ARM64 release workflow passes install and runtime smoke.
 - [ ] Docker amd64 and native arm64 end-to-end workflow passes.
-- [ ] Android physical smoke records a hardware encoder and publishes a playable
-      result to `DCIM/8mb.local`.
-- [ ] `scripts/check-version.ps1` confirms all package versions match `VERSION`.
+- [x] Android physical smoke records a hardware encoder and publishes a playable
+      result to `DCIM/8mb.local` on both MT6835 and SM8650 ARM64 devices.
+- [x] `scripts/check-version.ps1` confirms all package versions match `VERSION`.
 - [ ] Release artifacts have SHA-256 checksums.
 
 ## Distribution credentials

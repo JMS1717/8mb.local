@@ -54,13 +54,15 @@ With an ARM64 Android device connected through ADB, run:
 
 The script builds and installs both APKs, synthesizes its own WAV and H.264
 inputs, proves a playable desktop-default Opus audio export, and sends a
-MediaStore content URI through the real foreground service for a hardware-only
-H.264 compression. It verifies playback, camera-roll publication, and actual
-encoder telemetry, then opens the app's preview UI before Share. It also checks
-the installed launcher-icon resource. It requires no taps and never reads
+MediaStore content URI through the real foreground service for hardware-only
+compression with the automatically selected codec. It verifies playback,
+camera-roll publication, and actual encoder telemetry, then opens the app's
+preview UI before Share. It also pixel-validates the installed adaptive launcher
+icon. It requires no taps and never reads
 personal media. The generated `physical-codec-report.json` is local and ignored
 by Git.
 
 Launcher PNGs are produced by the same renderer as the Windows ICO. Regenerate
-them after a brand change with `./generate-launcher-icons.ps1`; the script adds
-transparent Android safe-area padding without changing the desktop artwork.
+them after a brand change with `./generate-launcher-icons.ps1`; adaptive icons
+use the full-bleed desktop gradient behind the same white glyph so OEM masking
+cannot create a padded double tile.

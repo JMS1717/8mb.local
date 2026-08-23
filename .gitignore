@@ -13,6 +13,7 @@ android/.gradle/
 android/local.properties
 .codex-remote-attachments/
 android/physical-codec-report.json
+android/play/source-screenshots/
 
 # Node
 node_modules/

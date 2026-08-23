@@ -10,6 +10,8 @@ $runner = "$package.test/androidx.test.runner.AndroidJUnitRunner"
 $testClass = "$package.PhysicalHardwareCompressionTest"
 $audioTestClass = "$package.PhysicalAudioExtractionTest"
 $inventoryTestClass = "$package.PhysicalCodecInventoryTest"
+$uiTestClass = "$package.MainActivityTest"
+$listingScreenshotTestClass = "$package.StoreListingScreenshotTest"
 
 $adbCommand = Get-Command adb -ErrorAction SilentlyContinue
 if ($null -eq $adbCommand) {
@@ -69,7 +71,7 @@ if ($sdk -ge 33) {
 & $adbPath -s $Serial shell am force-stop $package | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not reset the app before the physical smoke test.' }
 
-foreach ($class in @($inventoryTestClass, $audioTestClass, $testClass)) {
+foreach ($class in @($uiTestClass, $inventoryTestClass, $audioTestClass, $testClass, $listingScreenshotTestClass)) {
     $instrumentation = & $adbPath -s $Serial shell am instrument -w -r -e class $class $runner 2>&1 | Out-String
     $instrumentation | Write-Host
     if ($LASTEXITCODE -ne 0 -or $instrumentation -notmatch 'OK \(1 test\)') {
@@ -98,5 +100,6 @@ if (-not $json.actual_encoder -or $json.hardware_used -ne $true) {
 }
 Write-Host "PASS ARM64 Android foreground-service compression to camera roll: $($json.actual_encoder)"
 Write-Host 'PASS Android desktop-default Opus audio extraction'
+Write-Host 'PASS Android main workflow UI and Play-listing screenshot capture'
 Write-Host "PASS working H.264/HEVC/AV1 inventory and automatic choice: $($inventoryJson.automatic_mime)"
 Write-Host "Report: $([IO.Path]::GetFullPath($ReportPath))"

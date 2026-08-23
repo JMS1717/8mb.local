@@ -1,0 +1,1 @@
+Native Android release with automatic hardware-codec detection, target-size compression, Photo Picker input, camera-roll saving, batch processing, audio extraction, in-app preview, sharing, and local history.
