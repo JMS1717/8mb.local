@@ -5,6 +5,17 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+val releaseSigningValues = mapOf(
+    "storeFile" to providers.environmentVariable("ANDROID_SIGNING_STORE_FILE").orNull,
+    "storePassword" to providers.environmentVariable("ANDROID_SIGNING_STORE_PASSWORD").orNull,
+    "keyAlias" to providers.environmentVariable("ANDROID_SIGNING_KEY_ALIAS").orNull,
+    "keyPassword" to providers.environmentVariable("ANDROID_SIGNING_KEY_PASSWORD").orNull,
+)
+val releaseSigningConfigured = releaseSigningValues.values.all { !it.isNullOrBlank() }
+if (!releaseSigningConfigured && releaseSigningValues.values.any { !it.isNullOrBlank() }) {
+    throw GradleException("Android release signing is only partially configured; provide all four ANDROID_SIGNING_* variables.")
+}
+
 android {
     namespace = "com.jms1717.eightmblocal"
     compileSdk = 36
@@ -18,6 +29,22 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = file(releaseSigningValues.getValue("storeFile")!!)
+                storePassword = releaseSigningValues.getValue("storePassword")
+                keyAlias = releaseSigningValues.getValue("keyAlias")
+                keyPassword = releaseSigningValues.getValue("keyPassword")
+            }
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            if (releaseSigningConfigured) signingConfig = signingConfigs.getByName("release")
+        }
+    }
+
     buildFeatures { compose = true }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     compileOptions {
@@ -25,6 +52,20 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+}
+
+tasks.register("verifyReleaseSigning") {
+    group = "verification"
+    description = "Fails unless the permanent Android release signing configuration is complete."
+    doLast {
+        check(releaseSigningConfigured) {
+            "Release signing is required. Configure ANDROID_SIGNING_STORE_FILE, " +
+                "ANDROID_SIGNING_STORE_PASSWORD, ANDROID_SIGNING_KEY_ALIAS, and ANDROID_SIGNING_KEY_PASSWORD."
+        }
+        check(file(releaseSigningValues.getValue("storeFile")!!).isFile) {
+            "ANDROID_SIGNING_STORE_FILE does not point to a readable keystore."
+        }
+    }
 }
 
 dependencies {

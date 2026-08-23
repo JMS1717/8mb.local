@@ -23,6 +23,8 @@
 - [Reverse Proxy Configuration](#reverse-proxy-configuration)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
+- [Privacy](#privacy)
+- [Support](#support)
 
 ## Features
 
@@ -746,6 +748,11 @@ You are free to use, share, and adapt this project for non-commercial purposes w
 ## Contributing
 
 Pull requests welcome! Please ensure Docker builds succeed and test with your GPU hardware.
+
+## Privacy
+
+The Android app processes selected media locally and does not request Internet
+access. See the full [privacy policy](PRIVACY.md).
 
 ## Support
 

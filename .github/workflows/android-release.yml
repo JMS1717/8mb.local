@@ -1,0 +1,86 @@
+name: Build signed Android release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: 'Branch, tag, or commit to build'
+        required: true
+        default: 'main'
+
+permissions:
+  contents: read
+
+jobs:
+  signed-release:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_UPLOAD_KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+      ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_STORE_PASSWORD }}
+      ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+      ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_ref }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Require and decode permanent upload key
+        shell: bash
+        run: |
+          for name in ANDROID_UPLOAD_KEYSTORE_BASE64 ANDROID_SIGNING_STORE_PASSWORD ANDROID_SIGNING_KEY_ALIAS ANDROID_SIGNING_KEY_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required repository secret is missing: $name" >&2
+              exit 1
+            fi
+          done
+          keystore="$RUNNER_TEMP/8mblocal-upload.jks"
+          printf '%s' "$ANDROID_UPLOAD_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+          echo "ANDROID_SIGNING_STORE_FILE=$keystore" >> "$GITHUB_ENV"
+
+      - name: Verify version synchronization
+        shell: pwsh
+        run: ./scripts/check-version.ps1 -RepositoryRoot $PWD
+
+      - name: Test and build signed release
+        working-directory: android
+        run: gradle verifyReleaseSigning testDebugUnitTest lintDebug assembleRelease bundleRelease
+
+      - name: Verify APK and bundle signatures
+        shell: bash
+        run: |
+          apk='android/app/build/outputs/apk/release/app-release.apk'
+          aab='android/app/build/outputs/bundle/release/app-release.aab'
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk"
+          jarsigner -verify -verbose -certs "$aab" | tee "$RUNNER_TEMP/aab-signature.txt"
+          grep -q 'jar verified.' "$RUNNER_TEMP/aab-signature.txt"
+
+      - name: Stage signed artifacts and checksums
+        shell: bash
+        run: |
+          mkdir -p dist/android-release
+          cp android/app/build/outputs/apk/release/app-release.apk dist/android-release/8mblocal-143-android.apk
+          cp android/app/build/outputs/bundle/release/app-release.aab dist/android-release/8mblocal-143-android.aab
+          cd dist/android-release
+          sha256sum 8mblocal-143-android.apk 8mblocal-143-android.aab > SHA256SUMS-android.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 8mblocal-android-signed
+          path: dist/android-release/
+          if-no-files-found: error
+          retention-days: 14

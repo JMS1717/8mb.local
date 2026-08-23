@@ -10,6 +10,49 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $VersionPath = Join-Path $RepoRoot 'VERSION'
 
+$signingPfx = $env:WINDOWS_SIGNING_PFX_FILE
+$signingPassword = $env:WINDOWS_SIGNING_PFX_PASSWORD
+$signingConfigured = -not [string]::IsNullOrWhiteSpace($signingPfx) -and
+    -not [string]::IsNullOrWhiteSpace($signingPassword)
+if (-not $signingConfigured -and
+    (-not [string]::IsNullOrWhiteSpace($signingPfx) -or -not [string]::IsNullOrWhiteSpace($signingPassword))) {
+    throw 'Windows release signing is only partially configured; provide WINDOWS_SIGNING_PFX_FILE and WINDOWS_SIGNING_PFX_PASSWORD.'
+}
+if ($signingConfigured -and -not (Test-Path -LiteralPath $signingPfx -PathType Leaf)) {
+    throw "WINDOWS_SIGNING_PFX_FILE does not point to a readable certificate: $signingPfx"
+}
+
+function Resolve-SignTool {
+    $command = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($null -ne $command) { return $command.Source }
+
+    $kitsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+    if (Test-Path -LiteralPath $kitsRoot -PathType Container) {
+        $candidate = Get-ChildItem -LiteralPath $kitsRoot -Filter signtool.exe -Recurse -File |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+        if ($null -ne $candidate) { return $candidate.FullName }
+    }
+    throw 'signtool.exe is required when Windows release signing is enabled.'
+}
+
+function Invoke-AuthenticodeSigning {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not $signingConfigured) { return }
+
+    $signTool = Resolve-SignTool
+    $timestampUrl = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_TIMESTAMP_URL)) {
+        'http://timestamp.digicert.com'
+    } else {
+        $env:WINDOWS_SIGNING_TIMESTAMP_URL
+    }
+    & $signTool sign /fd SHA256 /tr $timestampUrl /td SHA256 /f $signingPfx /p $signingPassword $Path
+    if ($LASTEXITCODE -ne 0) { throw "Authenticode signing failed for $Path." }
+    & $signTool verify /pa /v $Path
+    if ($LASTEXITCODE -ne 0) { throw "Authenticode verification failed for $Path." }
+}
+
 if (-not $PSBoundParameters.ContainsKey('Architecture')) {
     $nativeArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     $Architecture = if ($nativeArchitecture -eq 'arm64') { 'arm64' } else { 'x64' }
@@ -264,6 +307,7 @@ try {
     if (-not (Test-Path -LiteralPath $builtExecutable -PathType Leaf)) {
         throw "PyInstaller did not create $builtExecutable."
     }
+    Invoke-AuthenticodeSigning -Path $builtExecutable
 
     $installerPath = $null
     $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
@@ -292,6 +336,7 @@ try {
     if (-not (Test-Path -LiteralPath $builtInstaller -PathType Leaf)) {
         throw "Inno Setup did not create $builtInstaller."
     }
+    Invoke-AuthenticodeSigning -Path $builtInstaller
 
     if ($OutputDir) {
         $resolvedOutput = [IO.Path]::GetFullPath($OutputDir)

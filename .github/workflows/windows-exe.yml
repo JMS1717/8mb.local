@@ -2,6 +2,15 @@ name: Build native Windows executable
 
 on:
   workflow_dispatch:
+    inputs:
+      release_signing:
+        description: 'Signing mode for EXE artifacts (Store-submission MSIX stays unsigned)'
+        required: true
+        type: choice
+        default: unsigned-validation
+        options:
+          - unsigned-validation
+          - require-authenticode
 
 permissions:
   contents: read
@@ -51,6 +60,24 @@ jobs:
         shell: pwsh
         run: choco install innosetup --no-progress -y
 
+      - name: Configure Authenticode release signing
+        if: inputs.release_signing == 'require-authenticode'
+        shell: pwsh
+        env:
+          CODE_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_PFX_BASE64 }}
+          CODE_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CODE_SIGNING_PFX_BASE64)) {
+            throw 'Required repository secret is missing: WINDOWS_CODE_SIGNING_PFX_BASE64'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CODE_SIGNING_PFX_PASSWORD)) {
+            throw 'Required repository secret is missing: WINDOWS_CODE_SIGNING_PFX_PASSWORD'
+          }
+          $certificate = Join-Path $env:RUNNER_TEMP '8mblocal-code-signing.pfx'
+          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:CODE_SIGNING_PFX_BASE64))
+          "WINDOWS_SIGNING_PFX_FILE=$certificate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "WINDOWS_SIGNING_PFX_PASSWORD=$env:CODE_SIGNING_PFX_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build, install, and exercise the release
         shell: pwsh
         run: .\windows\test-release.ps1 -Build -Install -Architecture '${{ matrix.architecture }}' -ExpectedVersion '${{ steps.version.outputs.full }}'
@@ -66,6 +93,20 @@ jobs:
             -Architecture '${{ matrix.architecture }}' `
             -StoreSubmission
 
+      - name: Create SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = @(
+            'dist/8mblocal.exe',
+            'dist/${{ matrix.installer }}',
+            'dist/8mblocal_${{ steps.version.outputs.full }}_${{ matrix.architecture }}.msix'
+          )
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+            "$hash  $([IO.Path]::GetFileName($file))"
+          }
+          $lines | Set-Content -LiteralPath 'dist/SHA256SUMS-${{ matrix.architecture }}.txt' -Encoding ascii
+
       - name: Upload desktop installer and executable
         uses: actions/upload-artifact@v4
         with:
@@ -73,11 +114,14 @@ jobs:
           path: |
             dist/8mblocal.exe
             dist/${{ matrix.installer }}
+            dist/SHA256SUMS-${{ matrix.architecture }}.txt
           if-no-files-found: error
 
       - name: Upload unsigned Store-submission MSIX separately
         uses: actions/upload-artifact@v4
         with:
           name: 8mblocal-msix-store-submission-${{ matrix.architecture }}
-          path: dist/8mblocal_${{ steps.version.outputs.full }}_${{ matrix.architecture }}.msix
+          path: |
+            dist/8mblocal_${{ steps.version.outputs.full }}_${{ matrix.architecture }}.msix
+            dist/SHA256SUMS-${{ matrix.architecture }}.txt
           if-no-files-found: error

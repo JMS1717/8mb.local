@@ -63,7 +63,11 @@ rm -rf "$repo_root/dist/8mblocal.app"
 
 app_path="$repo_root/dist/8mblocal.app"
 signing_identity="${MACOS_SIGNING_IDENTITY:--}"
-codesign --force --deep --options runtime --timestamp=none --sign "$signing_identity" "$app_path"
+if [[ "$signing_identity" == "-" ]]; then
+  codesign --force --deep --options runtime --timestamp=none --sign "$signing_identity" "$app_path"
+else
+  codesign --force --deep --options runtime --timestamp --sign "$signing_identity" "$app_path"
+fi
 codesign --verify --deep --strict --verbose=2 "$app_path"
 
 dmg_stage="$build_root/dmg"
@@ -75,7 +79,16 @@ rm -f "$dmg_path"
 hdiutil create -volname '8mb.local' -srcfolder "$dmg_stage" -ov -format UDZO "$dmg_path"
 
 if [[ -n "${APPLE_NOTARY_PROFILE:-}" ]]; then
-  xcrun notarytool submit "$dmg_path" --keychain-profile "$APPLE_NOTARY_PROFILE" --wait
+  if [[ "$signing_identity" == "-" ]]; then
+    echo 'A Developer ID identity is required when notarization is enabled.' >&2
+    exit 1
+  fi
+  codesign --force --timestamp --sign "$signing_identity" "$dmg_path"
+  notary_args=(--keychain-profile "$APPLE_NOTARY_PROFILE")
+  if [[ -n "${APPLE_NOTARY_KEYCHAIN:-}" ]]; then
+    notary_args+=(--keychain "$APPLE_NOTARY_KEYCHAIN")
+  fi
+  xcrun notarytool submit "$dmg_path" "${notary_args[@]}" --wait
   xcrun stapler staple "$dmg_path"
 fi
 

@@ -23,6 +23,13 @@ frontend/build/
 # Env files
 .env
 
+# Release signing material (never commit private keys)
+*.jks
+*.keystore
+*.p12
+*.pfx
+android/keystore.properties
+
 # Local artifacts
 uploads/*
 !uploads/.gitkeep
