@@ -9,36 +9,41 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 # exact desktop artwork inside a 78% safe area so its rounded-square silhouette
 # remains visible after the OEM mask is applied.
 $targets = @(
-    @{ Density = 'mdpi'; Canvas = 48; Artwork = 38 },
-    @{ Density = 'hdpi'; Canvas = 72; Artwork = 56 },
-    @{ Density = 'xhdpi'; Canvas = 96; Artwork = 75 },
-    @{ Density = 'xxhdpi'; Canvas = 144; Artwork = 112 },
-    @{ Density = 'xxxhdpi'; Canvas = 192; Artwork = 150 }
+    @{ Density = 'mdpi'; Canvas = 48; Artwork = 38; AdaptiveCanvas = 108; AdaptiveArtwork = 66 },
+    @{ Density = 'hdpi'; Canvas = 72; Artwork = 56; AdaptiveCanvas = 162; AdaptiveArtwork = 99 },
+    @{ Density = 'xhdpi'; Canvas = 96; Artwork = 75; AdaptiveCanvas = 216; AdaptiveArtwork = 132 },
+    @{ Density = 'xxhdpi'; Canvas = 144; Artwork = 112; AdaptiveCanvas = 324; AdaptiveArtwork = 198 },
+    @{ Density = 'xxxhdpi'; Canvas = 192; Artwork = 150; AdaptiveCanvas = 432; AdaptiveArtwork = 264 }
 )
 
-foreach ($target in $targets) {
-    $outputDirectory = Join-Path $PSScriptRoot "app\src\main\res\mipmap-$($target.Density)"
+function Write-PaddedBrandPng {
+    param(
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][int]$CanvasSize,
+        [Parameter(Mandatory = $true)][int]$ArtworkSize
+    )
+
+    $outputDirectory = Split-Path -Parent $Destination
     New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
     $temporaryArtwork = Join-Path ([IO.Path]::GetTempPath()) (
         '8mblocal-android-art-' + [guid]::NewGuid().ToString('N') + '.png'
     )
     try {
-        Write-8mbLocalBrandPng -Path $temporaryArtwork -Width $target.Artwork -Height $target.Artwork
+        Write-8mbLocalBrandPng -Path $temporaryArtwork -Width $ArtworkSize -Height $ArtworkSize
         $artwork = [Drawing.Bitmap]::FromFile($temporaryArtwork)
         $canvas = New-Object Drawing.Bitmap(
-            $target.Canvas,
-            $target.Canvas,
+            $CanvasSize,
+            $CanvasSize,
             [Drawing.Imaging.PixelFormat]::Format32bppArgb
         )
         try {
-            $offset = [int](($target.Canvas - $target.Artwork) / 2)
-            for ($y = 0; $y -lt $target.Artwork; $y++) {
-                for ($x = 0; $x -lt $target.Artwork; $x++) {
+            $offset = [int](($CanvasSize - $ArtworkSize) / 2)
+            for ($y = 0; $y -lt $ArtworkSize; $y++) {
+                for ($x = 0; $x -lt $ArtworkSize; $x++) {
                     $canvas.SetPixel($x + $offset, $y + $offset, $artwork.GetPixel($x, $y))
                 }
             }
-            $destination = Join-Path $outputDirectory 'ic_launcher.png'
-            $canvas.Save($destination, [Drawing.Imaging.ImageFormat]::Png)
+            $canvas.Save($Destination, [Drawing.Imaging.ImageFormat]::Png)
         } finally {
             $canvas.Dispose()
             $artwork.Dispose()
@@ -46,6 +51,13 @@ foreach ($target in $targets) {
     } finally {
         Remove-Item -LiteralPath $temporaryArtwork -Force -ErrorAction SilentlyContinue
     }
+}
+
+foreach ($target in $targets) {
+    $legacy = Join-Path $PSScriptRoot "app\src\main\res\mipmap-$($target.Density)\ic_launcher.png"
+    Write-PaddedBrandPng -Destination $legacy -CanvasSize $target.Canvas -ArtworkSize $target.Artwork
+    $adaptive = Join-Path $PSScriptRoot "app\src\main\res\drawable-$($target.Density)\ic_launcher_foreground.png"
+    Write-PaddedBrandPng -Destination $adaptive -CanvasSize $target.AdaptiveCanvas -ArtworkSize $target.AdaptiveArtwork
 }
 
 Write-Host 'Generated Android launcher icons from the exact desktop brand renderer.'
