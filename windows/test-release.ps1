@@ -69,6 +69,7 @@ function Write-SmokeProgress {
 }
 
 $process = $null
+$preexistingExecutablePids = @()
 $client = $null
 $installDir = $null
 $uninstaller = $null
@@ -442,6 +443,12 @@ try {
         throw 'Bundled FFmpeg is missing; run windows\build.ps1 first or use -SkipTranscode'
     }
 
+    $resolvedExecutable = [System.IO.Path]::GetFullPath($Executable)
+    $preexistingExecutablePids = @(
+        Get-CimInstance Win32_Process -Filter "Name='8mblocal.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -eq $resolvedExecutable } |
+            ForEach-Object { [int]$_.ProcessId }
+    )
     $process = Start-Process `
         -FilePath $Executable `
         -ArgumentList @('--data-dir', "`"$AppData`"", '--port', "$Port", '--no-browser') `
@@ -644,6 +651,7 @@ try {
         # attached. Stopping only the outer PyInstaller process orphans the
         # extracted server child and leaves its port open.
         & taskkill.exe /PID $process.Id /T /F *> $null
+        $global:LASTEXITCODE = 0
         $process.WaitForExit(10000) | Out-Null
         $process = $null
 
@@ -728,25 +736,45 @@ public static class NativeWindowClose {
         $env:AUTH_USER = $previousAuthUser
         $env:AUTH_PASS = $previousAuthPass
     }
-    if ($null -ne $process) {
-        # A windowless PyInstaller process may detach from the PowerShell
-        # process object before the request finishes.  Verify both PID and
-        # executable path, then terminate only the process tree started by
-        # this smoke test so an unrelated 8mblocal instance is untouched.
-        try {
-            $candidate = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)" -ErrorAction SilentlyContinue
-            $resolvedExecutable = if ($Executable) { [System.IO.Path]::GetFullPath($Executable) } else { '' }
-            if ($null -ne $candidate -and $candidate.ExecutablePath -eq $resolvedExecutable) {
-                & taskkill.exe /PID $process.Id /T /F *> $null
+    if ($Executable) {
+        # PyInstaller one-file mode can leave an extracted child after the
+        # launcher Process object exits. Stop every new process using this
+        # exact executable path, while preserving any instance that existed
+        # before this isolated smoke run.
+        $resolvedExecutable = [System.IO.Path]::GetFullPath($Executable)
+        for ($attempt = 0; $attempt -lt 40; $attempt++) {
+            $ownedProcesses = @(
+                Get-CimInstance Win32_Process -Filter "Name='8mblocal.exe'" -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.ExecutablePath -eq $resolvedExecutable -and
+                        [int]$_.ProcessId -notin $preexistingExecutablePids
+                    }
+            )
+            if ($ownedProcesses.Count -eq 0) { break }
+            foreach ($owned in $ownedProcesses) {
+                & taskkill.exe /PID $owned.ProcessId /T /F *> $null
+                $global:LASTEXITCODE = 0
             }
-        } catch {
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 250
+        }
+        $remainingOwned = @(
+            Get-CimInstance Win32_Process -Filter "Name='8mblocal.exe'" -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.ExecutablePath -eq $resolvedExecutable -and
+                    [int]$_.ProcessId -notin $preexistingExecutablePids
+                }
+        )
+        if ($remainingOwned.Count -gt 0) {
+            throw "Smoke-test process cleanup failed for: $resolvedExecutable"
         }
     }
     if ($null -ne $uninstaller -and (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
         $uninstallResult = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
         if ($uninstallResult.ExitCode -ne 0) {
             throw "Uninstaller exited with code $($uninstallResult.ExitCode)"
+        }
+        for ($attempt = 0; $attempt -lt 40 -and $Executable -and (Test-Path -LiteralPath $Executable); $attempt++) {
+            Start-Sleep -Milliseconds 250
         }
         if ($Executable -and (Test-Path -LiteralPath $Executable)) {
             throw "Uninstaller left the application executable behind: $Executable"
