@@ -244,6 +244,8 @@ docker compose -f docker-compose.vaapi.yml up -d --build
 3. Search for **8MB Local** and select it
 4. Click **Create** to deploy the service
 
+<img src="docs/images/easypanel_deployed.png" alt="8mb.local deployed on Easypanel" width="70%">
+
 See the [official 8mb.local template on Easypanel](https://easypanel.io/templates/8mblocal) for more details.
 
 ### Docker Compose
