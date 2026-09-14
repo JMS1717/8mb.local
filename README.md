@@ -235,6 +235,19 @@ falls back to CPU when the device cannot encode:
 docker compose -f docker-compose.vaapi.yml up -d --build
 ```
 
+### Easypanel
+
+[Easypanel](https://easypanel.io/) can deploy 8mb.local with one click using its official template, without needing to manually run Docker commands. Note that the Easypanel template runs in **CPU-only mode** (no GPU passthrough).
+
+1. Open your Easypanel dashboard and create (or open) a project
+2. Click **+ Add Service** and choose **Templates**
+3. Search for **8MB Local** and select it
+4. Click **Create** to deploy the service
+
+<img src="docs/images/easypanel_deployed.png" alt="8mb.local deployed on Easypanel" width="70%">
+
+See the [official 8mb.local template on Easypanel](https://easypanel.io/templates/8mblocal) for more details.
+
 ### Docker Compose
 
 #### NVIDIA GPU
