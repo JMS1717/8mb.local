@@ -58,6 +58,11 @@ def _default_codec_visibility() -> dict[str, bool]:
         'h264_amf': True,
         'hevc_amf': True,
         'av1_amf': True,
+        'h264_mf': True,
+        'hevc_mf': True,
+        'av1_mf': True,
+        'h264_videotoolbox': True,
+        'hevc_videotoolbox': True,
         'libx264': True,
         'libx265': True,
         'libsvtav1': True,
@@ -221,11 +226,13 @@ def _ensure_defaults() -> Dict[str, Any]:
 def _pick_initial_default(profiles: List[Dict[str, Any]]) -> str:
     """Pick the best initial default preset name from available profiles.
 
-    Priority: NVENC > QSV > AMF > VAAPI > CPU > first profile.
+    Priority: NVENC > QSV > AMF > Media Foundation > VideoToolbox > VAAPI > CPU.
     """
     codec_priority = ['av1_nvenc', 'hevc_nvenc', 'h264_nvenc',
                        'av1_qsv', 'hevc_qsv', 'h264_qsv',
                        'av1_amf', 'hevc_amf', 'h264_amf',
+                       'av1_mf', 'hevc_mf', 'h264_mf',
+                       'hevc_videotoolbox', 'h264_videotoolbox',
                        'av1_vaapi', 'hevc_vaapi', 'h264_vaapi',
                        'libsvtav1', 'libx265', 'libx264']
     for codec in codec_priority:
@@ -490,6 +497,8 @@ def update_codec_visibility_settings(settings: dict):
         'h264_qsv', 'hevc_qsv', 'av1_qsv',
         'h264_vaapi', 'hevc_vaapi', 'av1_vaapi',
         'h264_amf', 'hevc_amf', 'av1_amf',
+        'h264_mf', 'hevc_mf', 'av1_mf',
+        'h264_videotoolbox', 'hevc_videotoolbox',
         'libx264', 'libx265', 'libsvtav1', 'libaom_av1',
     }
     candidate = {

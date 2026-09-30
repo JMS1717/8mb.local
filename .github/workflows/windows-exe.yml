@@ -2,16 +2,49 @@ name: Build native Windows executable
 
 on:
   workflow_dispatch:
+    inputs:
+      release_signing:
+        description: 'Signing mode for EXE artifacts (Store-submission MSIX stays unsigned)'
+        required: true
+        type: choice
+        default: unsigned-validation
+        options:
+          - unsigned-validation
+          - require-authenticode
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build-windows-exe:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-latest
+            installer: 8mblocal-Setup.exe
+          - architecture: arm64
+            runner: windows-11-arm
+            installer: 8mblocal-Setup-arm64.exe
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Set up native Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: ${{ matrix.architecture }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Read and verify shared version
         id: version
@@ -28,9 +61,57 @@ jobs:
         shell: pwsh
         run: choco install innosetup --no-progress -y
 
+      - name: Check retained ARM64 FFmpeg release mirror
+        if: matrix.architecture == 'arm64'
+        id: arm64-input
+        shell: pwsh
+        run: |
+          try {
+            Invoke-WebRequest -Method Head -Uri 'https://github.com/JMS1717/8mb.local/releases/download/v143/8mblocal-ffmpeg-8.1.2-winarm64.zip' | Out-Null
+            'recover=false' >> $env:GITHUB_OUTPUT
+          } catch {
+            'recover=true' >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Fetch previously passing ARM64 build for prepublication recovery
+        if: matrix.architecture == 'arm64' && steps.arm64-input.outputs.recover == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 32651740165
+          name: 8mblocal-windows-arm64
+          path: ${{ runner.temp }}/validated-arm64-build
+
+      - name: Recover exact checksum-verified native ARM64 FFmpeg binaries
+        if: matrix.architecture == 'arm64' && steps.arm64-input.outputs.recover == 'true'
+        shell: pwsh
+        run: |
+          python -m pip install 'pyinstaller==6.22.2'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not install the archive reader.' }
+          python windows/recover-arm64-ffmpeg.py --source-exe '${{ runner.temp }}/validated-arm64-build/8mblocal.exe' --output-bin windows/ffmpeg/arm64/bin
+          if ($LASTEXITCODE -ne 0) { throw 'Could not recover the verified ARM64 binaries.' }
+
+      - name: Configure Authenticode release signing
+        if: inputs.release_signing == 'require-authenticode'
+        shell: pwsh
+        env:
+          CODE_SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_CODE_SIGNING_PFX_BASE64 }}
+          CODE_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGNING_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CODE_SIGNING_PFX_BASE64)) {
+            throw 'Required repository secret is missing: WINDOWS_CODE_SIGNING_PFX_BASE64'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CODE_SIGNING_PFX_PASSWORD)) {
+            throw 'Required repository secret is missing: WINDOWS_CODE_SIGNING_PFX_PASSWORD'
+          }
+          $certificate = Join-Path $env:RUNNER_TEMP '8mblocal-code-signing.pfx'
+          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:CODE_SIGNING_PFX_BASE64))
+          "WINDOWS_SIGNING_PFX_FILE=$certificate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "WINDOWS_SIGNING_PFX_PASSWORD=$env:CODE_SIGNING_PFX_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Build, install, and exercise the release
         shell: pwsh
-        run: .\windows\test-release.ps1 -Build -Install -ExpectedVersion '${{ steps.version.outputs.full }}'
+        run: .\windows\test-release.ps1 -Build -Install -Architecture '${{ matrix.architecture }}' -ExpectedVersion '${{ steps.version.outputs.full }}'
 
       - name: Build Microsoft Store MSIX
         shell: pwsh
@@ -40,20 +121,38 @@ jobs:
             -PackageIdentityName 'jms1717.8mb.local' `
             -Publisher 'CN=AAE66F20-996E-4A3C-B08E-182952BAD9F7' `
             -PublisherDisplayName 'jms1717' `
+            -Architecture '${{ matrix.architecture }}' `
             -StoreSubmission
+
+      - name: Create SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = @(
+            'dist/8mblocal.exe',
+            'dist/${{ matrix.installer }}',
+            'dist/8mblocal_${{ steps.version.outputs.full }}_${{ matrix.architecture }}.msix'
+          )
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+            "$hash  $([IO.Path]::GetFileName($file))"
+          }
+          $lines | Set-Content -LiteralPath 'dist/SHA256SUMS-${{ matrix.architecture }}.txt' -Encoding ascii
 
       - name: Upload desktop installer and executable
         uses: actions/upload-artifact@v4
         with:
-          name: 8mblocal-windows
+          name: 8mblocal-windows-${{ matrix.architecture }}
           path: |
             dist/8mblocal.exe
-            dist/8mblocal-Setup.exe
+            dist/${{ matrix.installer }}
+            dist/SHA256SUMS-${{ matrix.architecture }}.txt
           if-no-files-found: error
 
       - name: Upload unsigned Store-submission MSIX separately
         uses: actions/upload-artifact@v4
         with:
-          name: 8mblocal-msix-store-submission
-          path: dist/8mblocal_${{ steps.version.outputs.full }}_x64.msix
+          name: 8mblocal-msix-store-submission-${{ matrix.architecture }}
+          path: |
+            dist/8mblocal_${{ steps.version.outputs.full }}_${{ matrix.architecture }}.msix
+            dist/SHA256SUMS-${{ matrix.architecture }}.txt
           if-no-files-found: error

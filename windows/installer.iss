@@ -1,7 +1,13 @@
 #define MyAppName "8mb.local"
-#define MyAppVersion "142.0.0.0"
+#define MyAppVersion "143.0.0.0"
 #define MyAppPublisher "JMS1717"
 #define MyAppExeName "8mblocal.exe"
+#ifndef MyAppArchitecture
+  #define MyAppArchitecture "x64"
+#endif
+#ifndef MyAppOutputBaseFilename
+  #define MyAppOutputBaseFilename "8mblocal-Setup"
+#endif
 
 [Setup]
 AppId={{A11C4A7E-AC58-4A8A-9C45-8B10CA1A0001}
@@ -13,10 +19,11 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\8mb.local
 DefaultGroupName={#MyAppName}
 OutputDir=..\dist
-OutputBaseFilename=8mblocal-Setup
+OutputBaseFilename={#MyAppOutputBaseFilename}
 Compression=lzma
 SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed={#MyAppArchitecture}
+ArchitecturesInstallIn64BitMode={#MyAppArchitecture}
 PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=dialog commandline
 DisableProgramGroupPage=yes

@@ -4,10 +4,10 @@ Help AI coding agents be immediately productive in this repository by summarizin
 ## Big picture (quick)
 - Frontend: `frontend/` — SvelteKit app (Vite). UI uses SSE for live progress and calls backend APIs.
 - Backend API: `backend-api/app/` — FastAPI (`main.py` mounts routers). Uploads, `ffprobe`, Celery enqueue, downloads live under `routers/`.
-- Worker: `worker/app/` — Celery worker that runs `ffmpeg` encodes. Core encode flow: `tasks.py`; helpers: `encoder.py`, `hw_detect.py`, `ffmpeg_helpers.py`, `progress.py`, `startup_tests.py`. Hardware paths are NVIDIA NVENC, Intel QSV, Windows AMD AMF, and Linux VAAPI for Intel/AMD, with CPU fallback after runtime validation.
+- Worker: `worker/app/` — Celery worker that runs `ffmpeg` encodes. Core encode flow: `tasks.py`; helpers: `encoder.py`, `hw_detect.py`, `ffmpeg_helpers.py`, `progress.py`, `startup_tests.py`. Hardware paths are NVIDIA NVENC, Intel QSV, Windows AMD AMF/Media Foundation, Apple VideoToolbox, and Linux VAAPI for Intel/AMD, with CPU fallback after runtime validation.
 - Shared runtime: `shared/` — the bounded in-process Redis/Celery-compatible state used only by the native Windows desktop launcher. Keep task names, Redis key names, and progress event shapes compatible with Docker.
 - Broker / runtime: Redis (broker + pub/sub). Files stored under `uploads/` and `outputs/`.
-- Orchestration: `docker-compose.yml` (NVIDIA by default), `docker-compose.vaapi.yml` (Intel/AMD `/dev/dri`), `docker-compose.cpu.yml` (CPU-only fallback), and `supervisord.conf` show start commands and ENV patterns.
+- Orchestration: `docker-compose.yml` (NVIDIA by default), `docker-compose.vaapi.yml` (Intel/AMD `/dev/dri`), `docker-compose.cpu.yml` (CPU-only fallback), `docker-compose.arm64.yml` (generic Linux ARM64), its optional `docker-compose.arm64-vaapi.yml` hardware override, and `supervisord.conf` show start commands and ENV patterns.
 
 ## Where to look first (files that reveal behavior)
 - `README.md` — high-level architecture, GPU/CPU workflows, and Docker examples.
@@ -32,7 +32,7 @@ Help AI coding agents be immediately productive in this repository by summarizin
 ## Important conventions and patterns
 - Job/task IDs: backend generates `job_id` and worker uses Celery `task_id`. Redis keys: `job:{task.id}`, `progress:{task_id}` and `cancel:{task_id}`. Use these exact keys when integrating or debugging.
 - File naming: uploads saved to `/app/uploads` with `jobid_filename`; outputs to `/app/outputs` with `_8mblocal_{taskid}` suffix to avoid collisions.
-- Hardware detection vs tests: hardware is detected (`worker/app/hw_detect.py`) and then validated by one-frame startup tests. Encoders may be listed by ffmpeg but fail initialization — the startup cache (`ENCODER_TEST_CACHE`) and `DISABLE_STARTUP_TESTS` env control behavior.
+- Hardware detection vs tests: hardware is detected (`worker/app/hw_detect.py`) and then validated by one-frame startup tests. Encoders may be listed by FFmpeg but fail initialization — the startup cache (`ENCODER_TEST_CACHE`) and `DISABLE_STARTUP_TESTS` env control behavior. Do not remove Media Foundation's hardware-only flag or VideoToolbox's software-disabled probe.
 - Encoder mapping: requested codec → mapped encoder happens in `worker/app/hw_detect.py` and `map_codec_to_hw`. When a startup test marks an encoder unavailable, worker falls back to CPU encoders (e.g. `libx264`).
 - Progress messages: worker publishes JSON events on Redis pub/sub. Messages include `type` (`log`/`progress`/`done`/`error`) and often `task_id` and `progress` fields. The frontend expects these shapes.
 

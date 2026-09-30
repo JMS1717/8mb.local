@@ -1,0 +1,17 @@
+8mb.local compresses videos directly on your Android device. Choose one video or a batch from Android's Photo Picker, select a target size or bitrate, and save the result automatically to your camera roll.
+
+Automatic hardware acceleration
+
+The app tests the encoders that your device actually provides and automatically selects the highest-quality working hardware option. H.264, HEVC, and AV1 are offered when supported. Encode and decode capabilities are shown separately, and software fallback remains available for compatibility.
+
+Flexible output controls
+
+Choose common size targets or enter a custom target. You can also set video bitrate, output resolution, frame-rate limit, audio format and bitrate, trim points, automatic resolution, and software fallback. Audio-only extraction is available when you only need the soundtrack.
+
+Local and private
+
+Your selected media is processed entirely on your device. 8mb.local does not contain advertising, analytics, tracking, accounts, telemetry, or Internet access. It only receives access to videos you explicitly select through Android's Photo Picker.
+
+Camera-roll and sharing workflow
+
+Completed videos are saved under DCIM/8mb.local and completed audio under Music/8mb.local. Preview the finished media inside the app before opening Android's Share interface. Recent jobs remain available in local app history.

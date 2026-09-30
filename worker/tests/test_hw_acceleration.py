@@ -2,7 +2,13 @@ import unittest
 import json
 from unittest.mock import patch
 
-from worker.app.constants import H264_AMF, H264_QSV, H264_VAAPI
+from worker.app.constants import (
+    H264_AMF,
+    H264_MF,
+    H264_QSV,
+    H264_VAAPI,
+    H264_VIDEOTOOLBOX,
+)
 from worker.app.hw_detect import detect_hw_accel, map_codec_to_hw
 import worker.app.hw_detect as hw_detect
 from worker.app.startup_tests import test_encoder_init as run_encoder_init
@@ -53,6 +59,19 @@ class TestHardwareMapping(unittest.TestCase):
         self.assertEqual(encoder, H264_AMF)
         self.assertIn("-pix_fmt", flags)
         self.assertEqual(init_flags, [])
+
+    def test_media_foundation_forces_a_hardware_mft(self):
+        encoder, flags, init_flags = map_codec_to_hw(H264_MF, {})
+        self.assertEqual(encoder, H264_MF)
+        self.assertEqual(init_flags, [])
+        self.assertEqual(flags[-2:], ["-hw_encoding", "1"])
+
+    def test_videotoolbox_disallows_software_fallback(self):
+        encoder, flags, init_flags = map_codec_to_hw(H264_VIDEOTOOLBOX, {})
+        self.assertEqual(encoder, H264_VIDEOTOOLBOX)
+        self.assertEqual(init_flags, [])
+        self.assertIn("-allow_sw", flags)
+        self.assertEqual(flags[flags.index("-allow_sw") + 1], "0")
 
     @patch.object(hw_detect.os, "name", "posix")
     def test_qsv_uses_vaapi_backend_and_selected_device(self):
@@ -113,6 +132,8 @@ class TestHardwareMapping(unittest.TestCase):
         self.assertEqual(info["available_encoders"]["h264"], "h264_vaapi")
         self.assertFalse(any(call.args[0].endswith("_qsv") for call in probe.call_args_list))
 
+    @patch.object(hw_detect.os, "name", "posix")
+    @patch.object(hw_detect.sys, "platform", "linux")
     @patch("worker.app.hw_detect._check_nvidia", return_value=True)
     @patch(
         "worker.app.hw_detect.get_vaapi_devices",
@@ -159,6 +180,43 @@ class TestHardwareMapping(unittest.TestCase):
         self.assertEqual(info["type"], "amd_amf")
         self.assertEqual(info["available_encoders"]["h264"], "h264_amf")
         self.assertTrue(all(call.args[0].endswith("_amf") for call in probe.call_args_list[:3]))
+
+    @patch.object(hw_detect.os, "name", "nt")
+    @patch("worker.app.hw_detect._check_nvidia", return_value=False)
+    @patch("worker.app.hw_detect.get_vaapi_devices", return_value=[])
+    @patch(
+        "worker.app.hw_detect._encoder_list",
+        return_value="h264_mf hevc_mf av1_mf libx264 libx265 libsvtav1",
+    )
+    @patch("worker.app.hw_detect._test_encoder_on_device")
+    def test_windows_media_foundation_requires_runtime_probe(
+        self, probe, _encoders, _devices, _nvidia
+    ):
+        probe.side_effect = lambda encoder, _device: encoder.endswith("_mf")
+        info = detect_hw_accel()
+        self.assertEqual(info["type"], "media_foundation")
+        self.assertEqual(info["available_encoders"]["h264"], "h264_mf")
+        self.assertIn("media_foundation", info["available_types"])
+
+    @patch.object(hw_detect.os, "name", "posix")
+    @patch.object(hw_detect.sys, "platform", "darwin")
+    @patch("worker.app.hw_detect._check_nvidia", return_value=False)
+    @patch("worker.app.hw_detect.get_vaapi_devices", return_value=[])
+    @patch(
+        "worker.app.hw_detect._encoder_list",
+        return_value="h264_videotoolbox hevc_videotoolbox libx264 libx265 libsvtav1",
+    )
+    @patch("worker.app.hw_detect._test_encoder_on_device", return_value=True)
+    def test_macos_videotoolbox_is_runtime_probed(
+        self, probe, _encoders, _devices, _nvidia
+    ):
+        info = detect_hw_accel()
+        self.assertEqual(info["type"], "videotoolbox")
+        self.assertEqual(info["available_encoders"]["hevc"], "hevc_videotoolbox")
+        self.assertEqual(
+            [call.args[0] for call in probe.call_args_list],
+            ["h264_videotoolbox", "hevc_videotoolbox"],
+        )
 
 
 class TestHardwareFallbackHelpers(unittest.TestCase):

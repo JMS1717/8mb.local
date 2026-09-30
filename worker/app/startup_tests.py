@@ -19,7 +19,14 @@ from typing import Any, Dict, List, Tuple
 
 from shared.subprocess_utils import hidden_process_kwargs
 
-from .constants import AMF_ENCODERS, CPU_ENCODERS, QSV_ENCODERS, VAAPI_ENCODERS
+from .constants import (
+    AMF_ENCODERS,
+    CPU_ENCODERS,
+    MF_ENCODERS,
+    QSV_ENCODERS,
+    VAAPI_ENCODERS,
+    VIDEOTOOLBOX_ENCODERS,
+)
 from .qsv_filters import qsv_input_filter, qsv_probe_size, vaapi_input_filter
 
 logger = logging.getLogger(__name__)
@@ -207,8 +214,13 @@ def test_encoder_init(encoder_name: str, hw_flags: List[str]) -> Tuple[bool, str
             # AMF is a native Windows path and is most portable with the
             # explicit 4:2:0 format used by the real job command.
             cmd += ["-pix_fmt", "yuv420p"]
+        elif encoder_name in MF_ENCODERS:
+            cmd += ["-pix_fmt", "yuv420p"]
         cmd += [
-            "-c:v", encoder_name, "-t", "0.1", "-frames:v", "3",
+            "-c:v", encoder_name,
+            *(["-hw_encoding", "1"] if encoder_name in MF_ENCODERS else []),
+            *(["-allow_sw", "0"] if encoder_name in VIDEOTOOLBOX_ENCODERS else []),
+            "-t", "0.1", "-frames:v", "3",
             "-f", "null", "-",
         ]
         result = subprocess.run(
@@ -335,6 +347,22 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
             or any(encoder in AMF_ENCODERS for encoder in available_encoders)
         )
     )
+    has_mf = (
+        os.name == "nt"
+        and (
+            "media_foundation" in available_types
+            or hw_type == "media_foundation"
+            or any(encoder in MF_ENCODERS for encoder in available_encoders)
+        )
+    )
+    has_videotoolbox = (
+        sys.platform == "darwin"
+        and (
+            "videotoolbox" in available_types
+            or hw_type == "videotoolbox"
+            or any(encoder in VIDEOTOOLBOX_ENCODERS for encoder in available_encoders)
+        )
+    )
 
     if has_nvenc:
         _wait_for_nv_runtime_ready(timeout_s=30.0, interval_s=2.0)
@@ -348,6 +376,10 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
         test_codecs.extend(["h264_vaapi", "hevc_vaapi", "av1_vaapi"])
     if has_amf:
         test_codecs.extend(["h264_amf", "hevc_amf", "av1_amf"])
+    if has_mf:
+        test_codecs.extend(["h264_mf", "hevc_mf", "av1_mf"])
+    if has_videotoolbox:
+        test_codecs.extend(["h264_videotoolbox", "hevc_videotoolbox"])
     test_codecs.extend(["libx264", "libx265", "libsvtav1"])
 
     hw_decoders = {}
@@ -420,7 +452,7 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
         actual_encoder: bool(encode_passed)
         for actual_encoder, _status, _decode_status, _message, encode_passed
         in test_results.values()
-        if actual_encoder.endswith(("_nvenc", "_qsv", "_vaapi", "_amf"))
+        if actual_encoder.endswith(("_nvenc", "_qsv", "_vaapi", "_amf", "_mf", "_videotoolbox"))
     }
     hw_info["encoder_test_generation"] = generation
     hw_info["encoder_test_timestamp"] = int(time.time())
@@ -446,6 +478,8 @@ def run_startup_tests(hw_info: dict[str, Any]) -> Dict[str, bool]:
             "h264_qsv", "hevc_qsv", "av1_qsv",
             "h264_vaapi", "hevc_vaapi", "av1_vaapi",
             "h264_amf", "hevc_amf", "av1_amf",
+            "h264_mf", "hevc_mf", "av1_mf",
+            "h264_videotoolbox", "hevc_videotoolbox",
             "libx264", "libx265", "libsvtav1",
         ]
         redis_client.delete(*[

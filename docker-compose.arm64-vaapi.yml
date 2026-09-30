@@ -1,0 +1,10 @@
+# Optional Linux ARM64 VAAPI override. The worker validates each advertised
+# hardware encoder with a real frame before using it and falls back to CPU if
+# initialization fails.
+services:
+  8mblocal:
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-109}"

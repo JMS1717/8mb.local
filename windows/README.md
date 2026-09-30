@@ -8,7 +8,8 @@ Redis, Python, or a separate service.
 
 ## Install
 
-Download `8mblocal-Setup.exe` from the GitHub Actions artifact and run it. The
+Download `8mblocal-Setup.exe` for x64 or `8mblocal-Setup-arm64.exe` for ARM64
+from the GitHub Actions artifact and run it. The
 default install requests administrator permission, installs the executable for
 all users under `Program Files\8mb.local`, and creates all-users Start Menu and
 Desktop shortcuts. The installer also offers a current-user mode for machines
@@ -59,12 +60,15 @@ Python 3.11+, and (optionally) Inno Setup:
 
 ```powershell
 .\windows\build.ps1
+
+# Explicit native ARM64 build (requires native ARM64 Windows and Python)
+.\windows\build.ps1 -Architecture arm64
 ```
 
-The script builds the frontend, downloads the FFmpeg full build with
+The script builds the frontend, downloads an immutable architecture-matched FFmpeg build with
 libsvtav1, bundles ffmpeg.exe and ffprobe.exe, creates dist\8mblocal.exe with
 PyInstaller, and creates dist\8mblocal-Setup.exe when iscc.exe is present.
-The upstream full Windows package is GPLv3 and requires 7-Zip for extraction;
+The upstream full Windows package is GPLv3;
 preserve its license notices when distributing the executable.
 
 After building the executable, create an unsigned package for Microsoft Store
@@ -86,7 +90,8 @@ The script downloads the command-line Windows SDK build
 tools into a per-user build cache when `MakeAppx.exe` is not already installed.
 `-StoreSubmission` rejects the development placeholder identity so a CI test
 package cannot be uploaded accidentally. The resulting
-`dist\8mblocal_<version>_x64.msix` is intentionally unsigned;
+`dist\8mblocal_<version>_x64.msix` or
+`dist\8mblocal_<version>_arm64.msix` is intentionally unsigned;
 Microsoft signs it after Store certification. For a local structural build,
 omit the identity arguments to use clearly marked development placeholders.
 
@@ -147,8 +152,16 @@ Use
 
 At startup the worker performs real one-frame initialization probes, not just
 an `ffmpeg -encoders` listing. It tests NVIDIA NVENC, Intel Quick Sync, AMD
-AMF on Windows, Linux VAAPI, and CPU fallbacks. A driver that disappears
+AMF and Media Foundation on Windows, Linux VAAPI, and CPU fallbacks. A driver that disappears
 between the probe and a real job is retried once and then falls back to CPU.
+
+The ARM64 physical smoke check requires a physical ARM64 Windows machine and
+runs a real `h264_mf` job. It fails unless job telemetry reports
+`actual_encoder=h264_mf` and `hardware_used=true`:
+
+```powershell
+.\windows\physical-arm64-smoke.ps1
+```
 
 The native executable also keeps the CLI compressor in `windows\8mblocal.py`
 for scripted use; the installed desktop product is the web-app executable

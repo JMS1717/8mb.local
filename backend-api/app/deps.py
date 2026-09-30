@@ -879,6 +879,11 @@ async def sync_codec_settings_from_tests(timeout_s: int = 60) -> None:
             "h264_amf": False,
             "hevc_amf": False,
             "av1_amf": False,
+            "h264_mf": False,
+            "hevc_mf": False,
+            "av1_mf": False,
+            "h264_videotoolbox": False,
+            "hevc_videotoolbox": False,
         }
 
         hardware_keys = [
@@ -886,6 +891,8 @@ async def sync_codec_settings_from_tests(timeout_s: int = 60) -> None:
             "h264_qsv", "hevc_qsv", "av1_qsv",
             "h264_vaapi", "hevc_vaapi", "av1_vaapi",
             "h264_amf", "hevc_amf", "av1_amf",
+            "h264_mf", "hevc_mf", "av1_mf",
+            "h264_videotoolbox", "hevc_videotoolbox",
         ]
 
         tested_encoders = hw_info.get("tested_encoders") or {}
@@ -993,9 +1000,9 @@ def _ensure_default_preset_matches_hardware(_sm, visibility: dict[str, bool]) ->
             return
 
         codec_priority = [
-            'av1_nvenc', 'av1_qsv', 'av1_amf', 'av1_vaapi',
-            'hevc_nvenc', 'hevc_qsv', 'hevc_amf', 'hevc_vaapi',
-            'h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_vaapi',
+            'av1_nvenc', 'av1_qsv', 'av1_amf', 'av1_mf', 'av1_vaapi',
+            'hevc_nvenc', 'hevc_qsv', 'hevc_amf', 'hevc_mf', 'hevc_videotoolbox', 'hevc_vaapi',
+            'h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf', 'h264_videotoolbox', 'h264_vaapi',
             'libsvtav1', 'libx265', 'libx264',
         ]
         codec_to_vis = {'libaom-av1': 'libaom_av1'}
@@ -1049,6 +1056,11 @@ def _ensure_default_preset_matches_hardware(_sm, visibility: dict[str, bool]) ->
             'av1_vaapi': 'AV1 9.7MB (VAAPI)',
             'hevc_vaapi': 'HEVC 9.7MB (VAAPI)',
             'h264_vaapi': 'H264 8MB (VAAPI)',
+            'av1_mf': 'AV1 9.7MB (Windows Media Foundation)',
+            'hevc_mf': 'HEVC 9.7MB (Windows Media Foundation)',
+            'h264_mf': 'H264 8MB (Windows Media Foundation)',
+            'hevc_videotoolbox': 'HEVC 9.7MB (Apple VideoToolbox)',
+            'h264_videotoolbox': 'H264 8MB (Apple VideoToolbox)',
         }
         managed_profile = dict(template)
         managed_profile.update({

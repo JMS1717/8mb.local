@@ -1,6 +1,30 @@
-# 8mb.local – Self-Hosted GPU Video Compressor
+# 8mb.local – Video Compressor for Desktop, Android, and Docker
 
-8mb.local is a self-hosted, fire-and-forget video compressor. Drop a file, choose a target size (e.g., 8 MB, 25 MB, 50 MB, 100 MB), and let GPU-accelerated encoding produce compact outputs with AV1/HEVC/H.264. Supports **NVIDIA NVENC**, **Intel Quick Sync**, **Windows AMD AMF**, and **Linux VAAPI** (including AMD) with automatic **CPU fallback**. The Docker deployment uses a SvelteKit UI, FastAPI backend, Celery worker, Redis broker, and real-time progress via Server-Sent Events (SSE). The native Windows installer runs the same UI/API/worker code with a local in-process queue.
+8mb.local is a self-hosted, fire-and-forget video compressor. Drop a file, choose a target size (e.g., 8 MB, 25 MB, 50 MB, 100 MB), and let GPU-accelerated encoding produce compact outputs with AV1/HEVC/H.264. Supports **NVIDIA NVENC**, **Intel Quick Sync**, **Windows AMD AMF/Media Foundation**, **Apple VideoToolbox**, and **Linux VAAPI** (including AMD) with automatic **CPU fallback**. Native Windows x64/ARM64, Apple Silicon macOS, Android, and Linux Docker amd64/arm64 targets are included.
+
+## Android app
+
+**8mb.local also has a standalone Android app—no computer or server required.**
+Pick videos from Android's Photo Picker, choose a target size, and compress
+them on your phone or tablet. The app automatically chooses a working hardware
+encoder, saves finished videos to your camera roll on Android 10+, and lets you preview them
+before sharing. It includes batch compression, trimming, resolution and
+frame-rate controls, audio options, and recent history, with desktop-matched
+defaults and the same 8mb.local icon.
+
+Android 8.0 or newer is required. Available codecs depend on your device;
+support for playing a codec does not necessarily mean it can encode it.
+Android uses native phone controls rather than desktop-only encoder flags.
+Android 8–9 uses Save As and AAC audio; automatic gallery saving and Opus audio
+require Android 10 or newer.
+
+**[Get the Android APK from GitHub Releases](https://github.com/JMS1717/8mb.local/releases)**
+and follow the [Android installation guide](android/README.md#install-the-android-app).
+Only APKs explicitly listed as Android release downloads are intended for
+installation; unsigned APKs and development artifacts are not releases.
+
+[Windows downloads](https://github.com/JMS1717/8mb.local/releases) ·
+[Apple Silicon build guide](macos/README.md) · [Docker setup](#installation)
 
 <p align="center">
   <a href="https://www.youtube.com/watch?v=1YDjDtZ21lc">
@@ -12,6 +36,7 @@
 
 ## Table of Contents
 
+- [Android app](#android-app)
 - [Features](#features)
 - [Screenshots](#screenshots)
 - [Projects](#projects)
@@ -23,10 +48,12 @@
 - [Reverse Proxy Configuration](#reverse-proxy-configuration)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
+- [Privacy](#privacy)
+- [Support](#support)
 
 ## Features
 
-- **NVIDIA NVENC, Intel QSV, Windows AMD AMF, and Linux VAAPI hardware encoding** with automatic CPU fallback when a GPU or driver is unavailable
+- **NVENC, Intel QSV, AMD AMF, Windows Media Foundation, Apple VideoToolbox, Linux VAAPI, and Android MediaCodec hardware encoding** with automatic CPU fallback when a GPU or driver is unavailable
 - **Robust encoder validation** at startup — tests actual encoder initialization, not just availability
 - **AV1, HEVC (H.265), and H.264** encoding via NVENC, QSV, AMF, VAAPI, or CPU software encoders
 - Drag-and-drop UI with helpful presets and advanced options (codec, container, tune, audio bitrate)
@@ -102,7 +129,7 @@ This repository is one shared source codebase for the frontend, backend, worker,
 One command runs the automated checks and builds the portable EXE, installer EXE, Store MSIX, and local Docker image:
 
 ```powershell
-.\release-local.ps1 -Version 142.0.0.0
+.\release-local.ps1 -Version 143.0.0.0
 ```
 
 GitHub is not required to generate these files. GitHub Actions may still provide an independent compatibility check later. The local workflow never pushes its Docker image, publishes a release, deploys the application, or submits the MSIX; Microsoft Partner Center remains a separate manual submission step.
@@ -130,19 +157,19 @@ Useful commands:
 
 ```powershell
 # Validate tools and show the plan without changing versions or building
-.\release-local.ps1 -Version 142.0.0.0 -DryRun
+.\release-local.ps1 -Version 143.0.0.0 -DryRun
 
 # Full local release
-.\release-local.ps1 -Version 142.0.0.0
+.\release-local.ps1 -Version 143.0.0.0
 
 # Windows artifacts only
-.\release-local.ps1 -Version 142.0.0.0 -SkipDocker
+.\release-local.ps1 -Version 143.0.0.0 -SkipDocker
 
 # Docker artifact only
-.\release-local.ps1 -Version 142.0.0.0 -SkipWindows
+.\release-local.ps1 -Version 143.0.0.0 -SkipWindows
 
 # Windows EXE and installer without MSIX
-.\release-local.ps1 -Version 142.0.0.0 -SkipMsix
+.\release-local.ps1 -Version 143.0.0.0 -SkipMsix
 ```
 
 `-SkipTests` is troubleshooting-only and marks the result incomplete. `-OutputDir` selects another output folder, `-KeepTemp` preserves temporary files, and `-Overwrite` may reuse only a release directory previously created and marked by this script. Arbitrary existing directories, source directories, and ancestor paths are protected from overwrite.
@@ -150,8 +177,8 @@ Useful commands:
 Verify generated checksums from the release directory:
 
 ```powershell
-Get-Content .\dist\release\142.0.0.0\SHA256SUMS.txt
-Get-FileHash .\dist\release\142.0.0.0\8mblocal.exe -Algorithm SHA256
+Get-Content .\dist\release\143.0.0.0\SHA256SUMS.txt
+Get-FileHash .\dist\release\143.0.0.0\8mblocal.exe -Algorithm SHA256
 ```
 
 When a build fails, inspect `TEST-RESULTS.md`, `BUILD-MANIFEST.json`, and the named stage log, correct the source or environment issue, and rerun into a new output directory. A run that skips required stages is never reported as release-ready.
@@ -351,10 +378,11 @@ docker compose -f docker-compose.cpu.yml up -d --build
 
 | Platform | GPU Support | Notes |
 |----------|------------|-------|
-| **Windows** | NVIDIA via WSL2 | Install Docker Desktop, enable WSL2 GPU support, install NVIDIA drivers |
-| **Linux** | NVIDIA native | Install NVIDIA drivers + [Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) |
+| **Windows x64 / ARM64** | Native Media Foundation; NVENC/QSV/AMF where supported | Native installers are built for each architecture; Docker Desktop remains available separately |
+| **Linux amd64 / arm64** | NVIDIA or CPU | Native OCI images are built on matching GitHub runners; NVIDIA requires the [Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) |
 | **Linux** | Intel / AMD VAAPI | Use `docker-compose.vaapi.yml` and pass `/dev/dri`; the worker identifies the vendor |
-| **macOS** | CPU only | Docker runs in a Linux VM without GPU passthrough |
+| **macOS Apple Silicon** | Native VideoToolbox | Use the native arm64 app/DMG; Docker itself still runs in a Linux VM without macOS GPU passthrough |
+| **Android 8+** | Native MediaCodec | Standalone Kotlin/Compose app; probes, pins, and reports the actual encoder used |
 
 ### Native Windows executable
 
@@ -363,9 +391,35 @@ executable** GitHub Actions workflow and download `8mblocal-Setup.exe` from its
 `8mblocal-windows` artifact. The per-user installer creates a Start Menu
 shortcut and optionally a Desktop shortcut. The release also includes a
 standalone `8mblocal.exe` that can run without installation. Both open the same
-native WebView2 interface on localhost and probe NVENC, Quick Sync, and AMD AMF
+native WebView2 interface on localhost and probe Media Foundation, NVENC, Quick Sync, and AMD AMF
 before falling back to CPU encoding. See [`windows/README.md`](windows/README.md)
 for the installer, Windows security warning, hardware probes, and build details.
+
+### Apple Silicon, Android, and ARM64 Docker
+
+Build the native Apple Silicon app with `bash macos/build.sh`; it refuses to
+package unless both the process and output executable are arm64 and a real
+VideoToolbox encode succeeds with software fallback disabled. See
+[`macos/README.md`](macos/README.md).
+
+The standalone Android app lives in [`android/`](android/README.md). It uses
+Media3/MediaCodec, probes codecs by configuring and starting them, tries working
+hardware encoders before software encoders, and records the encoder Media3
+actually selected.
+
+For generic Linux ARM64, build `Dockerfile.arm64` or use
+`docker-compose.arm64.yml`. The base profile works without a GPU. On a Linux
+ARM64 host with `/dev/dri`, add the optional hardware override:
+
+```bash
+docker compose -f docker-compose.arm64.yml \
+  -f docker-compose.arm64-vaapi.yml up -d
+```
+
+The worker probes VAAPI encoders with real frames before using them and falls
+back to CPU if the driver rejects the encode. Release CI builds amd64 and arm64
+on native runners and creates a combined manifest only in the explicitly
+approved publish job.
 
 ### Repeatable end-to-end validation
 
@@ -446,7 +500,7 @@ docker stop 8mblocal && docker rm 8mblocal
 3. **Optional: open Advanced Options**
    - **Video Codec**: AV1 (best quality, RTX 40/50), HEVC (H.265), or H.264 (widest compatibility)
    - **Audio Codec**: Opus (default) or AAC — MP4 containers auto-switch to AAC
-   - **Speed/Quality**: NVENC presets P1 (fastest) through P7 (best quality), default P6
+   - **Speed/Quality**: NVENC presets P1 (fastest) through P7 (best quality), default P4 Balanced
    - **Container**: MP4 (most compatible) or MKV (best with Opus audio)
    - **Tune**: HQ (default), Low Latency, Ultra-Low Latency, or Lossless
    - **Resolution**: Set max width/height to downscale while preserving aspect ratio
@@ -732,6 +786,11 @@ You are free to use, share, and adapt this project for non-commercial purposes w
 ## Contributing
 
 Pull requests welcome! Please ensure Docker builds succeed and test with your GPU hardware.
+
+## Privacy
+
+The Android app processes selected media locally and does not request Internet
+access. See the full [privacy policy](PRIVACY.md).
 
 ## Support
 

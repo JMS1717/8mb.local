@@ -87,17 +87,19 @@ APP_VERSION = "$FullVersion"
 APP_VERSION_DISPLAY = "$DisplayVersion"
 "@
 
-$dockerfile = Join-RepoPath @('Dockerfile')
-Update-Text $dockerfile {
-    param($text)
-    [regex]::Replace(
-        $text,
-        '(?m)^([ \t]*ARG[ \t]+BUILD_VERSION)(?:[ \t]*=[ \t]*[^\r\n]*)?\r?$',
-        { param($match) $match.Groups[1].Value + '=' + $FullVersion }
-    )
+foreach ($dockerName in @('Dockerfile', 'Dockerfile.arm64')) {
+    $dockerfile = Join-RepoPath @($dockerName)
+    Update-Text $dockerfile {
+        param($text)
+        [regex]::Replace(
+            $text,
+            '(?m)^([ \t]*ARG[ \t]+BUILD_VERSION)(?:[ \t]*=[ \t]*[^\r\n]*)?\r?$',
+            { param($match) $match.Groups[1].Value + '=' + $FullVersion }
+        )
+    }
 }
 
-foreach ($composeName in @('docker-compose.yml', 'docker-compose.cpu.yml', 'docker-compose.vaapi.yml')) {
+foreach ($composeName in @('docker-compose.yml', 'docker-compose.cpu.yml', 'docker-compose.vaapi.yml', 'docker-compose.arm64.yml')) {
     $composePath = Join-RepoPath @($composeName)
     Update-Text $composePath {
         param($text)
@@ -107,6 +109,25 @@ foreach ($composeName in @('docker-compose.yml', 'docker-compose.cpu.yml', 'dock
             { param($match) $match.Groups[1].Value + '"${APP_VERSION:-' + $FullVersion + '}"' }
         )
     }
+}
+
+$androidGradle = Join-RepoPath @('android', 'app', 'build.gradle.kts')
+if (Test-Path -LiteralPath $androidGradle -PathType Leaf) {
+    $androidVersionCode = ([int64]$Parts[0] * 1000000) + ([int64]$Parts[1] * 10000) + ([int64]$Parts[2] * 100) + [int64]$Parts[3]
+    if ($androidVersionCode -gt 2100000000) {
+        throw "Version '$Version' produces Android versionCode $androidVersionCode, above the Play limit."
+    }
+    Update-Text $androidGradle {
+        param($text)
+        $result = [regex]::Replace($text, '(?m)^(\s*versionCode\s*=\s*)\d+', { param($m) $m.Groups[1].Value + $androidVersionCode })
+        [regex]::Replace($result, '(?m)^(\s*versionName\s*=\s*")[^"]+("\s*)$', { param($m) $m.Groups[1].Value + $DisplayVersion + $m.Groups[2].Value })
+    }
+}
+
+$androidEngine = Join-RepoPath @('android', 'app', 'src', 'main', 'java', 'com', 'jms1717', 'eightmblocal', 'compression', 'CompressionEngine.kt')
+Update-Text $androidEngine {
+    param($text)
+    [regex]::Replace($text, '(?m)(\.put\("version",\s*")[^"]+("\))', { param($m) $m.Groups[1].Value + $DisplayVersion + $m.Groups[2].Value })
 }
 
 $workflowRoot = Join-RepoPath @('.github', 'workflows')

@@ -1,5 +1,58 @@
 # Changelog
 
+## [v143] - Unreleased
+
+### Native ARM and mobile platforms
+
+- Added native Windows ARM64 EXE, Inno installer, and MSIX builds alongside x64.
+- Added a native Apple Silicon macOS app and DMG with Cocoa WebView and
+  VideoToolbox acceleration.
+- Added a standalone Android 8+ Kotlin/Jetpack Compose app using Media3,
+  MediaCodec, Room history, Storage Access Framework output, and Android share.
+- Expanded Android with a web-matched dark UI, native single/multiple Photo
+  Picker, automatic batch queue, desktop defaults and size presets, direct
+  bitrate, resolution/FPS controls, desktop auto-resolution and auto-audio
+  planners, trim, mute, Opus/AAC, audio-only M4A, automatic MediaStore save,
+  Save As, cancel, history, and share.
+- Fixed Android 15/16 foreground-service startup so real Photo Picker exports
+  reach the encoder, automatically rank working hardware codecs, distinguish
+  hardware encode from decode, and save finished videos to `DCIM/8mb.local` in
+  the camera roll by default.
+- Matched the Android launcher artwork pixel-for-pixel to the installed desktop
+  icon, with a full-bleed adaptive gradient and the desktop white glyph under
+  OEM launcher masks, and added an in-app Media3 preview with
+  playback controls before Share.
+- Added native Linux ARM64 Docker builds, Compose configuration, CI artifacts,
+  and a guarded multi-architecture manifest publishing workflow.
+
+### Hardware codec verification
+
+- Added Windows Media Foundation and Apple VideoToolbox encoder discovery,
+  real one-frame initialization probes, UI/API visibility, startup tests, and
+  controlled CPU fallback.
+- Android configures, starts, and pins each MediaCodec candidate; hardware
+  codecs are tried first and the encoder actually used is recorded.
+- Added physical-device smoke scripts that assert the actual encoder and
+  hardware-use telemetry for Windows ARM64 and Android.
+- Android's no-touch smoke now synthesizes its own media, runs it through the
+  real foreground service using MediaStore content URIs, proves a hardware-only
+  encode using the automatically selected codec into the camera roll, and validates desktop-default Opus audio
+  extraction.
+
+### Release safeguards
+
+- Added prominent Android installation guidance and plain-language release notes.
+- Updated devalue, brace-expansion, and postcss-selector-parser security patches.
+- Fixed Android CI setup after removal of the legacy SDK `tools` package.
+- Refreshed expired Windows FFmpeg inputs and added checksum-verified release
+  mirrors so approved releases can retain their exact build dependencies.
+- Kept architecture-specific packaging and immutable ARM64 FFmpeg inputs.
+- Added native architecture CI jobs and preserved manual confirmation and
+  credential requirements for image publishing.
+- Synchronized desktop, container, API, UI, and Android versions at 143.0.0.0.
+
+---
+
 ## [v141] - 2026-08-17
 
 This section describes the v141 release. The Microsoft Store submission was

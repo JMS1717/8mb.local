@@ -8,7 +8,10 @@ image supports:
 2. Intel Quick Sync on Linux through the VAAPI render node
 3. Linux VAAPI for Intel and AMD GPUs
 4. Windows AMD AMF (`h264_amf`, `hevc_amf`, `av1_amf`, when the GPU/driver exposes them)
-5. CPU software encoders (`libx264`, `libx265`, and SVT-AV1 via FFmpeg's
+5. Windows Media Foundation (`h264_mf`, `hevc_mf`, `av1_mf`, when exposed)
+6. Apple VideoToolbox (`h264_videotoolbox`, `hevc_videotoolbox`)
+7. Android MediaCodec H.264/HEVC/AV1 through the standalone Android app
+8. CPU software encoders (`libx264`, `libx265`, and SVT-AV1 via FFmpeg's
    `libsvtav1` token)
 
 AMD acceleration on Linux is VAAPI. AMD AMF is probed only by the native
@@ -16,20 +19,25 @@ Windows runtime; the Docker path remains Linux-native.
 
 ## Encoder mapping
 
-| Codec family | NVIDIA | Intel | AMD Windows | AMD / generic Linux | CPU fallback |
-|---|---|---|---|---|---|
-| H.264 | `h264_nvenc` | `h264_qsv` | `h264_amf` | `h264_vaapi` | `libx264` |
-| HEVC | `hevc_nvenc` | `hevc_qsv` | `hevc_amf` | `hevc_vaapi` | `libx265` |
-| AV1 | `av1_nvenc` | `av1_qsv` (if supported) | `av1_amf` (if supported) | `av1_vaapi` (if supported) | SVT-AV1 (`libsvtav1`) |
+| Codec family | NVIDIA | Intel | AMD Windows | Windows native | Apple | AMD / generic Linux | CPU fallback |
+|---|---|---|---|---|---|---|---|
+| H.264 | `h264_nvenc` | `h264_qsv` | `h264_amf` | `h264_mf` | `h264_videotoolbox` | `h264_vaapi` | `libx264` |
+| HEVC | `hevc_nvenc` | `hevc_qsv` | `hevc_amf` | `hevc_mf` | `hevc_videotoolbox` | `hevc_vaapi` | `libx265` |
+| AV1 | `av1_nvenc` | `av1_qsv` (if supported) | `av1_amf` (if supported) | `av1_mf` (if supported) | device-dependent MediaCodec only | `av1_vaapi` (if supported) | SVT-AV1 (`libsvtav1`) |
 
 `libsvtav1` is the canonical FFmpeg encoder name for the SVT-AV1 project.
 The `lib` prefix is FFmpeg's external-library wrapper name; it does not mean
 the slower libaom encoder. Legacy `libaom-av1` settings are retained only for
 backward-compatible migration and are not offered or selected automatically.
 
-The preferred codec is selected in AV1 → HEVC → H.264 order, with NVIDIA →
-QSV → AMF → VAAPI → CPU priority within a family. A device is not considered
+The preferred codec is selected in AV1 → HEVC → H.264 order, with native
+hardware encoders ahead of CPU within a family. A device is not considered
 available just because FFmpeg lists its encoder.
+
+Media Foundation is probed with FFmpeg's native hardware-encoding flag and
+VideoToolbox with `-allow_sw 0`, so a successful probe cannot quietly be a
+software encode. Android performs the equivalent configure/start surface probe
+and records Media3's actual output encoder name after every export.
 
 ## Intel Quick Sync and VAAPI
 

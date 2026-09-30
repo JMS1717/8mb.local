@@ -1,0 +1,105 @@
+name: Build native Android app
+
+on:
+  workflow_dispatch:
+    inputs:
+      signed_release:
+        description: 'Build and test a permanently signed release (requires repository signing secrets)'
+        type: boolean
+        default: false
+      release_ref:
+        description: 'Reviewed commit to build when signed_release is enabled'
+        type: string
+        default: 'main'
+  pull_request:
+    paths:
+      - 'android/**'
+      - 'VERSION'
+      - '.github/workflows/android.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  signing-helper-tests:
+    if: github.event_name != 'workflow_dispatch' || !inputs.signed_release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify offline signing setup and identity preservation
+        shell: pwsh
+        run: ./android/test-release-signing.ps1
+
+  signed-release:
+    if: github.event_name == 'workflow_dispatch' && inputs.signed_release
+    uses: ./.github/workflows/android-release.yml
+    with:
+      release_ref: ${{ inputs.release_ref }}
+    secrets: inherit
+
+  build:
+    if: github.event_name != 'workflow_dispatch' || !inputs.signed_release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android SDK 36
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: Verify version synchronization
+        shell: pwsh
+        run: ./scripts/check-version.ps1 -RepositoryRoot $PWD
+      - name: Unit tests, lint, APK, and bundle
+        working-directory: android
+        run: gradle test lint assembleDebug assembleRelease bundleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 8mblocal-android
+          path: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/release/app-release-unsigned.apk
+            android/app/build/outputs/bundle/release/app-release.aab
+            android/app/build/reports/tests
+            android/app/build/reports/lint-results-*.html
+          if-no-files-found: error
+
+  instrumented-smoke:
+    if: github.event_name != 'workflow_dispatch' || !inputs.signed_release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android SDK 36
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: Enable KVM acceleration
+        run: |
+          sudo chmod 666 /dev/kvm
+          test -r /dev/kvm -a -w /dev/kvm
+      - name: Run API 35 instrumentation tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          working-directory: android
+          script: gradle connectedDebugAndroidTest

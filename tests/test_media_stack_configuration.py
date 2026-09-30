@@ -22,3 +22,23 @@ def test_vaapi_compose_keeps_host_device_and_dynamic_groups():
     assert '"${VIDEO_GID:-44}"' in compose
     assert '"${RENDER_GID:-109}"' in compose
     assert "105  # render group" not in compose
+
+
+def test_arm64_container_is_native_and_avoids_x86_only_media_paths():
+    dockerfile = (ROOT / "Dockerfile.arm64").read_text(encoding="utf-8")
+    assert 'test "$TARGETARCH" = "arm64"' in dockerfile
+    assert "libsvtav1" in dockerfile
+    assert "h264_vaapi" in dockerfile
+    assert "x86_64-linux-gnu" not in dockerfile
+    assert "libvpl" not in dockerfile.lower()
+
+
+def test_arm64_compose_selects_native_platform_and_image():
+    compose = (ROOT / "docker-compose.arm64.yml").read_text(encoding="utf-8")
+    vaapi = (ROOT / "docker-compose.arm64-vaapi.yml").read_text(encoding="utf-8")
+    assert "platform: linux/arm64" in compose
+    assert "dockerfile: Dockerfile.arm64" in compose
+    assert "/dev/dri:/dev/dri" not in compose
+    assert "/dev/dri:/dev/dri" in vaapi
+    assert '"${VIDEO_GID:-44}"' in vaapi
+    assert '"${RENDER_GID:-109}"' in vaapi

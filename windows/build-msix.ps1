@@ -8,6 +8,8 @@ param(
     [string]$PublisherDisplayName = 'JMS1717',
     [string]$Version,
     [string]$MakeAppxPath,
+    [ValidateSet('x64', 'arm64')]
+    [string]$Architecture = 'x64',
     [switch]$StoreSubmission
 )
 
@@ -18,14 +20,14 @@ if (-not $PSBoundParameters.ContainsKey('Version')) {
     if (-not (Test-Path -LiteralPath $versionFile)) { throw "VERSION file is missing: $versionFile" }
     $Version = ([IO.File]::ReadAllText($versionFile)).Trim()
 }
-if ($OutputDir -and -not $OutputPath) { $OutputPath = Join-Path $OutputDir "8mblocal_$($Version)_x64.msix" }
+if ($OutputDir -and -not $OutputPath) { $OutputPath = Join-Path $OutputDir "8mblocal_$($Version)_$Architecture.msix" }
 . (Join-Path $PSScriptRoot 'brand-assets.ps1')
 
 if (-not $ExePath) {
     $ExePath = Join-Path $RepoRoot 'dist\8mblocal.exe'
 }
 if (-not $OutputPath) {
-    $OutputPath = Join-Path $RepoRoot "dist\8mblocal_$($Version)_x64.msix"
+    $OutputPath = Join-Path $RepoRoot "dist\8mblocal_$($Version)_$Architecture.msix"
 }
 $ExePath = [IO.Path]::GetFullPath($ExePath)
 $OutputPath = [IO.Path]::GetFullPath($OutputPath)
@@ -120,6 +122,7 @@ try {
     $manifest = $manifest.Replace('__PUBLISHER__', [Security.SecurityElement]::Escape($Publisher))
     $manifest = $manifest.Replace('__PUBLISHER_DISPLAY_NAME__', [Security.SecurityElement]::Escape($PublisherDisplayName))
     $manifest = $manifest.Replace('__VERSION__', [Security.SecurityElement]::Escape($Version))
+    $manifest = $manifest.Replace('__ARCHITECTURE__', $Architecture)
     if ($StoreSubmission -and $manifest -match '(?i)unvirtualizedResources|FileSystemWriteVirtualization|desktop6:') {
         throw 'StoreSubmission manifest must not request unvirtualizedResources or disable file-system virtualization.'
     }

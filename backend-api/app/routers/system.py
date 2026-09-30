@@ -39,6 +39,8 @@ _HARDWARE_ENCODERS = {
     "h264_qsv", "hevc_qsv", "av1_qsv",
     "h264_vaapi", "hevc_vaapi", "av1_vaapi",
     "h264_amf", "hevc_amf", "av1_amf",
+    "h264_mf", "hevc_mf", "av1_mf",
+    "h264_videotoolbox", "hevc_videotoolbox",
 }
 _CPU_ENCODERS = {"libx264", "libx265", "libsvtav1"}
 
@@ -174,6 +176,11 @@ async def get_available_codecs() -> AvailableCodecsResponse:
             'h264_amf': codec_settings.get('h264_amf', True),
             'hevc_amf': codec_settings.get('hevc_amf', True),
             'av1_amf': codec_settings.get('av1_amf', True),
+            'h264_mf': codec_settings.get('h264_mf', True),
+            'hevc_mf': codec_settings.get('hevc_mf', True),
+            'av1_mf': codec_settings.get('av1_mf', True),
+            'h264_videotoolbox': codec_settings.get('h264_videotoolbox', True),
+            'hevc_videotoolbox': codec_settings.get('hevc_videotoolbox', True),
             'libx264': codec_settings.get('libx264', True),
             'libx265': codec_settings.get('libx265', True),
             'libsvtav1': codec_settings.get('libsvtav1', True),
@@ -239,6 +246,8 @@ async def system_encoder_tests():
         "h264_qsv","hevc_qsv","av1_qsv",
         "h264_vaapi","hevc_vaapi","av1_vaapi",
         "h264_amf","hevc_amf","av1_amf",
+        "h264_mf","hevc_mf","av1_mf",
+        "h264_videotoolbox","hevc_videotoolbox",
         "libx264","libx265","libsvtav1",
     ]
 
@@ -356,7 +365,7 @@ async def system_encoder_tests():
                 "decode_message": decode_msg,
             })
 
-            is_hardware = actual_encoder.endswith(("_nvenc", "_qsv", "_vaapi", "_amf"))
+            is_hardware = actual_encoder.endswith(("_nvenc", "_qsv", "_vaapi", "_amf", "_mf", "_videotoolbox"))
             if overall_passed is True and is_hardware:
                 any_hw_passed = True
 
@@ -580,6 +589,8 @@ async def gpu_diagnostics():
         "ffmpeg_has_qsv": any(tok in encoder_text for tok in ["h264_qsv", "hevc_qsv", "av1_qsv"]),
         "ffmpeg_has_vaapi": any(tok in encoder_text for tok in ["h264_vaapi", "hevc_vaapi", "av1_vaapi"]),
         "ffmpeg_has_amf": any(tok in encoder_text for tok in ["h264_amf", "hevc_amf", "av1_amf"]),
+        "ffmpeg_has_media_foundation": any(tok in encoder_text for tok in ["h264_mf", "hevc_mf", "av1_mf"]),
+        "ffmpeg_has_videotoolbox": any(tok in encoder_text for tok in ["h264_videotoolbox", "hevc_videotoolbox"]),
         "nvenc_encode_ok": smoke_ok(checks["nvenc_smoke_test"]),
         "vaapi_encode_ok": bool(vaapi_device) and smoke_ok(checks["vaapi_smoke_test"]),
         "qsv_encode_ok": bool(vaapi_device) and smoke_ok(checks["qsv_smoke_test"]),

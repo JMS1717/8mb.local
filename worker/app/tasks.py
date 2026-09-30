@@ -28,7 +28,8 @@ from .celery_app import celery_app
 from .constants import (
     CPU_FALLBACK, CPU_ENCODERS, HW_ENCODERS,
     LIBAOM_AV1, SVT_AV1, LIBX264, LIBX265,
-    AMF_ENCODERS, QSV_ENCODERS, VAAPI_ENCODERS,
+    AMF_ENCODERS, MF_ENCODERS, QSV_ENCODERS, VAAPI_ENCODERS,
+    VIDEOTOOLBOX_ENCODERS,
 )
 from .utils import ffprobe_info, calc_bitrates
 from .auto_resolution import choose_auto_resolution
@@ -226,6 +227,10 @@ def _encoder_display_label(encoder: str) -> str:
         return "NVIDIA NVENC"
     if value.endswith("_amf"):
         return "AMD AMF"
+    if value.endswith("_mf"):
+        return "Windows Media Foundation"
+    if value.endswith("_videotoolbox"):
+        return "Apple VideoToolbox"
     if value.startswith("lib"):
         return "CPU/software"
     return "software"
@@ -904,7 +909,9 @@ def compress_video(self, job_id: str, input_path: str, output_path: str, target_
             "p4": "medium", "p5": "slow", "p6": "slower", "p7": "veryslow",
         }
         preset_flags = ["-preset", qsv_preset_map.get(preset_val, "medium")]
-    elif actual_encoder in VAAPI_ENCODERS or actual_encoder in AMF_ENCODERS:
+    elif actual_encoder in (
+        VAAPI_ENCODERS | AMF_ENCODERS | MF_ENCODERS | VIDEOTOOLBOX_ENCODERS
+    ):
         # VAAPI encoders use driver-specific quality/rate controls; FFmpeg's
         # generic -preset/-tune flags are not portable here. AMF similarly
         # varies by FFmpeg/driver version, so rate control stays conservative.

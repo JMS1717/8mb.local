@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -40,6 +41,13 @@ from .constants import (
     LIBX265,
     QSV_ENCODERS,
     VAAPI_ENCODERS,
+    MF_ENCODERS,
+    VIDEOTOOLBOX_ENCODERS,
+    H264_MF,
+    HEVC_MF,
+    AV1_MF,
+    H264_VIDEOTOOLBOX,
+    HEVC_VIDEOTOOLBOX,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,6 +86,7 @@ def _append_vaapi_driver_paths(env: dict[str, str]) -> None:
     parts = [part for part in configured.split(os.pathsep) if part]
     for path in (
         "/usr/local/lib/dri",
+        "/usr/lib/aarch64-linux-gnu/dri",
         "/usr/lib/x86_64-linux-gnu/dri",
         "/usr/lib/dri",
     ):
@@ -104,6 +113,8 @@ def get_gpu_env() -> dict[str, str]:
         "/usr/local/cuda/lib64",
         "/usr/local/cuda/lib",
         "/usr/lib/wsl/lib",
+        "/usr/lib/aarch64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu/dri",
         "/usr/lib/x86_64-linux-gnu",
         "/usr/lib/x86_64-linux-gnu/dri",
         "/usr/lib/dri",
@@ -274,8 +285,16 @@ def _test_vaapi(encoder_name: str, device: str) -> bool:
 
 def test_encoder(encoder_name: str) -> bool:
     """Test one encoder using the first compatible VAAPI device when needed."""
-    if os.name == "nt" and (encoder_name in QSV_ENCODERS or encoder_name in AMF_ENCODERS):
+    if os.name == "nt" and (
+        encoder_name in QSV_ENCODERS
+        or encoder_name in AMF_ENCODERS
+        or encoder_name in MF_ENCODERS
+    ):
         return _test_windows_native_encoder(encoder_name)
+    if encoder_name in VIDEOTOOLBOX_ENCODERS:
+        return _test_simple_hardware_encoder(
+            encoder_name, ["-allow_sw", "0"], "VideoToolbox", timeout=20
+        )
     if encoder_name in QSV_ENCODERS or encoder_name in VAAPI_ENCODERS:
         devices = get_vaapi_devices()
         for device in devices:
@@ -326,6 +345,7 @@ def _test_windows_native_encoder(encoder_name: str) -> bool:
             *init_flags,
             "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1:r=1",
             "-pix_fmt", "yuv420p", "-c:v", encoder_name,
+            *(["-hw_encoding", "1"] if encoder_name in MF_ENCODERS else []),
             "-frames:v", "1", "-f", "null", "-",
         ]
         try:
@@ -337,6 +357,31 @@ def _test_windows_native_encoder(encoder_name: str) -> bool:
             logger.info("Encoder %s passed Windows native initialization test", encoder_name)
             return True
         logger.debug("Windows encoder %s attempt failed: %s", encoder_name, _text(result.stderr)[:240])
+    return False
+
+
+def _test_simple_hardware_encoder(
+    encoder_name: str,
+    encoder_flags: list[str],
+    label: str,
+    timeout: float = 15,
+) -> bool:
+    """Run a real frame encode for a native hardware encoder family."""
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1:r=1",
+        "-pix_fmt", "yuv420p", "-c:v", encoder_name, *encoder_flags,
+        "-frames:v", "1", "-f", "null", "-",
+    ]
+    try:
+        result = _run(cmd, timeout=timeout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("%s encoder %s probe failed: %s", label, encoder_name, exc)
+        return False
+    if result.returncode == 0:
+        logger.info("Encoder %s passed %s hardware initialization test", encoder_name, label)
+        return True
+    logger.warning("%s %s failed: %s", label, encoder_name, _text(result.stderr)[:240])
     return False
 
 
@@ -455,6 +500,17 @@ def detect_hw_accel() -> Dict[str, Any]:
             for encoder in AMF_ENCODERS
             if encoder in encoder_output
         )
+        candidates.extend(
+            (encoder, None, "media_foundation")
+            for encoder in (H264_MF, HEVC_MF, AV1_MF)
+            if encoder in encoder_output
+        )
+    elif sys.platform == "darwin":
+        candidates.extend(
+            (encoder, None, "videotoolbox")
+            for encoder in (H264_VIDEOTOOLBOX, HEVC_VIDEOTOOLBOX)
+            if encoder in encoder_output
+        )
     elif has_nvidia:
         candidates.extend((encoder, None, "nvidia") for encoder in (H264_NVENC, HEVC_NVENC, AV1_NVENC))
     for device in devices:
@@ -513,6 +569,14 @@ def detect_hw_accel() -> Dict[str, Any]:
         result["type"] = "amd_amf"
         result["decode_method"] = "software"
         result["upload_method"] = "amf"
+    elif any(encoder in MF_ENCODERS for encoder in selected_hardware):
+        result["type"] = "media_foundation"
+        result["decode_method"] = "software"
+        result["upload_method"] = "media_foundation"
+    elif any(encoder in VIDEOTOOLBOX_ENCODERS for encoder in selected_hardware):
+        result["type"] = "videotoolbox"
+        result["decode_method"] = "software"
+        result["upload_method"] = "videotoolbox"
     elif any(encoder in VAAPI_ENCODERS for encoder in selected_hardware):
         selected_device = next(
             (encoder_devices.get(encoder) for encoder in selected_hardware if encoder in VAAPI_ENCODERS),
@@ -565,6 +629,15 @@ def _device_for_encoder(encoder: str, hw_info: Dict[str, Any]) -> str:
 
 
 def _hardware_mapping(encoder: str, hw_info: Dict[str, Any]) -> tuple[list[str], list[str]]:
+    if encoder in MF_ENCODERS:
+        return ["-pix_fmt", "yuv420p", "-hw_encoding", "1"], []
+    if encoder in VIDEOTOOLBOX_ENCODERS:
+        flags = ["-pix_fmt", "yuv420p", "-allow_sw", "0"]
+        if "h264" in encoder:
+            flags += ["-profile:v", "high"]
+        elif "hevc" in encoder:
+            flags += ["-profile:v", "main"]
+        return flags, []
     if encoder in QSV_ENCODERS:
         if os.name == "nt":
             # Native Windows QSV does not have a /dev/dri render node.  Let

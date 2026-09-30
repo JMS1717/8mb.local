@@ -1,0 +1,130 @@
+name: Build native Apple Silicon app
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_signing:
+        description: 'Signing mode'
+        required: true
+        type: choice
+        default: ad-hoc-validation
+        options:
+          - ad-hoc-validation
+          - require-developer-id
+  pull_request:
+    paths:
+      - 'backend-api/**'
+      - 'frontend/**'
+      - 'shared/**'
+      - 'worker/**'
+      - 'windows/desktop_app.py'
+      - 'macos/**'
+      - 'VERSION'
+      - '.github/workflows/macos-arm64.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install FFmpeg
+        run: brew install ffmpeg
+
+      - name: Configure Developer ID signing and notarization
+        if: github.event_name == 'workflow_dispatch' && inputs.release_signing == 'require-developer-id'
+        id: release_signing
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          for name in DEVELOPER_ID_P12_BASE64 DEVELOPER_ID_P12_PASSWORD NOTARY_APPLE_ID NOTARY_TEAM_ID NOTARY_APP_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required repository secret is missing: $name" >&2
+              exit 1
+            fi
+          done
+          keychain="$RUNNER_TEMP/8mblocal-signing.keychain-db"
+          certificate="$RUNNER_TEMP/8mblocal-developer-id.p12"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | base64 -D > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
+          if [[ -z "$identity" ]]; then
+            echo 'The imported certificate does not contain a Developer ID Application identity.' >&2
+            exit 1
+          fi
+          profile='8mblocal-ci-notary'
+          xcrun notarytool store-credentials "$profile" \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --team-id "$NOTARY_TEAM_ID" \
+            --password "$NOTARY_APP_PASSWORD" \
+            --keychain "$keychain"
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+          echo "profile=$profile" >> "$GITHUB_OUTPUT"
+          echo "keychain=$keychain" >> "$GITHUB_OUTPUT"
+
+      - name: Run Python tests
+        run: |
+          python -m pip install -r requirements.txt pytest httpx==0.27.2
+          python -m pytest worker/tests -q
+          python -m pytest shared/tests -q
+          PYTHONPATH="$PWD:$PWD/backend-api" python -m pytest backend-api/tests -q
+          python -m pytest tests -q
+
+      - name: Build and probe the Apple Silicon app
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ steps.release_signing.outputs.identity || '-' }}
+          APPLE_NOTARY_PROFILE: ${{ steps.release_signing.outputs.profile }}
+          APPLE_NOTARY_KEYCHAIN: ${{ steps.release_signing.outputs.keychain }}
+          # GitHub's hosted Apple Silicon VMs can reject real VideoToolbox
+          # sessions even when the native encoders are present. Real/local
+          # builds retain the strict default in macos/build.sh.
+          MACOS_REQUIRE_HARDWARE_PROBE: '0'
+        run: bash macos/build.sh
+
+      - name: Smoke bundled executable and version
+        run: |
+          dist/8mblocal.app/Contents/MacOS/8mblocal --version
+          file dist/8mblocal.app/Contents/MacOS/8mblocal | grep arm64
+          codesign --verify --deep --strict --verbose=2 dist/8mblocal.app
+
+      - name: Verify Developer ID acceptance and notarization ticket
+        if: github.event_name == 'workflow_dispatch' && inputs.release_signing == 'require-developer-id'
+        run: |
+          spctl --assess --type execute --verbose=2 dist/8mblocal.app
+          xcrun stapler validate dist/8mblocal_*_macos_arm64.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 8mblocal-macos-arm64
+          path: |
+            dist/8mblocal.app
+            dist/8mblocal_*_macos_arm64.dmg
+            dist/8mblocal_*_macos_arm64.dmg.sha256
+          if-no-files-found: error
+
+      - name: Remove temporary signing keychain
+        if: always() && steps.release_signing.outputs.keychain != ''
+        run: security delete-keychain '${{ steps.release_signing.outputs.keychain }}'

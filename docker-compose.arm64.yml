@@ -1,0 +1,37 @@
+# Generic Linux ARM64 profile. It runs without host GPU devices and uses CPU
+# encoders by default. Add docker-compose.arm64-vaapi.yml on Linux ARM64 hosts
+# with /dev/dri to enable hardware probing and use.
+services:
+  8mblocal:
+    platform: linux/arm64
+    build:
+      context: .
+      dockerfile: Dockerfile.arm64
+      args:
+        BUILD_VERSION: "${APP_VERSION:-143.0.0.0}"
+    image: jms1717/8mblocal:arm64
+    ports:
+      - "8001:8001"
+    shm_size: "${MEDIA_SHM_SIZE:-10g}"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./state:/app/state
+      - ./redis-data:/var/lib/redis
+      - type: bind
+        source: ./.env
+        target: /app/.env
+        bind:
+          create_host_path: false
+    environment:
+      - REDIS_URL=redis://127.0.0.1:6379/0
+      - ENV_FILE=/app/.env
+      - SETTINGS_FILE=/app/state/settings.json
+      - HISTORY_FILE=/app/state/history.json
+      - MEDIA_STORAGE=${MEDIA_STORAGE:-auto}
+      - MEDIA_MEMORY_LIMIT_GB=${MEDIA_MEMORY_LIMIT_GB:-10}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-auto}
+      - VAAPI_DEVICE=${VAAPI_DEVICE:-}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-compute,video,utility}
+    restart: unless-stopped

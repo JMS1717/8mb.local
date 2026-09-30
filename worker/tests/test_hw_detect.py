@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 from worker.app.hw_detect import detect_hw_accel
 
 class TestHwDetect(unittest.TestCase):
+    @patch('worker.app.hw_detect.os.name', 'posix')
+    @patch('worker.app.hw_detect.sys.platform', 'linux')
     @patch('worker.app.hw_detect.test_encoder')
     @patch('subprocess.run')
     def test_detect_nvidia(self, mock_run, mock_test_encoder):

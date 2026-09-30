@@ -20,7 +20,7 @@ class CompressRequest(BaseModel):
     target_size_mb: float = Field(default=19.7, gt=0, le=51200)
     # When set (>0), worker uses this video bitrate (kbps) instead of deriving from target_size_mb.
     target_video_bitrate_kbps: Optional[float] = Field(default=None, ge=0, le=2_000_000)
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','libx264','libx265','libsvtav1','libaom-av1'] = 'h264_nvenc'
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','av1_mf','hevc_mf','h264_mf','hevc_videotoolbox','h264_videotoolbox','libx264','libx265','libsvtav1','libaom-av1'] = 'h264_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
     audio_bitrate_kbps: int = Field(default=128, ge=0, le=2000)
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p4'  # Added 'extraquality'
@@ -85,7 +85,7 @@ class PasswordChange(BaseModel):
 
 class DefaultPresets(BaseModel):
     target_mb: float = Field(default=19.7, gt=0, le=51200)
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','libx264','libx265','libsvtav1','libaom-av1'] = 'h264_nvenc'
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','av1_mf','hevc_mf','h264_mf','hevc_videotoolbox','h264_videotoolbox','libx264','libx265','libsvtav1','libaom-av1'] = 'h264_nvenc'
     audio_codec: Literal['libopus','aac','none'] = 'libopus'  # Added 'none' for mute
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality'] = 'p4'  # Added 'extraquality'
     audio_kbps: Literal[64,96,128,160,192,256] = 128
@@ -117,6 +117,13 @@ class CodecVisibilitySettings(BaseModel):
     h264_amf: bool = True
     hevc_amf: bool = True
     av1_amf: bool = True
+    # Windows Media Foundation
+    h264_mf: bool = True
+    hevc_mf: bool = True
+    av1_mf: bool = True
+    # Apple VideoToolbox
+    h264_videotoolbox: bool = True
+    hevc_videotoolbox: bool = True
     # CPU
     libx264: bool = True
     libx265: bool = True
@@ -127,7 +134,7 @@ class CodecVisibilitySettings(BaseModel):
 class PresetProfile(BaseModel):
     name: str
     target_mb: float = Field(gt=0, le=51200)
-    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','libx264','libx265','libsvtav1','libaom-av1']
+    video_codec: Literal['av1_nvenc','hevc_nvenc','h264_nvenc','av1_qsv','hevc_qsv','h264_qsv','av1_vaapi','hevc_vaapi','h264_vaapi','av1_amf','hevc_amf','h264_amf','av1_mf','hevc_mf','h264_mf','hevc_videotoolbox','h264_videotoolbox','libx264','libx265','libsvtav1','libaom-av1']
     audio_codec: Literal['libopus','aac','none']
     preset: Literal['p1','p2','p3','p4','p5','p6','p7','extraquality']
     audio_kbps: Literal[64,96,128,160,192,256]

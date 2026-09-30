@@ -8,6 +8,12 @@ Thumbs.db
 __pycache__/
 *.pyc
 .venv/
+.gradle/
+android/.gradle/
+android/local.properties
+.codex-remote-attachments/
+android/physical-codec-report.json
+android/play/source-screenshots/
 
 # Node
 node_modules/
@@ -17,6 +23,13 @@ frontend/build/
 
 # Env files
 .env
+
+# Release signing material (never commit private keys)
+*.jks
+*.keystore
+*.p12
+*.pfx
+android/keystore.properties
 
 # Local artifacts
 uploads/*

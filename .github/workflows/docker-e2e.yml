@@ -8,7 +8,17 @@ permissions:
 
 jobs:
   docker-cpu-e2e:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-latest
+            dockerfile: Dockerfile
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+            dockerfile: Dockerfile.arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -25,7 +35,7 @@ jobs:
           python-version: "3.12"
 
       - name: Build the Docker image
-        run: docker build -t 8mb.local:e2e .
+        run: docker build -f ${{ matrix.dockerfile }} -t 8mb.local:e2e .
 
       - name: Exercise the disposable CPU container
         run: >-

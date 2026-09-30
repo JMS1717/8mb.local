@@ -1,0 +1,66 @@
+# Native generic Linux ARM64 image. It intentionally avoids x86-only CUDA,
+# oneVPL, and Intel media-driver build artifacts. The distro FFmpeg build
+# supplies CPU, NVENC, and VAAPI integrations; runtime one-frame probes decide
+# which hardware path is genuinely usable on the host.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-build
+
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY frontend/ ./
+ENV PUBLIC_BACKEND_URL=""
+RUN npx svelte-kit sync && npm run check && npm run build && find build -name '*.map' -delete
+
+FROM ubuntu:24.04
+
+ARG TARGETARCH
+RUN test "$TARGETARCH" = "arm64"
+ARG BUILD_VERSION=143.0.0.0
+ARG BUILD_COMMIT=unknown
+ARG BUILD_TIMESTAMP=unknown
+ARG BUILD_REPOSITORY=https://github.com/JMS1717/8mb.local
+ENV APP_VERSION=${BUILD_VERSION} \
+    BUILD_COMMIT=${BUILD_COMMIT} \
+    DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
+    NVIDIA_VISIBLE_DEVICES=all
+LABEL org.opencontainers.image.version=${BUILD_VERSION} \
+      org.opencontainers.image.revision=${BUILD_COMMIT} \
+      org.opencontainers.image.created=${BUILD_TIMESTAMP} \
+      org.opencontainers.image.source=${BUILD_REPOSITORY} \
+      org.opencontainers.image.architecture=arm64
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-psutil supervisor redis-server ffmpeg \
+      libva2 libva-drm2 libdrm2 mesa-va-drivers vainfo ca-certificates \
+    && ffmpeg -hide_banner -encoders 2>&1 | grep -q libx264 \
+    && ffmpeg -hide_banner -encoders 2>&1 | grep -q libx265 \
+    && ffmpeg -hide_banner -encoders 2>&1 | grep -q libsvtav1 \
+    && ffmpeg -hide_banner -encoders 2>&1 | grep -q h264_vaapi \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/*
+
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --break-system-packages --no-cache-dir -r /app/requirements.txt \
+    && rm /app/requirements.txt
+
+COPY backend-api/app /app/backend
+COPY worker/app /app/worker
+COPY shared /app/shared
+COPY --from=frontend-build /frontend/build /app/frontend-build
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY entrypoint.sh /app/entrypoint.sh
+
+RUN mkdir -p /app/uploads /app/outputs /app/state /var/log/supervisor /var/lib/redis /var/log/redis \
+    && chmod +x /app/entrypoint.sh \
+    && printf 'Version: %s\nCommit: %s\nArchitecture: arm64\n' "$APP_VERSION" "$BUILD_COMMIT" > /app/VERSION
+
+EXPOSE 8001
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=3).read()"
+ENTRYPOINT ["/app/entrypoint.sh"]

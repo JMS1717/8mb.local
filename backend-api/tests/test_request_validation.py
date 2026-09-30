@@ -40,6 +40,17 @@ class TestRequestValidation(unittest.TestCase):
         )
         self.assertEqual(request.video_codec, "h264_amf")
 
+    def test_direct_and_batch_accept_native_platform_codecs(self):
+        for codec in ("h264_mf", "hevc_videotoolbox"):
+            request = CompressRequest(
+                job_id="job",
+                filename="input.mp4",
+                target_size_mb=1,
+                video_codec=codec,
+            )
+            self.assertEqual(request.video_codec, codec)
+            _validate_batch_options(codec, "aac", "p6", "mp4", "hq", 1, 128, None, None, 240, None, None, None)
+
     def test_batch_rejects_non_finite_or_negative_options(self):
         with self.assertRaisesRegex(Exception, "target_size_mb"):
             _validate_batch_options("libx264", "aac", "p6", "mp4", "hq", float("nan"), 128, None, None, 240, None, None, None)
