@@ -3,7 +3,12 @@
 Proposed title: **v143: Android App and More Devices**
 
 Proposed tag: `v143`; application version: `143.0.0.0` (Android: `143.0.0`).
-The implementation candidate is `209b2de`. The release body is [v143.md](v143.md). It leads with the Android app and
+The signed Android candidate was built from `4829d0b`; the Windows and
+experimental Mac candidate artifacts were built from `209b2de`. Later changes
+to the signing helper, tests, and release documentation do not change their
+app runtime code. Per-platform build provenance and hashes remain explicit;
+these are preparation artifacts, not a claim that integration/tagging is done.
+The release body is [v143.md](v143.md). It leads with the Android app and
 describes benefits and installation without implementation details.
 
 ## Changes to review
@@ -18,6 +23,42 @@ describes benefits and installation without implementation details.
 - Android CI no longer asks for the removed legacy SDK `tools` package.
 - Android compatibility is explicit: Android 8–9 uses Save As/AAC; automatic
   gallery saving and Opus audio require Android 10+.
+- The earlier Android preview used a debug key. The new permanent-key release
+  requires a one-time uninstall/reinstall, resetting app-local history/settings;
+  this is explained plainly in the installation guide and release notes.
+
+## September 30 signed Android validation
+
+- A permanent 4096-bit RSA key was created outside the repository; signing
+  secrets are configured in GitHub. The public certificate SHA-256 is
+  `96dbd77c852a382eafe9ac07cf5c59bb57300bb63a0ab7971e664cc7455cbbd9`.
+- [Signed build and tests](https://github.com/JMS1717/8mb.local/actions/runs/36747146134)
+  passed release unit tests/lint, APK/AAB signature checks, and API 35 release
+  instrumentation. The public APK is non-debuggable. Four emulator tests ran;
+  hardware-only compression and the opt-in demonstration were skipped there.
+- The exact signed APK passed all five physical tests on a OnePlus 15 running
+  Android 16: workflow UI, working encoder inventory, Opus audio extraction,
+  hardware-only foreground-service compression, and screenshot/icon checks.
+  Output was playable and published under `DCIM/8mb.local`, no longer pending,
+  and the in-app preview and Share controls worked.
+- Actual encoding used `c2.qti.hevc.encoder`, with hardware use proven and no
+  software fallback. This phone exposes hardware AV1 decoders, but only a
+  software AV1 encoder; automatic selection correctly prefers hardware HEVC.
+- The opt-in default-settings demonstration also passed on the signed APK:
+  Choose video, accept a synthetic Photo Picker result, Compress and save,
+  and open Preview. The picker result is injected by the test, not a claim
+  that every OEM's picker UI has been exercised. No personal media was used.
+- APK SHA-256:
+  `1406b51a3cae3f65978087f224b131b9475e18bd275caf1a75661ae8669c67e5`.
+  Signature and APK identity were independently verified locally.
+- With user approval, the old OnePlus debug APK and app-local data were backed
+  up before replacing it. The Quest 3 was left untouched.
+- Local DPAPI password recovery, restricted file permissions, repeat setup
+  without identity changes, alias mismatch rejection, and preservation of an
+  unknown existing key were tested. Disposable test keys were removed.
+  **Independent/off-computer key and password backup is still pending.** The
+  local recovery ZIP is tied to this Windows account/computer and is not a
+  disaster-recovery backup by itself.
 
 ## Proposed public downloads
 
@@ -51,9 +92,9 @@ outputs, not automatically public release downloads.
 
 1. Review and approve the title, README, release notes, download list, and
    known limitations. No merge permission is assumed from preparing them.
-2. Resolve Android signing and backups, including compatibility with the APK
-   already attached to v142. Verify the exact signed APK on a device; debug
-   smoke alone is not proof that the public signed APK works.
+2. Complete the independent signing-key/password backup. Permanent Android
+   signing and exact signed-APK testing are done; debug smoke alone is not
+   counted as proof that the public signed APK works.
    The v142 APK was checked on September 30: it is validly **debug-signed**
    and has the same certificate as the local debug build. A new permanent
    signing key means current debug installs must be uninstalled first, which

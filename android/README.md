@@ -22,6 +22,9 @@ use the system Save As picker; AAC is the audio default.
 Download the APK, not the `.aab` bundle or an unsigned development artifact.
 Install updates over the existing app only when they use the same signing
 certificate. See [release signing](SIGNING.md) for maintainer instructions.
+The v143 release switches from the earlier preview signing key to a permanent
+key. Preview users must uninstall once, which resets app-local history/settings.
+Videos already saved to the gallery are separate from app-local storage.
 
 ## Desktop workflow parity
 
@@ -80,6 +83,15 @@ preview UI before Share. It also pixel-validates the installed adaptive launcher
 icon. It requires no taps and never reads
 personal media. The generated `physical-codec-report.json` is local and ignored
 by Git.
+
+For the permanently signed APK and its private test companion, pass
+`-BuildType release -SkipBuild -AppApk <release.apk> -TestApk <test.apk>`.
+The test verifies hardware use without enabling debugging in the public APK,
+and records the exact APK checksum. On devices that block ADB permission
+grants, it accepts only 8mb.local's normal notification consent dialog; it does
+not weaken developer/security settings. Test the Windows signing helper with
+`./test-release-signing.ps1`; it uses disposable keys without changing GitHub
+secrets or the permanent signing identity.
 
 Launcher PNGs are produced by the same renderer as the Windows ICO. Regenerate
 them after a brand change with `./generate-launcher-icons.ps1`; adaptive icons

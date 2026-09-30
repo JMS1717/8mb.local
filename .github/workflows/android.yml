@@ -21,6 +21,19 @@ permissions:
   contents: read
 
 jobs:
+  signing-helper-tests:
+    if: github.event_name != 'workflow_dispatch' || !inputs.signed_release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify offline signing setup and identity preservation
+        shell: pwsh
+        run: ./android/test-release-signing.ps1
+
   signed-release:
     if: github.event_name == 'workflow_dispatch' && inputs.signed_release
     uses: ./.github/workflows/android-release.yml

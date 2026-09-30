@@ -4,7 +4,8 @@ param(
     [string]$KeystorePath = (Join-Path $env:LOCALAPPDATA '8mb.local-signing\8mblocal-app-signing.jks'),
     [string]$Alias = '8mblocal-app-signing',
     [switch]$Automatic,
-    [string]$KeytoolPath
+    [string]$KeytoolPath,
+    [switch]$SkipGitHubSecrets
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,7 +14,7 @@ if ($KeytoolPath) {
 } else {
     $keytool = (Get-Command keytool -ErrorAction Stop).Source
 }
-$gh = (Get-Command gh -ErrorAction Stop).Source
+if (-not $SkipGitHubSecrets) { $gh = (Get-Command gh -ErrorAction Stop).Source }
 $resolvedKeystore = [IO.Path]::GetFullPath($KeystorePath)
 $keystoreDirectory = Split-Path -Parent $resolvedKeystore
 New-Item -ItemType Directory -Force -Path $keystoreDirectory | Out-Null
@@ -21,15 +22,24 @@ $credentialsPath = Join-Path $keystoreDirectory 'passwords.dpapi.xml'
 # Keep private material out of source control and cloud-synced Documents.
 if ($Automatic) {
     if ($env:OS -ne 'Windows_NT') { throw 'Automatic password recovery requires Windows DPAPI.' }
-    $acl = [Security.AccessControl.DirectorySecurity]::new()
-    $acl.SetAccessRuleProtection($true, $false)
     $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $acl.SetOwner($userSid)
-    foreach ($sid in @($userSid, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
-        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-            $sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+    # Modify only the DACL; Set-Acl may try to write the audit descriptor and
+    # require SeSecurityPrivilege unnecessarily on repeat runs.
+    & icacls $keystoreDirectory /inheritance:r /grant:r `
+        "*$($userSid.Value):(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not restrict signing-directory access.' }
+    $acl = Get-Acl -LiteralPath $keystoreDirectory
+    foreach ($rule in @($acl.Access)) {
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($sid -notin @($userSid.Value, 'S-1-5-18')) {
+            & icacls $keystoreDirectory /remove "*$sid" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Could not remove broad signing-directory access.' }
+        }
     }
-    Set-Acl -LiteralPath $keystoreDirectory -AclObject $acl
+    $acl = Get-Acl -LiteralPath $keystoreDirectory
+    if (-not $acl.AreAccessRulesProtected -or $acl.Access.Count -ne 2) {
+        throw 'Signing-directory access was not restricted as expected.'
+    }
 }
 
 function Read-PlaintextSecret([string]$Prompt) {
@@ -116,15 +126,21 @@ try {
         Compress-Archive -LiteralPath $backupFiles -DestinationPath $backupPath
     }
 
-    $keystoreBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($resolvedKeystore))
-    Set-GitHubSecret ANDROID_UPLOAD_KEYSTORE_BASE64 $keystoreBase64
-    Set-GitHubSecret ANDROID_UPLOAD_STORE_PASSWORD $storePassword
-    Set-GitHubSecret ANDROID_UPLOAD_KEY_ALIAS $Alias
-    Set-GitHubSecret ANDROID_UPLOAD_KEY_PASSWORD $keyPassword
+    if (-not $SkipGitHubSecrets) {
+        $keystoreBase64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($resolvedKeystore))
+        Set-GitHubSecret ANDROID_UPLOAD_KEYSTORE_BASE64 $keystoreBase64
+        Set-GitHubSecret ANDROID_UPLOAD_STORE_PASSWORD $storePassword
+        Set-GitHubSecret ANDROID_UPLOAD_KEY_ALIAS $Alias
+        Set-GitHubSecret ANDROID_UPLOAD_KEY_PASSWORD $keyPassword
+    }
 
     Write-Host "Permanent app-signing keystore: $resolvedKeystore"
     Write-Host "Public certificate SHA-256: $fingerprint"
-    Write-Host 'GitHub release-signing secrets configured. No release was published.'
+    if ($SkipGitHubSecrets) {
+        Write-Host 'Offline setup only: no GitHub secrets changed and no release was published.'
+    } else {
+        Write-Host 'GitHub release-signing secrets configured. No release was published.'
+    }
     if ($Automatic) {
         Write-Host 'Local recovery uses Windows DPAPI, tied to this Windows account/computer.'
         Write-Host 'Before publishing, export the passwords into a password manager and back up the keystore off this computer.'

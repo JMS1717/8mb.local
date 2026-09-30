@@ -70,9 +70,47 @@ foreach ($apk in @($appApk, $testApk)) {
 # A fresh install can place Android's notification-permission activity over
 # MainActivity before Compose attaches. The shell grant keeps this fully
 # unattended and also ensures the foreground-service notification is visible.
+& $adbPath -s $Serial shell input keyevent KEYCODE_WAKEUP | Out-Null
+& $adbPath -s $Serial shell wm dismiss-keyguard | Out-Null
 if ($sdk -ge 33) {
-    & $adbPath -s $Serial shell pm grant $package android.permission.POST_NOTIFICATIONS
-    if ($LASTEXITCODE -ne 0) { throw 'Could not grant notification permission for the physical smoke test.' }
+    $grantOutput = & $adbPath -s $Serial shell pm grant $package android.permission.POST_NOTIFICATIONS 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        # Some OEMs block shell permission grants. Use the app's normal system
+        # consent dialog instead of changing developer/security settings.
+        & $adbPath -s $Serial shell am start -n "$package/.MainActivity" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not open the app notification dialog.' }
+        $dumpPath = '/data/local/tmp/8mblocal-notification-test.xml'
+        $allowed = $false
+        for ($attempt = 0; $attempt -lt 3; $attempt++) {
+            & $adbPath -s $Serial shell uiautomator dump $dumpPath | Out-Null
+            if ($LASTEXITCODE -ne 0) { continue }
+            $dump = & $adbPath -s $Serial shell cat $dumpPath | Out-String
+            [xml]$window = $dump
+            $nodes = @($window.SelectNodes('//node'))
+            $prompt = @($nodes | Where-Object {
+                $_.'resource-id' -eq 'com.android.permissioncontroller:id/permission_message' -and
+                $_.text -match '8mb\.local'
+            })
+            $button = @($nodes | Where-Object {
+                $_.'resource-id' -eq 'com.android.permissioncontroller:id/permission_allow_button'
+            })
+            if ($prompt.Count -eq 1 -and $button.Count -eq 1 -and
+                $button[0].bounds -match '^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$') {
+                $x = [int](([int]$matches[1] + [int]$matches[3]) / 2)
+                $y = [int](([int]$matches[2] + [int]$matches[4]) / 2)
+                & $adbPath -s $Serial shell input tap $x $y | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Could not accept the app notification dialog.' }
+            }
+            $packageInfo = & $adbPath -s $Serial shell dumpsys package $package | Out-String
+            if ($packageInfo -match 'android.permission.POST_NOTIFICATIONS: granted=true') {
+                $allowed = $true
+                break
+            }
+        }
+        & $adbPath -s $Serial shell rm -f $dumpPath | Out-Null
+        if (-not $allowed) { throw 'Notification permission could not be granted through the app dialog.' }
+        Write-Host 'PASS notification permission through normal app consent dialog (OEM blocks shell grant)'
+    }
 }
 & $adbPath -s $Serial shell input keyevent KEYCODE_WAKEUP | Out-Null
 & $adbPath -s $Serial shell wm dismiss-keyguard | Out-Null
