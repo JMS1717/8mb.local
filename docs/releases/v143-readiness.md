@@ -15,7 +15,7 @@ Fresh evidence:
 - [Shared tests, frontend build/audit, and local end-to-end tests](https://github.com/JMS1717/8mb.local/actions/runs/36742197068): passed at `209b2de`.
 - [Android unit tests, lint, APK/bundle assembly, and API 35 instrumentation](https://github.com/JMS1717/8mb.local/actions/runs/36742197085): passed at `209b2de`; release outputs remain unsigned.
 - [Apple Silicon package build and executable/signature smoke](https://github.com/JMS1717/8mb.local/actions/runs/36742197462): passed at `209b2de`; not notarized and not proof of real-Mac hardware encoding.
-- [Native Windows x64/ARM64 install and compression smoke](https://github.com/JMS1717/8mb.local/actions/runs/36742188680): x64 passed; ARM64 is still finishing after recovery of the verified 8.1.2 FFmpeg inputs.
+- [Native Windows x64/ARM64 install and compression smoke](https://github.com/JMS1717/8mb.local/actions/runs/36742188680): both passed at `209b2de`, including recovery of the verified 8.1.2 ARM64 FFmpeg inputs.
 - [Native Docker amd64/arm64 end-to-end smoke](https://github.com/JMS1717/8mb.local/actions/runs/36740087055): both passed. Container inputs did not change after `04b2039`.
 - Local Python regression tests: 116 passed, 1 skipped; backend/API tests:
   80 passed, 1 skipped. Frontend type/build checks passed with no diagnostics;
@@ -38,7 +38,7 @@ transition before creating or distributing the permanent key.
 - [ ] Before advertising verified macOS hardware acceleration, run the default
       strict `macos/build.sh` probe on a real Apple Silicon Mac; hosted CI does
       not claim a VideoToolbox compression session.
-- [ ] Windows x64 and native ARM64 release workflow passes install and runtime smoke.
+- [x] Windows x64 and native ARM64 release workflow passes install and runtime smoke.
 - [x] Docker amd64 and native arm64 end-to-end workflow passes.
 - [x] Android physical smoke records a hardware encoder and publishes a playable
       result to `DCIM/8mb.local` on both MT6835 and SM8650 ARM64 devices.
