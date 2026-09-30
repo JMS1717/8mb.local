@@ -1,9 +1,9 @@
 # v143 approval packet — not published
 
-Proposed title: **v143: Android App, Windows ARM64, and More Ways to Compress**
+Proposed title: **v143: Android App and More Devices**
 
 Proposed tag: `v143`; application version: `143.0.0.0` (Android: `143.0.0`).
-The release body is [v143.md](v143.md). It leads with the Android app and
+The implementation candidate is `209b2de`. The release body is [v143.md](v143.md). It leads with the Android app and
 describes benefits and installation without implementation details.
 
 ## Changes to review
@@ -16,6 +16,8 @@ describes benefits and installation without implementation details.
   experimental, not as verified on real Mac hardware.
 - Frontend dependency security patches and a repeatable dependency-audit gate.
 - Android CI no longer asks for the removed legacy SDK `tools` package.
+- Android compatibility is explicit: Android 8–9 uses Save As/AAC; automatic
+  gallery saving and Opus audio require Android 10+.
 
 ## Proposed public downloads
 
