@@ -45,6 +45,9 @@ using the same upload key alone does not guarantee that.
 Run the **Build signed Android release** workflow against the reviewed tag or
 commit. It refuses partial/missing credentials, verifies both signatures, and
 uploads renamed APK/AAB artifacts with SHA-256 checksums.
+Before this workflow has reached the default branch, dispatch **Build native
+Android app** from the preparation branch with `signed_release=true` and the
+reviewed `release_ref`; it calls the same signing workflow without merging.
 It also rejects a debuggable public APK and runs instrumentation against the
 signed release variant on API 35, checking that the APK hash is unchanged.
 The private test APK is uploaded separately for physical ARM64 testing with

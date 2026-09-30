@@ -2,6 +2,15 @@ name: Build native Android app
 
 on:
   workflow_dispatch:
+    inputs:
+      signed_release:
+        description: 'Build and test a permanently signed release (requires repository signing secrets)'
+        type: boolean
+        default: false
+      release_ref:
+        description: 'Reviewed commit to build when signed_release is enabled'
+        type: string
+        default: 'main'
   pull_request:
     paths:
       - 'android/**'
@@ -12,7 +21,15 @@ permissions:
   contents: read
 
 jobs:
+  signed-release:
+    if: github.event_name == 'workflow_dispatch' && inputs.signed_release
+    uses: ./.github/workflows/android-release.yml
+    with:
+      release_ref: ${{ inputs.release_ref }}
+    secrets: inherit
+
   build:
+    if: github.event_name != 'workflow_dispatch' || !inputs.signed_release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +63,7 @@ jobs:
           if-no-files-found: error
 
   instrumented-smoke:
+    if: github.event_name != 'workflow_dispatch' || !inputs.signed_release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
