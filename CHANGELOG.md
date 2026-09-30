@@ -1,6 +1,6 @@
 # Changelog
 
-## [v143] - 2026-08-23
+## [v143] - Unreleased
 
 ### Native ARM and mobile platforms
 
@@ -19,8 +19,8 @@
   hardware encode from decode, and save finished videos to `DCIM/8mb.local` in
   the camera roll by default.
 - Matched the Android launcher artwork pixel-for-pixel to the installed desktop
-  icon, with transparent safe-area padding that preserves its rounded-square
-  silhouette under OEM launcher masks, and added an in-app Media3 preview with
+  icon, with a full-bleed adaptive gradient and the desktop white glyph under
+  OEM launcher masks, and added an in-app Media3 preview with
   playback controls before Share.
 - Added native Linux ARM64 Docker builds, Compose configuration, CI artifacts,
   and a guarded multi-architecture manifest publishing workflow.
@@ -36,11 +36,14 @@
   hardware-use telemetry for Windows ARM64 and Android.
 - Android's no-touch smoke now synthesizes its own media, runs it through the
   real foreground service using MediaStore content URIs, proves a hardware-only
-  H.264 encode into the camera roll, and validates desktop-default Opus audio
+  encode using the automatically selected codec into the camera roll, and validates desktop-default Opus audio
   extraction.
 
 ### Release safeguards
 
+- Added prominent Android installation guidance and plain-language release notes.
+- Updated devalue, brace-expansion, and postcss-selector-parser security patches.
+- Fixed Android CI setup after removal of the legacy SDK `tools` package.
 - Kept architecture-specific packaging and immutable ARM64 FFmpeg inputs.
 - Added native architecture CI jobs and preserved manual confirmation and
   credential requirements for image publishing.

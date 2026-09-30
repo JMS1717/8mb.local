@@ -1,6 +1,28 @@
-# 8mb.local – Self-Hosted GPU Video Compressor
+# 8mb.local – Video Compressor for Desktop, Android, and Docker
 
 8mb.local is a self-hosted, fire-and-forget video compressor. Drop a file, choose a target size (e.g., 8 MB, 25 MB, 50 MB, 100 MB), and let GPU-accelerated encoding produce compact outputs with AV1/HEVC/H.264. Supports **NVIDIA NVENC**, **Intel Quick Sync**, **Windows AMD AMF/Media Foundation**, **Apple VideoToolbox**, and **Linux VAAPI** (including AMD) with automatic **CPU fallback**. Native Windows x64/ARM64, Apple Silicon macOS, Android, and Linux Docker amd64/arm64 targets are included.
+
+## Android app
+
+**8mb.local also has a standalone Android app—no computer or server required.**
+Pick videos from Android's Photo Picker, choose a target size, and compress
+them on your phone or tablet. The app automatically chooses a working hardware
+encoder, saves finished videos to your camera roll, and lets you preview them
+before sharing. It includes batch compression, trimming, resolution and
+frame-rate controls, audio options, and recent history, with desktop-matched
+defaults and the same 8mb.local icon.
+
+Android 8.0 or newer is required. Available codecs depend on your device;
+support for playing a codec does not necessarily mean it can encode it.
+Android uses native phone controls rather than desktop-only encoder flags.
+
+**[Get the Android APK from GitHub Releases](https://github.com/JMS1717/8mb.local/releases)**
+and follow the [Android installation guide](android/README.md#install-the-android-app).
+Only APKs explicitly listed as Android release downloads are intended for
+installation; unsigned APKs and development artifacts are not releases.
+
+[Windows downloads](https://github.com/JMS1717/8mb.local/releases) ·
+[Apple Silicon build guide](macos/README.md) · [Docker setup](#installation)
 
 <p align="center">
   <a href="https://www.youtube.com/watch?v=1YDjDtZ21lc">
@@ -12,6 +34,7 @@
 
 ## Table of Contents
 
+- [Android app](#android-app)
 - [Features](#features)
 - [Screenshots](#screenshots)
 - [Projects](#projects)
@@ -462,7 +485,7 @@ docker stop 8mblocal && docker rm 8mblocal
 3. **Optional: open Advanced Options**
    - **Video Codec**: AV1 (best quality, RTX 40/50), HEVC (H.265), or H.264 (widest compatibility)
    - **Audio Codec**: Opus (default) or AAC — MP4 containers auto-switch to AAC
-   - **Speed/Quality**: NVENC presets P1 (fastest) through P7 (best quality), default P6
+   - **Speed/Quality**: NVENC presets P1 (fastest) through P7 (best quality), default P4 Balanced
    - **Container**: MP4 (most compatible) or MKV (best with Opus audio)
    - **Tune**: HQ (default), Low Latency, Ultra-Low Latency, or Lossless
    - **Resolution**: Set max width/height to downscale while preserving aspect ratio

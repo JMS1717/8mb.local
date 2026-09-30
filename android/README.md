@@ -4,6 +4,23 @@ The Android port is a standalone native Kotlin/Jetpack Compose app. It uses
 AndroidX Media3 Transformer and the platform MediaCodec stack; it does not
 embed Python, Docker, a WebView, or a bundled FFmpeg executable.
 
+## Install the Android app
+
+1. Open [GitHub Releases](https://github.com/JMS1717/8mb.local/releases) on your
+   phone or tablet and download the APK listed under Android.
+2. Open the downloaded APK. If Android asks, allow this browser or file manager
+   to install apps, then finish installing. You can turn that permission off
+   afterward.
+3. Open **8mb.local**, pick a video with Photo Picker, choose a target size, and
+   tap **Compress and save**. Finished videos appear in your gallery under
+   `DCIM/8mb.local`; you can preview them in the app before sharing.
+
+Requires Android 8.0 or newer. No account, server, or Internet connection is
+needed for compression. Hardware codec availability varies by phone or tablet.
+Download the APK, not the `.aab` bundle or an unsigned development artifact.
+Install updates over the existing app only when they use the same signing
+certificate. See [release signing](SIGNING.md) for maintainer instructions.
+
 ## Desktop workflow parity
 
 - Android Photo Picker for one video or an automatic multi-video batch

@@ -56,6 +56,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
         run: npm ci
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=moderate
       - name: Build frontend
         run: npm run build
       - name: Type-check Svelte frontend
