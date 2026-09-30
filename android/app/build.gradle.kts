@@ -19,6 +19,8 @@ if (!releaseSigningConfigured && releaseSigningValues.values.any { !it.isNullOrB
 android {
     namespace = "com.jms1717.eightmblocal"
     compileSdk = 36
+    // Test the real, non-debuggable release variant when explicitly requested by signing CI.
+    testBuildType = providers.gradleProperty("instrumentedBuildType").orElse("debug").get()
 
     defaultConfig {
         applicationId = "com.jms1717.eightmblocal"

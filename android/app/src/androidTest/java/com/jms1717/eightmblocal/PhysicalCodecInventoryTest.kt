@@ -65,5 +65,8 @@ class PhysicalCodecInventoryTest {
         context.openFileOutput("physical-codec-inventory.json", 0).use { output ->
             output.write(report.toString(2).toByteArray(Charsets.UTF_8))
         }
+        InstrumentationRegistry.getInstrumentation().sendStatus(0, android.os.Bundle().apply {
+            putString("eightmb_codec_inventory", report.toString())
+        })
     }
 }

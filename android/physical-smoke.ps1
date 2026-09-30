@@ -2,7 +2,11 @@
 param(
     [string]$Serial,
     [switch]$SkipBuild,
-    [string]$ReportPath = "$PSScriptRoot\physical-codec-report.json"
+    [string]$ReportPath = "$PSScriptRoot\physical-codec-report.json",
+    [ValidateSet('debug', 'release')][string]$BuildType = 'debug',
+    [string]$AppApk,
+    [string]$TestApk,
+    [string]$AdbPath
 )
 $ErrorActionPreference = 'Stop'
 $package = 'com.jms1717.eightmblocal'
@@ -14,7 +18,9 @@ $uiTestClass = "$package.MainActivityTest"
 $listingScreenshotTestClass = "$package.StoreListingScreenshotTest"
 
 $adbCommand = Get-Command adb -ErrorAction SilentlyContinue
-if ($null -eq $adbCommand) {
+if ($AdbPath) {
+    $adbPath = (Resolve-Path -LiteralPath $AdbPath).Path
+} elseif ($null -eq $adbCommand) {
     $adbCandidates = @(
         (Join-Path $env:LOCALAPPDATA 'Android\Sdk\platform-tools\adb.exe'),
         (Join-Path $env:TEMP 'android-sdk-8mblocal-20260823\platform-tools\adb.exe')
@@ -43,15 +49,18 @@ if ($sdk -lt 29) { throw "The automatic camera-roll proof requires Android 10/AP
 if (-not $SkipBuild) {
     Push-Location $PSScriptRoot
     try {
-        & .\gradlew.bat assembleDebug assembleDebugAndroidTest
+        $variant = (Get-Culture).TextInfo.ToTitleCase($BuildType)
+        & .\gradlew.bat "-PinstrumentedBuildType=$BuildType" "assemble$variant" "assemble${variant}AndroidTest"
         if ($LASTEXITCODE -ne 0) { throw "Android test build failed with exit code $LASTEXITCODE." }
     } finally {
         Pop-Location
     }
 }
 
-$appApk = Join-Path $PSScriptRoot 'app\build\outputs\apk\debug\app-debug.apk'
-$testApk = Join-Path $PSScriptRoot 'app\build\outputs\apk\androidTest\debug\app-debug-androidTest.apk'
+if (-not $AppApk) { $AppApk = Join-Path $PSScriptRoot "app\build\outputs\apk\$BuildType\app-$BuildType.apk" }
+if (-not $TestApk) { $TestApk = Join-Path $PSScriptRoot "app\build\outputs\apk\androidTest\$BuildType\app-$BuildType-androidTest.apk" }
+if (-not (Test-Path -LiteralPath $AppApk)) { throw "APK is missing: $AppApk" }
+$testedApkHash = (Get-FileHash -LiteralPath $AppApk -Algorithm SHA256).Hash.ToLowerInvariant()
 foreach ($apk in @($appApk, $testApk)) {
     if (-not (Test-Path -LiteralPath $apk -PathType Leaf)) { throw "APK is missing: $apk" }
     & $adbPath -s $Serial install -r $apk | Out-Host
@@ -71,25 +80,34 @@ if ($sdk -ge 33) {
 & $adbPath -s $Serial shell am force-stop $package | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not reset the app before the physical smoke test.' }
 
+$telemetry = @{}
 foreach ($class in @($uiTestClass, $inventoryTestClass, $audioTestClass, $testClass, $listingScreenshotTestClass)) {
     $instrumentation = & $adbPath -s $Serial shell am instrument -w -r -e class $class $runner 2>&1 | Out-String
     $instrumentation | Write-Host
-    if ($LASTEXITCODE -ne 0 -or $instrumentation -notmatch 'OK \(1 test\)') {
+    if ($LASTEXITCODE -ne 0 -or $instrumentation -notmatch 'OK \(1 test\)' -or
+        $instrumentation -match 'INSTRUMENTATION_STATUS_CODE: -[234]') {
         throw "Automated physical test failed: $class"
+    }
+    foreach ($name in @('eightmb_codec_report', 'eightmb_codec_inventory')) {
+        $match = [regex]::Match($instrumentation, "(?m)^INSTRUMENTATION_STATUS: ${name}=(\{[^\r\n]+\})")
+        if ($match.Success) { $telemetry[$name] = $match.Groups[1].Value }
     }
 }
 
-$report = & $adbPath -s $Serial exec-out run-as $package cat files/last-codec-report.json
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($report | Out-String))) {
+if (-not $telemetry['eightmb_codec_report']) {
     throw 'The automated test completed without a codec telemetry report.'
 }
-$inventory = & $adbPath -s $Serial exec-out run-as $package cat files/physical-codec-inventory.json
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($inventory | Out-String))) {
+if (-not $telemetry['eightmb_codec_inventory']) {
     throw 'The automated test completed without a working codec inventory.'
 }
-$json = ($report | Out-String) | ConvertFrom-Json
-$inventoryJson = ($inventory | Out-String) | ConvertFrom-Json
+$json = $telemetry['eightmb_codec_report'] | ConvertFrom-Json
+$inventoryJson = $telemetry['eightmb_codec_inventory'] | ConvertFrom-Json
 $json | Add-Member -NotePropertyName codec_inventory -NotePropertyValue $inventoryJson
+$json | Add-Member -NotePropertyName tested_apk_sha256 -NotePropertyValue $testedApkHash
+$json | Add-Member -NotePropertyName build_type -NotePropertyValue $BuildType
+if ((Get-FileHash -LiteralPath $AppApk -Algorithm SHA256).Hash.ToLowerInvariant() -ne $testedApkHash) {
+    throw 'The APK changed during testing.'
+}
 [IO.File]::WriteAllText(
     [IO.Path]::GetFullPath($ReportPath),
     ($json | ConvertTo-Json -Depth 12),

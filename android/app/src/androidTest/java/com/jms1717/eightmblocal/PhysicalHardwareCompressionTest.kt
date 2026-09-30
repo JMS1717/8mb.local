@@ -180,6 +180,10 @@ class PhysicalHardwareCompressionTest {
             val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull() ?: 0L
             assertTrue("Output MP4 has no playable duration", duration > 0)
+            // Test-only telemetry works on the non-debuggable release APK without run-as.
+            instrumentation.sendStatus(0, android.os.Bundle().apply {
+                putString("eightmb_codec_report", report.toString())
+            })
         } finally {
             retriever.release()
             input.delete()

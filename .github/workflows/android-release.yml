@@ -60,7 +60,7 @@ jobs:
 
       - name: Test and build signed release
         working-directory: android
-        run: gradle verifyReleaseSigning testDebugUnitTest lintDebug assembleRelease bundleRelease
+        run: gradle -PinstrumentedBuildType=release verifyReleaseSigning testReleaseUnitTest lintRelease assembleRelease bundleRelease assembleReleaseAndroidTest
 
       - name: Verify APK and bundle signatures
         shell: bash
@@ -68,8 +68,28 @@ jobs:
           apk='android/app/build/outputs/apk/release/app-release.apk'
           aab='android/app/build/outputs/bundle/release/app-release.aab'
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk" > "$RUNNER_TEMP/apk-badging.txt"
+          if grep -q 'application-debuggable' "$RUNNER_TEMP/apk-badging.txt"; then
+            echo 'Public release APK must not be debuggable.' >&2
+            exit 1
+          fi
+          sha256sum "$apk" > "$RUNNER_TEMP/tested-apk.sha256"
           jarsigner -verify -verbose -certs "$aab" | tee "$RUNNER_TEMP/aab-signature.txt"
           grep -q 'jar verified.' "$RUNNER_TEMP/aab-signature.txt"
+
+      - name: Enable KVM acceleration
+        run: sudo chmod 666 /dev/kvm
+
+      - name: Test the signed release on API 35
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          working-directory: android
+          script: gradle -PinstrumentedBuildType=release connectedReleaseAndroidTest
+
+      - name: Confirm tested APK is unchanged
+        run: sha256sum --check "$RUNNER_TEMP/tested-apk.sha256"
 
       - name: Stage signed artifacts and checksums
         shell: bash
@@ -86,3 +106,25 @@ jobs:
           path: dist/android-release/
           if-no-files-found: error
           retention-days: 14
+
+      # Private companion for physical-device testing; never a public app download.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 8mblocal-android-release-tests
+          path: android/app/build/outputs/apk/androidTest/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 8mblocal-android-signed-test-reports
+          path: |
+            android/app/build/reports/
+            android/app/build/outputs/androidTest-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove temporary private keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/8mblocal-upload.jks"
