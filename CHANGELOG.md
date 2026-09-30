@@ -44,6 +44,8 @@
 - Added prominent Android installation guidance and plain-language release notes.
 - Updated devalue, brace-expansion, and postcss-selector-parser security patches.
 - Fixed Android CI setup after removal of the legacy SDK `tools` package.
+- Refreshed expired Windows FFmpeg inputs and added checksum-verified release
+  mirrors so approved releases can retain their exact build dependencies.
 - Kept architecture-specific packaging and immutable ARM64 FFmpeg inputs.
 - Added native architecture CI jobs and preserved manual confirmation and
   credential requirements for image publishing.

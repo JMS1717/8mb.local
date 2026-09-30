@@ -127,6 +127,25 @@ function Invoke-Python {
     }
 }
 
+function Get-VerifiedFfmpegArchive {
+    param([string[]]$Uris, [string]$Archive, [string]$ExpectedSha256)
+    $downloaded = $false
+    foreach ($downloadUri in $Uris) {
+        try {
+            Invoke-WebRequest -Uri $downloadUri -OutFile $Archive
+            $downloaded = $true
+            break
+        } catch {
+            Write-Warning "FFmpeg archive unavailable at $downloadUri; trying the next pinned source."
+        }
+    }
+    if (-not $downloaded) { throw 'No pinned FFmpeg source was available.' }
+    $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $Archive).Hash.ToLowerInvariant()
+    if ($actualSha256 -ne $ExpectedSha256) {
+        throw "Downloaded FFmpeg SHA-256 '$actualSha256' does not match the pinned build hash."
+    }
+}
+
 function Ensure-FfmpegBundle {
     param([ValidateSet('x64', 'arm64')][string]$TargetArchitecture)
 
@@ -151,19 +170,18 @@ function Ensure-FfmpegBundle {
     }
 
     if ($TargetArchitecture -eq 'arm64') {
-        # Immutable BtbN native Windows ARM64 build. The digest is the value
-        # published with this exact GitHub release asset.
+        # Prefer our release mirror: BtbN expires dated autobuild assets.
+        # Both sources must match the same pinned archive digest.
         $archive = Join-Path $env:TEMP '8mblocal-ffmpeg-winarm64.zip'
         $extractDir = Join-Path $env:TEMP ('8mblocal-ffmpeg-arm64-' + [guid]::NewGuid().ToString('N'))
-        $uri = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-22-12-58/ffmpeg-n8.1.2-44-g7c533d0f86-winarm64-gpl-8.1.zip'
-        $expectedSha256 = 'f45017b076f601f3705258ebd246648a2a35ea2c77919b3b469122676ea0d7af'
+        $uris = @(
+            'https://github.com/JMS1717/8mb.local/releases/download/v143/8mblocal-ffmpeg-8.1.3-winarm64.zip',
+            'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n8.1.3-9-g29e619e767-winarm64-gpl-8.1.zip'
+        )
+        $expectedSha256 = '061a770557c30bbf8e0b6ca3810288a60f72b85088378b84be03277746f34f17'
         try {
             Write-Host 'Downloading the pinned native Windows ARM64 FFmpeg build...'
-            Invoke-WebRequest -Uri $uri -OutFile $archive
-            $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-            if ($actualSha256 -ne $expectedSha256) {
-                throw "Downloaded ARM64 FFmpeg SHA-256 '$actualSha256' does not match the pinned build hash."
-            }
+            Get-VerifiedFfmpegArchive -Uris $uris -Archive $archive -ExpectedSha256 $expectedSha256
             Expand-Archive -LiteralPath $archive -DestinationPath $extractDir -Force
             $sourceFfmpeg = Get-ChildItem -LiteralPath $extractDir -Filter 'ffmpeg.exe' -Recurse | Select-Object -First 1
             $sourceFfprobe = Get-ChildItem -LiteralPath $extractDir -Filter 'ffprobe.exe' -Recurse | Select-Object -First 1
@@ -187,19 +205,17 @@ function Ensure-FfmpegBundle {
         return [pscustomobject]@{ Ffmpeg = $ffmpegPath; Ffprobe = $ffprobePath }
     }
 
-    # Use the x64 artifact from the same immutable BtbN release as ARM64. This
-    # avoids a mutable "latest" URL and makes clean CI/local builds reproducible.
+    # The release mirror retains the exact input after BtbN expires its copy.
     $archive = Join-Path $env:TEMP '8mblocal-ffmpeg-win64.zip'
     $extractDir = Join-Path $env:TEMP ('8mblocal-ffmpeg-' + [guid]::NewGuid().ToString('N'))
     try {
         Write-Host 'Downloading the pinned native Windows x64 FFmpeg build...'
-        $uri = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-22-12-58/ffmpeg-n8.1.2-44-g7c533d0f86-win64-gpl-8.1.zip'
-        Invoke-WebRequest -Uri $uri -OutFile $archive
-        $expectedFfmpegSha256 = '1531179f3e90f1011cdb278ec34a17ed682e93a2fadda43be76163e6e70f1311'
-        $actualFfmpegSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
-        if ($actualFfmpegSha256 -ne $expectedFfmpegSha256) {
-            throw "Downloaded FFmpeg archive SHA-256 '$actualFfmpegSha256' does not match the pinned build hash."
-        }
+        $uris = @(
+            'https://github.com/JMS1717/8mb.local/releases/download/v143/8mblocal-ffmpeg-8.1.3-win64.zip',
+            'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n8.1.3-9-g29e619e767-win64-gpl-8.1.zip'
+        )
+        $expectedFfmpegSha256 = '7b801cdd3a1a0bb54ae6f572187e68b4ed54f52086cfee133fab2180bfb429fa'
+        Get-VerifiedFfmpegArchive -Uris $uris -Archive $archive -ExpectedSha256 $expectedFfmpegSha256
         Expand-Archive -LiteralPath $archive -DestinationPath $extractDir -Force
         $sourceFfmpeg = Get-ChildItem -LiteralPath $extractDir -Filter 'ffmpeg.exe' -Recurse | Select-Object -First 1
         $sourceFfprobe = Get-ChildItem -LiteralPath $extractDir -Filter 'ffprobe.exe' -Recurse | Select-Object -First 1

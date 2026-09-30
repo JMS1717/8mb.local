@@ -29,6 +29,14 @@ describes benefits and installation without implementation details.
 | `8mblocal_143.0.0.0_macos_arm64.dmg` | Apple Silicon (experimental) | Approve experimental/unnotarized distribution or omit until notarization and real-Mac validation |
 | `SHA256SUMS.txt` | Integrity checks | Recalculate against the exact final, renamed downloads |
 
+Also retain two developer-only build-input downloads:
+`8mblocal-ffmpeg-8.1.3-win64.zip` and `8mblocal-ffmpeg-8.1.3-winarm64.zip`.
+These are unchanged, SHA-256-pinned BtbN archives, not app installers. The
+Windows build prefers these release mirrors and uses the dated upstream
+archives only as a prepublication fallback. Upstream removes older autobuilds;
+publishing the mirrored inputs with the approved release prevents another
+expired-download failure. Include their hashes in the final checksum file.
+
 Do not attach unsigned Android APKs, debug APKs, AAB submission bundles, or
 unsigned Store-submission MSIX files as ordinary user downloads. Do not use
 old local EXEs without matching build provenance. CI artifacts are build
@@ -41,6 +49,11 @@ outputs, not automatically public release downloads.
 2. Resolve Android signing and backups, including compatibility with the APK
    already attached to v142. Verify the exact signed APK on a device; debug
    smoke alone is not proof that the public signed APK works.
+   The v142 APK was checked on September 30: it is validly **debug-signed**
+   and has the same certificate as the local debug build. A new permanent
+   signing key means current debug installs must be uninstalled first, which
+   removes app-local history/settings. Already-saved gallery media should be
+   preserved by Android, but app-local data cannot be promised to migrate.
 3. Approve unsigned Windows downloads and decide whether the experimental
    Mac download should be included. Publisher signing can be added separately.
 4. Review the final commit and final hashes after all builds pass. If source
