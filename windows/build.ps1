@@ -189,8 +189,11 @@ function Ensure-FfmpegBundle {
                 throw 'The ARM64 FFmpeg archive did not contain ffmpeg.exe and ffprobe.exe.'
             }
             $encoders = (& $sourceFfmpeg.FullName -hide_banner -encoders 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0) {
+                throw "Native ARM64 FFmpeg could not run (exit $LASTEXITCODE): $encoders"
+            }
             if ($encoders -notmatch '\blibsvtav1\b') {
-                throw 'The ARM64 FFmpeg archive does not contain libsvtav1.'
+                throw "The ARM64 FFmpeg archive does not contain libsvtav1. Encoder inventory: $encoders"
             }
             if ($encoders -notmatch '\bh264_mf\b') {
                 throw 'The ARM64 FFmpeg archive does not contain Media Foundation encoders.'
