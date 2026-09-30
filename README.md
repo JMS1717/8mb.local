@@ -7,7 +7,7 @@
 **8mb.local also has a standalone Android app—no computer or server required.**
 Pick videos from Android's Photo Picker, choose a target size, and compress
 them on your phone or tablet. The app automatically chooses a working hardware
-encoder, saves finished videos to your camera roll, and lets you preview them
+encoder, saves finished videos to your camera roll on Android 10+, and lets you preview them
 before sharing. It includes batch compression, trimming, resolution and
 frame-rate controls, audio options, and recent history, with desktop-matched
 defaults and the same 8mb.local icon.
@@ -15,6 +15,8 @@ defaults and the same 8mb.local icon.
 Android 8.0 or newer is required. Available codecs depend on your device;
 support for playing a codec does not necessarily mean it can encode it.
 Android uses native phone controls rather than desktop-only encoder flags.
+Android 8–9 uses Save As and AAC audio; automatic gallery saving and Opus audio
+require Android 10 or newer.
 
 **[Get the Android APK from GitHub Releases](https://github.com/JMS1717/8mb.local/releases)**
 and follow the [Android installation guide](android/README.md#install-the-android-app).

@@ -34,6 +34,10 @@ jobs:
         env:
           PYTHONPATH: .
         run: python -m unittest discover -s shared/tests -v
+      - name: Run repository release regressions
+        env:
+          PYTHONPATH: .
+        run: python -m pytest tests -q
       - name: Run local Celery adapter smoke test
         env:
           LOCAL_RUNTIME: "1"

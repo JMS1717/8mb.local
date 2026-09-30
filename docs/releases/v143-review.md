@@ -30,10 +30,13 @@ describes benefits and installation without implementation details.
 | `SHA256SUMS.txt` | Integrity checks | Recalculate against the exact final, renamed downloads |
 
 Also retain two developer-only build-input downloads:
-`8mblocal-ffmpeg-8.1.3-win64.zip` and `8mblocal-ffmpeg-8.1.3-winarm64.zip`.
-These are unchanged, SHA-256-pinned BtbN archives, not app installers. The
-Windows build prefers these release mirrors and uses the dated upstream
-archives only as a prepublication fallback. Upstream removes older autobuilds;
+`8mblocal-ffmpeg-8.1.3-win64.zip` and `8mblocal-ffmpeg-8.1.2-winarm64.zip`.
+These are SHA-256-pinned build inputs, not app installers. The x64 archive is
+unchanged from BtbN. ARM64 retains the exact, verified 8.1.2 binaries from our
+passing August CI build, with a license and provenance record; the newer
+upstream ARM64 executable crashes at startup and is not used. The Windows
+build prefers these release mirrors; CI can recover the ARM64 input from that
+pinned passing artifact until publication. Upstream removes older autobuilds;
 publishing the mirrored inputs with the approved release prevents another
 expired-download failure. Include their hashes in the final checksum file.
 

@@ -17,6 +17,8 @@ embed Python, Docker, a WebView, or a bundled FFmpeg executable.
 
 Requires Android 8.0 or newer. No account, server, or Internet connection is
 needed for compression. Hardware codec availability varies by phone or tablet.
+Automatic gallery saving and Opus audio require Android 10+. On Android 8–9,
+use the system Save As picker; AAC is the audio default.
 Download the APK, not the `.aab` bundle or an unsigned development artifact.
 Install updates over the existing app only when they use the same signing
 certificate. See [release signing](SIGNING.md) for maintainer instructions.

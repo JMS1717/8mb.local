@@ -175,10 +175,9 @@ function Ensure-FfmpegBundle {
         $archive = Join-Path $env:TEMP '8mblocal-ffmpeg-winarm64.zip'
         $extractDir = Join-Path $env:TEMP ('8mblocal-ffmpeg-arm64-' + [guid]::NewGuid().ToString('N'))
         $uris = @(
-            'https://github.com/JMS1717/8mb.local/releases/download/v143/8mblocal-ffmpeg-8.1.3-winarm64.zip',
-            'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n8.1.3-9-g29e619e767-winarm64-gpl-8.1.zip'
+            'https://github.com/JMS1717/8mb.local/releases/download/v143/8mblocal-ffmpeg-8.1.2-winarm64.zip'
         )
-        $expectedSha256 = '061a770557c30bbf8e0b6ca3810288a60f72b85088378b84be03277746f34f17'
+        $expectedSha256 = '3287f8a6f70abb7037a5acad8c2efb208382b6bc2e50bd913a17a9ff6dc3ce26'
         try {
             Write-Host 'Downloading the pinned native Windows ARM64 FFmpeg build...'
             Get-VerifiedFfmpegArchive -Uris $uris -Archive $archive -ExpectedSha256 $expectedSha256
